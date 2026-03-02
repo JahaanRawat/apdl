@@ -5,11 +5,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Conan paths
-if(EXISTS "${CMAKE_BINARY_DIR}/conan_paths.cmake")
-    include("${CMAKE_BINARY_DIR}/conan_paths.cmake")
-endif()
-
 find_package(Crow REQUIRED)
 find_package(hiredis REQUIRED)
 find_package(RapidJSON REQUIRED)
@@ -38,6 +33,7 @@ target_include_directories(config_service PRIVATE
 target_link_libraries(config_service PRIVATE
     Crow::Crow
     hiredis::hiredis
+    rapidjson
     spdlog::spdlog
     PostgreSQL::PostgreSQL
     pthread
@@ -70,6 +66,7 @@ target_include_directories(config_tests PRIVATE
 target_link_libraries(config_tests PRIVATE
     Crow::Crow
     hiredis::hiredis
+    rapidjson
     spdlog::spdlog
     PostgreSQL::PostgreSQL
     GTest::gtest
