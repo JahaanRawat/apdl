@@ -5,35 +5,65 @@
 ## Architecture
 
 ```
- Browser SDK                 Ingestion (C++)         Redis Streams       ClickHouse
-┌──────────────┐    POST    ┌──────────────┐       ┌─────────────┐     ┌──────────┐
-│  @apdl/sdk   │──────────▶│   Crow HTTP   │──────▶│ events:raw  │────▶│  events  │
-│  (TypeScript) │           │  + Auth/Rate  │       │  per-project│     │  tables  │
-└──────┬───────┘           └──────────────┘       └─────────────┘     └────┬─────┘
-       │                                                                    │
-       │  SSE     Config Service (C++)     PostgreSQL                       │
-       │         ┌──────────────────┐     ┌──────────┐                     │
-       ├────────▶│  Flags & Exps    │◀───▶│  flags   │      Query Service (Python)
-       │         │  CRUD + SSE      │     │  exps    │     ┌──────────────┐
-       │         └────────┬─────────┘     │  ui_cfgs │     │  FastAPI     │
-       │                  │               └──────────┘     │  funnels     │◀─┘
-       │            Redis Cache                            │  cohorts     │
-       │                                                   │  retention   │
-       │                                                   │  experiments │
-       │         Agents Service (Python)                   └──────┬───────┘
-       │        ┌───────────────────────┐                         │
-       │        │  LangGraph Supervisor │◀────────────────────────┘
-       │        │  ├─ Behavior Analysis │
-       │        │  ├─ Experiment Design │──▶ Auto-create flags & experiments
-       │        │  ├─ Personalization   │──▶ Auto-configure UI components
-       │        │  └─ Feature Proposals │
-       │        │  pgvector memory      │
-       │        │  Safety + Audit       │
-       │        └───────────────────────┘
-       │
-       ▼
-  UI Components
-  (banner, modal, toast, card, CTA)
+                        +---------------------+
+                        |     @apdl/sdk       |
+                        |    (TypeScript)     |
+                        +---+--------+--------+
+                            |        |
+              POST /v1/events   SSE /v1/stream
+                            |        |
+               +------------+        +-------------+
+               |                                    |
+               v                                    v
++-----------------------------+    +-----------------------------+
+|     Ingestion Service       |    |      Config Service         |
+|          (C++)              |    |          (C++)              |
+|                             |    |                             |
+|  Crow HTTP + Auth + Rate    |    |  Flags & Experiments CRUD   |
+|  Schema Validation          |    |  SSE Broadcaster            |
++-------------+---------------+    +------+----------+----------+
+              |                           |          |
+              v                           v          v
++-----------------------------+    +----------+ +----------+
+|       Redis Streams         |    |  Redis   | |PostgreSQL|
+|    events:raw:{project_id}  |    |  Cache   | | flags    |
++-------------+---------------+    +----------+ | exps     |
+              |                                  | ui_cfgs  |
+              v                                  | pgvector |
++-----------------------------+                  +-----+----+
+|    ClickHouse Writer        |                        |
+|        (Python)             |                        |
++-------------+---------------+                        |
+              |                                        |
+              v                                        |
++-----------------------------+                        |
+|        ClickHouse           |                        |
+|  events, sessions           |                        |
+|  experiments, mat. views    |                        |
++-------------+---------------+                        |
+              |                                        |
+              v                                        |
++-----------------------------+                        |
+|      Query Service          |                        |
+|     (Python / FastAPI)      |                        |
+|                             |                        |
+|  funnels, cohorts           |                        |
+|  retention, experiments     |                        |
++-------------+---------------+                        |
+              |                                        |
+              v                                        v
++-------------------------------------------------------+
+|              Agents Service                            |
+|          (Python / LangGraph)                          |
+|                                                        |
+|   Supervisor Graph                                     |
+|    +-- Behavior Analysis                               |
+|    +-- Experiment Design ---> auto-create flags        |
+|    +-- Personalization -----> auto-configure UI        |
+|    +-- Feature Proposals                               |
+|                                                        |
+|   pgvector memory  |  Safety + Audit  |  Rollback      |
++--------------------------------------------------------+
 ```
 
 ## Project Structure
@@ -81,8 +111,7 @@ apdl/
 │   └── clickhouse/          # Schemas + migrations (events, sessions, experiments, materialized views)
 │
 ├── infra/
-│   ├── docker/              # Docker Compose for local dev (Redis, ClickHouse, PostgreSQL + services)
-│   └── terraform/           # AWS infrastructure (EKS, ElastiCache, RDS, ClickHouse, monitoring)
+│   └── docker/              # Docker Compose (deps + full stack)
 │
 ├── .github/workflows/       # CI (lint + test) and Release (npm publish + Docker images)
 └── Makefile                 # Build, test, lint, migrate, and dev orchestration
@@ -100,7 +129,7 @@ apdl/
 | Analytics Store | ClickHouse (MergeTree, materialized views) |
 | Config Store | PostgreSQL 16 + pgvector |
 | Cache | Redis 7 |
-| Infrastructure | Terraform, AWS EKS, Docker |
+| Infrastructure | Docker, Docker Compose |
 | CI/CD | GitHub Actions |
 
 ## Getting Started
@@ -256,15 +285,28 @@ All agent actions go through a safety validator and are recorded in the audit lo
 
 ## Infrastructure
 
-Production deployment targets AWS:
+All services and dependencies run via Docker Compose:
 
-- **Compute**: EKS (Kubernetes) with auto-scaling node groups
-- **Event pipeline**: Redis Streams (ElastiCache) with Kafka migration path at scale
-- **Analytics**: ClickHouse on EC2 with EBS storage
-- **Config & Agent state**: PostgreSQL 16 (RDS) with pgvector
-- **Monitoring**: CloudWatch, Prometheus, Grafana via Terraform modules
+```bash
+# Dependencies only (Redis, ClickHouse, PostgreSQL)
+docker compose -f infra/docker/docker-compose.deps.yml up -d
 
-See `infra/terraform/` for the full IaC configuration.
+# Full stack (deps + all application services)
+docker compose -f infra/docker/docker-compose.yml up --build
+```
+
+| Container | Port | Description |
+|---|---|---|
+| `ingestion` | 8080 | Event ingestion (C++) |
+| `config` | 8081 | Feature flags & experiments (C++) |
+| `query` | 8082 | Analytics queries (Python) |
+| `agents` | 8083 | Autonomous AI agents (Python) |
+| `clickhouse-writer` | -- | Redis Streams to ClickHouse pipeline |
+| `redis` | 6379 | Event streams + cache |
+| `clickhouse` | 8123 / 9000 | Analytics store (HTTP / native) |
+| `postgres` | 5432 | Config store + pgvector (pgvector/pgvector:pg16) |
+
+See `infra/docker/` for the full configuration.
 
 ## License
 
