@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  sdk:
+    name: SDK Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/javascript/package-lock.json
+      - run: npm ci
+        working-directory: sdk/javascript
+      - run: npm run lint
+        working-directory: sdk/javascript
+      - run: npm test -- --coverage
+        working-directory: sdk/javascript
+      - run: npm run build
+        working-directory: sdk/javascript
+
+  query-service:
+    name: Query Service Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+        working-directory: services/query
+      - run: ruff check app/
+        working-directory: services/query
+      - run: python -m pytest -v --tb=short
+        working-directory: services/query
+
+  agents-service:
+    name: Agents Service Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+        working-directory: services/agents
+      - run: ruff check app/
+        working-directory: services/agents
+      - run: python -m pytest -v --tb=short
+        working-directory: services/agents
+
+  ingestion-service:
+    name: Ingestion Service Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Conan
+        run: pip install conan
+      - name: Install dependencies
+        working-directory: services/ingestion
+        run: |
+          mkdir -p build && cd build
+          conan install .. --build=missing
+      - name: Build
+        working-directory: services/ingestion/build
+        run: |
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake --build . -j$(nproc)
+      - name: Test
+        working-directory: services/ingestion/build
+        run: ctest --output-on-failure
+
+  config-service:
+    name: Config Service Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Conan
+        run: pip install conan
+      - name: Install dependencies
+        working-directory: services/config
+        run: |
+          mkdir -p build && cd build
+          conan install .. --build=missing
+      - name: Build
+        working-directory: services/config/build
+        run: |
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          cmake --build . -j$(nproc)
+      - name: Test
+        working-directory: services/config/build
+        run: ctest --output-on-failure

@@ -1,0 +1,132 @@
+version: "3.8"
+
+services:
+  # ─── Dependencies ────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.1
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    environment:
+      CLICKHOUSE_DB: apdl
+      CLICKHOUSE_USER: apdl
+      CLICKHOUSE_PASSWORD: apdl_dev
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: apdl
+      POSTGRES_USER: apdl
+      POSTGRES_PASSWORD: apdl_dev
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apdl"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── Application Services ───────────────────────────────
+  ingestion:
+    build:
+      context: ../../services/ingestion
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      REDIS_URL: redis://redis:6379
+      LOG_LEVEL: info
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  config:
+    build:
+      context: ../../services/config
+      dockerfile: Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      REDIS_URL: redis://redis:6379
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      LOG_LEVEL: info
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  query:
+    build:
+      context: ../../services/query
+      dockerfile: Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: apdl
+      CLICKHOUSE_PASSWORD: apdl_dev
+      CLICKHOUSE_DB: apdl
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  agents:
+    build:
+      context: ../../services/agents
+      dockerfile: Dockerfile
+    ports:
+      - "8083:8083"
+    environment:
+      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      REDIS_URL: redis://redis:6379
+      CLICKHOUSE_URL: http://clickhouse:8123
+      QUERY_SERVICE_URL: http://query:8082
+      CONFIG_SERVICE_URL: http://config:8081
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  clickhouse-writer:
+    build:
+      context: ../../pipeline/redis
+      dockerfile: Dockerfile
+    environment:
+      REDIS_URL: redis://redis:6379
+      CLICKHOUSE_URL: clickhouse://apdl:apdl_dev@clickhouse:9000/apdl
+    depends_on:
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  redis-data:
+  clickhouse-data:
+  postgres-data:

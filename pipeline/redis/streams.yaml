@@ -1,0 +1,13 @@
+streams:
+  events:raw:
+    # Partitioned by project: events:raw:{project_id}
+    maxlen: 1000000
+    consumer_group: clickhouse-writer
+    consumers_per_group: 4
+
+  config:updates:
+    maxlen: 10000
+
+  agent:tasks:
+    consumer_group: agent-workers
+    consumers_per_group: 2

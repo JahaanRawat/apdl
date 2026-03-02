@@ -1,0 +1,68 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# C++ build artifacts
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile.cmake
+*.o
+*.a
+*.so
+*.dylib
+
+# Conan
+conan/
+conanbuildinfo.*
+conaninfo.txt
+graph_info.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test coverage
+coverage/
+htmlcov/
+.coverage
+.nyc_output/
+
+# Docker
+*.log
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+
+# SDK build output
+sdk/javascript/dist/
+
+# ClickHouse data
+clickhouse-data/
+
+# Redis data
+redis-data/
+
+# Postgres data
+postgres-data/
