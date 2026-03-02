@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, TypedDict
+from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
@@ -43,10 +43,9 @@ class PersonalizationState(TypedDict, total=False):
 async def gather_segments(state: PersonalizationState) -> PersonalizationState:
     """Gather user segment data from event breakdowns."""
     project_id = state["project_id"]
-    segments: list[dict[str, Any]] = []
+    segments: list[dict] = []
 
     # Extract segment dimensions from insights
-    insights = state.get("insights", [])
     properties_to_check = {"plan", "platform", "country", "source", "device_type"}
 
     for prop in properties_to_check:

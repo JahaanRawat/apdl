@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Literal, TypedDict
+from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
@@ -24,7 +24,6 @@ from app.safety.validator import AgentAction, ActionType, SafetyValidator
 from app.tools.experiments import (
     create_experiment_config,
     get_active_experiments,
-    get_experiment_results,
 )
 from app.tools.flags import create_flag
 

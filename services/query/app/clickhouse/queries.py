@@ -67,8 +67,6 @@ def build_funnel_query(steps: list[str], window_seconds: int = 86400 * 7) -> str
     conditions = ", ".join(
         f"event_name = '{step}'" for step in steps
     )
-    num_steps = len(steps)
-
     query = f"""
 WITH funnel AS (
     SELECT

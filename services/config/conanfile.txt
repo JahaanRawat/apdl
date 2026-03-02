@@ -4,7 +4,7 @@ hiredis/1.2.0
 rapidjson/cci.20230929
 spdlog/1.14.1
 libpq/15.4
-gtest/1.15.2
+gtest/1.14.0
 
 [generators]
 cmake_find_package
