@@ -4,6 +4,7 @@
 #include <optional>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <queue>
 #include <libpq-fe.h>
 
@@ -93,6 +94,8 @@ public:
     bool deleteExperiment(const std::string& project_id, const std::string& key);
 
 private:
+    friend class PooledConnection;
+
     explicit PostgresStore(const std::string& connection_string, int pool_size);
 
     PGConnection* acquireConnection();
