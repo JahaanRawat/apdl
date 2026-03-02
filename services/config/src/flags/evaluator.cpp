@@ -6,6 +6,7 @@
 #include <functional>
 #include <cmath>
 #include <algorithm>
+#include <regex>
 
 namespace apdl {
 
