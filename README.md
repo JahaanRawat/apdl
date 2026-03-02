@@ -78,29 +78,39 @@ apdl/
 
 ### Prerequisites
 
+- [uv](https://docs.astral.sh/uv/) (Python package manager)
 - Docker & Docker Compose
 - Node.js 20+
 - Python 3.12+
-- CMake 3.20+ & Conan (for C++ services)
+- CMake 3.20+ & Conan 2.x (for C++ services, optional for local dev)
 
-### Local Development
-
-Start all infrastructure dependencies (Redis, ClickHouse, PostgreSQL):
+### Quick Start
 
 ```bash
-make dev
+make setup
 ```
 
-Or start everything including application services:
+This single command will:
+1. Create isolated Python virtualenvs (via `uv`) for each service
+2. Install all Python and Node.js dependencies
+3. Start infrastructure containers (Redis, ClickHouse, PostgreSQL)
+4. Run ClickHouse migrations
+5. Copy `.env.example` → `.env` (edit to add API keys)
+
+### Running Services
+
+After setup, start individual services locally with hot-reload:
+
+```bash
+make run-query      # Query Service    → http://localhost:8082
+make run-agents     # Agents Service   → http://localhost:8083
+make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
+```
+
+Or start everything via Docker (including C++ services):
 
 ```bash
 make dev-all
-```
-
-Install SDK and Python service dependencies:
-
-```bash
-make deps
 ```
 
 ### Build
@@ -112,15 +122,20 @@ make build-ingestion
 make build-config
 ```
 
-### Test
+### Test & Lint
 
 ```bash
 make test           # Run all tests
+make lint           # Run all linters
+
 make test-sdk       # SDK unit tests
 make test-query     # Query service tests
 make test-agents    # Agents service tests
 make test-ingestion # Ingestion service tests (GTest)
 make test-config    # Config service tests (GTest)
+
+make lint-query     # ruff check on query service
+make lint-agents    # ruff check on agents service
 ```
 
 ### Database Migrations
@@ -132,7 +147,7 @@ make migrate-clickhouse
 ### Teardown
 
 ```bash
-make dev-down
+make dev-down       # Stop all Docker containers
 ```
 
 ## SDK Usage
