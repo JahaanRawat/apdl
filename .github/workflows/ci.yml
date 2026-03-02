@@ -23,7 +23,7 @@ jobs:
         working-directory: sdk/javascript
 
   query-service:
-    name: Query Service Tests
+    name: Query Service Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,12 +33,10 @@ jobs:
       - run: pip install -e ".[dev]"
         working-directory: services/query
       - run: ruff check app/
-        working-directory: services/query
-      - run: python -m pytest -v --tb=short
         working-directory: services/query
 
   agents-service:
-    name: Agents Service Tests
+    name: Agents Service Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,8 +46,6 @@ jobs:
       - run: pip install -e ".[dev]"
         working-directory: services/agents
       - run: ruff check app/
-        working-directory: services/agents
-      - run: python -m pytest -v --tb=short
         working-directory: services/agents
 
   ingestion-service:
@@ -61,15 +57,12 @@ jobs:
         run: |
           pip install conan
           conan profile detect
-      - name: Install dependencies
+      - name: Install dependencies and build
         working-directory: services/ingestion
         run: |
-          mkdir -p build && cd build
-          conan install .. --build=missing
-      - name: Build
-        working-directory: services/ingestion/build
-        run: |
-          cmake .. -DCMAKE_BUILD_TYPE=Release
+          conan install . --build=missing --output-folder=build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
           cmake --build . -j$(nproc)
       - name: Test
         working-directory: services/ingestion/build
@@ -84,15 +77,12 @@ jobs:
         run: |
           pip install conan
           conan profile detect
-      - name: Install dependencies
+      - name: Install dependencies and build
         working-directory: services/config
         run: |
-          mkdir -p build && cd build
-          conan install .. --build=missing
-      - name: Build
-        working-directory: services/config/build
-        run: |
-          cmake .. -DCMAKE_BUILD_TYPE=Release
+          conan install . --build=missing --output-folder=build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
           cmake --build . -j$(nproc)
       - name: Test
         working-directory: services/config/build

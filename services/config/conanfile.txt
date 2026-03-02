@@ -7,5 +7,5 @@ libpq/15.4
 gtest/1.14.0
 
 [generators]
-cmake_find_package
-cmake_paths
+CMakeDeps
+CMakeToolchain
