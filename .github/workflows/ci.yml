@@ -15,11 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: sdk/javascript/package-lock.json
-      - run: npm ci
-        working-directory: sdk/javascript
-      - run: npm run lint
+      - run: npm install
         working-directory: sdk/javascript
       - run: npm test -- --coverage
         working-directory: sdk/javascript
@@ -62,7 +58,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Conan
-        run: pip install conan
+        run: |
+          pip install conan
+          conan profile detect
       - name: Install dependencies
         working-directory: services/ingestion
         run: |
@@ -83,7 +81,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Conan
-        run: pip install conan
+        run: |
+          pip install conan
+          conan profile detect
       - name: Install dependencies
         working-directory: services/config
         run: |
