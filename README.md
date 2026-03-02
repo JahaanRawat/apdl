@@ -4,67 +4,9 @@
 
 ## Architecture
 
-```
-                        +---------------------+
-                        |     @apdl/sdk       |
-                        |    (TypeScript)     |
-                        +---+--------+--------+
-                            |        |
-              POST /v1/events   SSE /v1/stream
-                            |        |
-               +------------+        +-------------+
-               |                                    |
-               v                                    v
-+-----------------------------+    +-----------------------------+
-|     Ingestion Service       |    |      Config Service         |
-|          (C++)              |    |          (C++)              |
-|                             |    |                             |
-|  Crow HTTP + Auth + Rate    |    |  Flags & Experiments CRUD   |
-|  Schema Validation          |    |  SSE Broadcaster            |
-+-------------+---------------+    +------+----------+----------+
-              |                           |          |
-              v                           v          v
-+-----------------------------+    +----------+ +----------+
-|       Redis Streams         |    |  Redis   | |PostgreSQL|
-|    events:raw:{project_id}  |    |  Cache   | | flags    |
-+-------------+---------------+    +----------+ | exps     |
-              |                                  | ui_cfgs  |
-              v                                  | pgvector |
-+-----------------------------+                  +-----+----+
-|    ClickHouse Writer        |                        |
-|        (Python)             |                        |
-+-------------+---------------+                        |
-              |                                        |
-              v                                        |
-+-----------------------------+                        |
-|        ClickHouse           |                        |
-|  events, sessions           |                        |
-|  experiments, mat. views    |                        |
-+-------------+---------------+                        |
-              |                                        |
-              v                                        |
-+-----------------------------+                        |
-|      Query Service          |                        |
-|     (Python / FastAPI)      |                        |
-|                             |                        |
-|  funnels, cohorts           |                        |
-|  retention, experiments     |                        |
-+-------------+---------------+                        |
-              |                                        |
-              v                                        v
-+-------------------------------------------------------+
-|              Agents Service                            |
-|          (Python / LangGraph)                          |
-|                                                        |
-|   Supervisor Graph                                     |
-|    +-- Behavior Analysis                               |
-|    +-- Experiment Design ---> auto-create flags        |
-|    +-- Personalization -----> auto-configure UI        |
-|    +-- Feature Proposals                               |
-|                                                        |
-|   pgvector memory  |  Safety + Audit  |  Rollback      |
-+--------------------------------------------------------+
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="APDL Architecture" width="900"/>
+</p>
 
 ## Project Structure
 
