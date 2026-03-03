@@ -70,13 +70,13 @@
   <!-- Ingestion Service -->
   <rect x="80" y="185" width="340" height="80" rx="10" fill="#fefce8" stroke="#eab308" stroke-width="2" filter="url(#shadow)"/>
   <text x="250" y="213" text-anchor="middle" font-size="14" font-weight="700" fill="#854d0e">Ingestion Service</text>
-  <text x="250" y="231" text-anchor="middle" font-size="11" fill="#a16207">C++17 / Crow  :8080</text>
+  <text x="250" y="231" text-anchor="middle" font-size="11" fill="#a16207">Python 3.12 / FastAPI  :8080</text>
   <text x="250" y="249" text-anchor="middle" font-size="10" fill="#ca8a04">Auth → Rate Limit → Schema Validation → Redis Producer</text>
 
   <!-- Config Service -->
   <rect x="680" y="185" width="340" height="80" rx="10" fill="#fefce8" stroke="#eab308" stroke-width="2" filter="url(#shadow)"/>
   <text x="850" y="213" text-anchor="middle" font-size="14" font-weight="700" fill="#854d0e">Config Service</text>
-  <text x="850" y="231" text-anchor="middle" font-size="11" fill="#a16207">C++17 / Crow  :8081</text>
+  <text x="850" y="231" text-anchor="middle" font-size="11" fill="#a16207">Python 3.12 / FastAPI  :8081</text>
   <text x="850" y="249" text-anchor="middle" font-size="10" fill="#ca8a04">Flags CRUD  |  Experiments  |  SSE Broadcaster</text>
 
   <!-- ════════════════════════════════════════════ -->
