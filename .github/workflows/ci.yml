@@ -49,41 +49,27 @@ jobs:
         working-directory: services/agents
 
   ingestion-service:
-    name: Ingestion Service Build
+    name: Ingestion Service Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Conan
-        run: |
-          pip install conan
-          conan profile detect
-      - name: Install dependencies and build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
         working-directory: services/ingestion
-        run: |
-          conan install . --build=missing --output-folder=build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
-          cmake --build . -j$(nproc)
-      - name: Test
-        working-directory: services/ingestion/build
-        run: ctest --output-on-failure
+      - run: ruff check app/
+        working-directory: services/ingestion
 
   config-service:
-    name: Config Service Build
+    name: Config Service Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install Conan
-        run: |
-          pip install conan
-          conan profile detect
-      - name: Install dependencies and build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
         working-directory: services/config
-        run: |
-          conan install . --build=missing --output-folder=build
-          cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake
-          cmake --build . -j$(nproc)
-      - name: Test
-        working-directory: services/config/build
-        run: ctest --output-on-failure
+      - run: ruff check app/
+        working-directory: services/config

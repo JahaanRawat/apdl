@@ -1,7 +1,6 @@
 .PHONY: all setup build test clean lint dev dev-all dev-down
 
 # ─── Top-Level ───────────────────────────────────────────────
-NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 all: build
 
@@ -11,6 +10,10 @@ setup:
 deps:
 	@echo "==> Installing SDK dependencies"
 	cd sdk/javascript && npm install
+	@echo "==> Setting up Ingestion service"
+	cd services/ingestion && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+	@echo "==> Setting up Config service"
+	cd services/config && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Query service"
 	cd services/query && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Agents service"
@@ -18,13 +21,13 @@ deps:
 	@echo "==> Setting up Pipeline"
 	cd pipeline/redis && uv venv --python 3.12 .venv && uv pip install -r requirements.txt --python .venv/bin/python
 
-build: build-sdk build-ingestion build-config
+build: build-sdk
 
-test: test-sdk test-query test-agents test-ingestion test-config
+test: test-sdk test-ingestion test-config test-query test-agents
 
-lint: lint-sdk lint-query lint-agents
+lint: lint-sdk lint-ingestion lint-config lint-query lint-agents
 
-clean: clean-sdk clean-ingestion clean-config
+clean: clean-sdk
 
 # ─── SDK ─────────────────────────────────────────────────────
 
@@ -40,33 +43,27 @@ clean-sdk:
 lint-sdk:
 	cd sdk/javascript && npm run lint
 
-# ─── Ingestion Service (C++) ─────────────────────────────────
-
-build-ingestion:
-	cd services/ingestion && mkdir -p build && cd build && \
-		conan install .. --build=missing --output-folder=. && \
-		cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake && \
-		cmake --build . -j$(NPROC)
+# ─── Ingestion Service (Python) ─────────────────────────────
 
 test-ingestion:
-	cd services/ingestion/build && ctest --output-on-failure
+	cd services/ingestion && .venv/bin/python -m pytest -v
 
-clean-ingestion:
-	rm -rf services/ingestion/build
+lint-ingestion:
+	cd services/ingestion && .venv/bin/ruff check app/
 
-# ─── Config Service (C++) ────────────────────────────────────
+run-ingestion:
+	cd services/ingestion && .venv/bin/uvicorn app.main:app --reload --port 8080
 
-build-config:
-	cd services/config && mkdir -p build && cd build && \
-		conan install .. --build=missing --output-folder=. && \
-		cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake && \
-		cmake --build . -j$(NPROC)
+# ─── Config Service (Python) ────────────────────────────────
 
 test-config:
-	cd services/config/build && ctest --output-on-failure
+	cd services/config && .venv/bin/python -m pytest -v
 
-clean-config:
-	rm -rf services/config/build
+lint-config:
+	cd services/config && .venv/bin/ruff check app/
+
+run-config:
+	cd services/config && .venv/bin/uvicorn app.main:app --reload --port 8081
 
 # ─── Query Service (Python) ──────────────────────────────────
 
@@ -107,7 +104,7 @@ migrate-clickhouse:
 dev:
 	docker compose -f infra/docker/docker-compose.deps.yml up -d
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
-	@echo "    Run services individually: make run-query, make run-agents, make run-pipeline"
+	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-pipeline"
 
 dev-all:
 	docker compose -f infra/docker/docker-compose.yml up --build
@@ -118,4 +115,4 @@ dev-down:
 
 # ─── CI ──────────────────────────────────────────────────────
 
-ci: lint-sdk test-sdk lint-query lint-agents
+ci: lint-sdk test-sdk lint-ingestion lint-config lint-query lint-agents

@@ -23,15 +23,13 @@ apdl/
 │   └── package.json
 │
 ├── services/
-│   ├── ingestion/           # C++ (Crow) — high-performance event ingestion
-│   │   ├── src/             # HTTP handlers, schema validation, Redis producer
-│   │   ├── include/         # Header files
-│   │   └── tests/           # GTest unit tests
+│   ├── ingestion/           # Python (FastAPI) — event ingestion + validation
+│   │   ├── app/             # HTTP handlers, schema validation, Redis Streams producer
+│   │   └── tests/           # pytest unit tests
 │   │
-│   ├── config/              # C++ (Crow) — feature flags & experiment configuration
-│   │   ├── src/             # Flags CRUD, SSE broadcaster, PostgreSQL store, Redis cache
-│   │   ├── include/
-│   │   └── tests/
+│   ├── config/              # Python (FastAPI) — feature flags & experiment configuration
+│   │   ├── app/             # Flags CRUD, SSE broadcaster, PostgreSQL store, Redis cache
+│   │   └── tests/           # pytest unit tests
 │   │
 │   ├── query/               # Python (FastAPI) — analytics query engine
 │   │   └── app/
@@ -64,7 +62,8 @@ apdl/
 | Layer | Technology |
 |---|---|
 | Client SDK | TypeScript, Rollup, Vitest |
-| Ingestion & Config Services | C++17, Crow, hiredis, RapidJSON, spdlog, Conan, CMake |
+| Ingestion Service | Python 3.12, FastAPI, Redis Streams, Pydantic |
+| Config Service | Python 3.12, FastAPI, asyncpg, Redis, SSE, Pydantic |
 | Query Service | Python 3.12, FastAPI, ClickHouse, SciPy, NumPy |
 | Agents Service | Python 3.12, FastAPI, LangGraph, LiteLLM, pgvector, asyncpg |
 | Event Pipeline | Redis Streams (Phase 1–2), Kafka (Phase 3+) |
@@ -82,7 +81,6 @@ apdl/
 - Docker & Docker Compose
 - Node.js 20+
 - Python 3.12+
-- CMake 3.20+ & Conan 2.x (for C++ services, optional for local dev)
 
 ### Quick Start
 
@@ -102,12 +100,14 @@ This single command will:
 After setup, start individual services locally with hot-reload:
 
 ```bash
-make run-query      # Query Service    → http://localhost:8082
-make run-agents     # Agents Service   → http://localhost:8083
+make run-ingestion  # Ingestion Service → http://localhost:8080
+make run-config     # Config Service    → http://localhost:8081
+make run-query      # Query Service     → http://localhost:8082
+make run-agents     # Agents Service    → http://localhost:8083
 make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
 ```
 
-Or start everything via Docker (including C++ services):
+Or start everything via Docker:
 
 ```bash
 make dev-all
@@ -116,10 +116,8 @@ make dev-all
 ### Build
 
 ```bash
-make build          # Build SDK + C++ services
+make build          # Build SDK
 make build-sdk      # SDK only
-make build-ingestion
-make build-config
 ```
 
 ### Test & Lint
@@ -129,11 +127,14 @@ make test           # Run all tests
 make lint           # Run all linters
 
 make test-sdk       # SDK unit tests
+make test-ingestion # Ingestion service tests (pytest)
+make test-config    # Config service tests (pytest)
 make test-query     # Query service tests
 make test-agents    # Agents service tests
-make test-ingestion # Ingestion service tests (GTest)
-make test-config    # Config service tests (GTest)
 
+make lint-sdk       # TypeScript type check
+make lint-ingestion # ruff check on ingestion service
+make lint-config    # ruff check on config service
 make lint-query     # ruff check on query service
 make lint-agents    # ruff check on agents service
 ```
@@ -254,10 +255,10 @@ docker compose -f infra/docker/docker-compose.yml up --build
 
 | Container | Port | Description |
 |---|---|---|
-| `ingestion` | 8080 | Event ingestion (C++) |
-| `config` | 8081 | Feature flags & experiments (C++) |
-| `query` | 8082 | Analytics queries (Python) |
-| `agents` | 8083 | Autonomous AI agents (Python) |
+| `ingestion` | 8080 | Event ingestion (Python/FastAPI) |
+| `config` | 8081 | Feature flags & experiments (Python/FastAPI) |
+| `query` | 8082 | Analytics queries (Python/FastAPI) |
+| `agents` | 8083 | Autonomous AI agents (Python/FastAPI) |
 | `clickhouse-writer` | -- | Redis Streams to ClickHouse pipeline |
 | `redis` | 6379 | Event streams + cache |
 | `clickhouse` | 8123 / 9000 | Analytics store (HTTP / native) |

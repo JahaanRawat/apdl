@@ -10,7 +10,7 @@ Autonomous Product Development Loop — a self-optimizing product analytics and 
 
 ```bash
 make setup              # Full local dev setup (uv venvs, npm install, Docker deps, migrations, .env)
-make build              # Build SDK + C++ services
+make build              # Build SDK
 make test               # Run all tests
 make lint               # Run all linters
 make dev                # Start Docker deps only (Redis, ClickHouse, PostgreSQL)
@@ -22,20 +22,22 @@ make migrate-clickhouse # Apply ClickHouse SQL migrations
 ### Running individual services (with hot-reload)
 
 ```bash
-make run-query          # Query Service → localhost:8082
-make run-agents         # Agents Service → localhost:8083
-make run-pipeline       # ClickHouse Writer (Redis Streams consumer)
+make run-ingestion  # Ingestion Service → localhost:8080
+make run-config     # Config Service    → localhost:8081
+make run-query      # Query Service     → localhost:8082
+make run-agents     # Agents Service    → localhost:8083
+make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
 ```
 
-### Per-service build/test/lint
+### Per-service test/lint
 
-| Service | Build | Test | Lint |
-|---------|-------|------|------|
-| SDK | `make build-sdk` | `make test-sdk` | `make lint-sdk` |
-| Ingestion (C++) | `make build-ingestion` | `make test-ingestion` | — |
-| Config (C++) | `make build-config` | `make test-config` | — |
-| Query (Python) | — | `make test-query` | `make lint-query` |
-| Agents (Python) | — | `make test-agents` | `make lint-agents` |
+| Service | Test | Lint |
+|---------|------|------|
+| SDK | `make test-sdk` | `make lint-sdk` |
+| Ingestion | `make test-ingestion` | `make lint-ingestion` |
+| Config | `make test-config` | `make lint-config` |
+| Query | `make test-query` | `make lint-query` |
+| Agents | `make test-agents` | `make lint-agents` |
 
 ### Running a single test
 
@@ -44,21 +46,19 @@ make run-pipeline       # ClickHouse Writer (Redis Streams consumer)
 cd sdk/javascript && npm test -- core/client.test.ts
 
 # Python services (pytest)
+cd services/ingestion && .venv/bin/python -m pytest tests/test_events.py -v
+cd services/config && .venv/bin/python -m pytest tests/test_evaluator.py -v
 cd services/query && .venv/bin/python -m pytest tests/test_funnels.py -v
 cd services/agents && .venv/bin/python -m pytest tests/test_supervisor.py::test_specific -v
-
-# C++ services (CTest) — must build first
-cd services/ingestion/build && ctest -R test_events_handler --output-on-failure -V
-cd services/config/build && ctest -R test_evaluator --output-on-failure -V
 ```
 
 ## Architecture Overview
 
-The system is a polyglot monorepo with four services, a data pipeline, and a client SDK:
+The system is a monorepo with four Python services, a data pipeline, and a client SDK:
 
 ```
-SDK (TypeScript) ──POST /v1/events──→ Ingestion (C++/Crow :8080) ──→ Redis Streams
-                 ←─SSE /v1/stream──── Config (C++/Crow :8081) ←───→ PostgreSQL + Redis Cache
+SDK (TypeScript) ──POST /v1/events──→ Ingestion (Python/FastAPI :8080) ──→ Redis Streams
+                 ←─SSE /v1/stream──── Config (Python/FastAPI :8081) ←───→ PostgreSQL + Redis Cache
                                               ↑
 Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
                                                       ↓
@@ -80,8 +80,8 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 ### Tech Stack by Service
 
 - **SDK** (`sdk/javascript/`): TypeScript, Rollup (ESM/CJS/IIFE), Vitest (jsdom)
-- **Ingestion** (`services/ingestion/`): C++17, Crow, hiredis, RapidJSON, spdlog — CMake + Conan, GTest
-- **Config** (`services/config/`): C++17, Crow, hiredis, libpq, RapidJSON, spdlog — CMake + Conan, GTest
+- **Ingestion** (`services/ingestion/`): Python 3.12, FastAPI, redis (hiredis), Pydantic — uv, pytest, ruff
+- **Config** (`services/config/`): Python 3.12, FastAPI, asyncpg, redis (hiredis), sse-starlette, Pydantic — uv, pytest, ruff
 - **Query** (`services/query/`): Python 3.12, FastAPI, clickhouse-driver/asynch, SciPy, NumPy — uv, pytest-asyncio, ruff
 - **Agents** (`services/agents/`): Python 3.12, FastAPI, LangGraph, LiteLLM, asyncpg, pgvector — uv, pytest-asyncio, ruff
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client, clickhouse-driver
@@ -101,12 +101,11 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 ## Tooling & Conventions
 
 - **Python package management:** `uv` (not pip directly). Each Python service has its own `.venv/` directory
-- **C++ build:** Conan 2.x for deps → CMake with `conan_toolchain.cmake`
 - **Python linting:** `ruff check app/` (default config, no pyproject.toml overrides)
 - **SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params)
 - **SDK test pattern:** `__tests__/**/*.test.ts`
 - **Python test pattern:** `tests/` directory in each service
-- **CI runs on push/PR to main:** SDK tests + build, Python linting (ruff), C++ build + test
+- **CI runs on push/PR to main:** SDK tests + build, Python linting (ruff) for all four services
 - **Releases:** git tags matching `v*` trigger npm publish + Docker image builds to GHCR
 
 ## Environment Variables
