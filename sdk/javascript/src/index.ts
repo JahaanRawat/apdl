@@ -49,4 +49,4 @@ export const APDL = {
   },
 };
 
-export default APDL;
+

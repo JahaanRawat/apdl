@@ -1,5 +1,4 @@
 import type {
-  FlagConfig,
   FlagResult,
   EvalContext,
   TargetingRule,

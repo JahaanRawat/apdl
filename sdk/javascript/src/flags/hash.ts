@@ -37,9 +37,10 @@ export function murmurhash3(key: string, seed: number = 0): number {
   let k1 = 0;
 
   switch (len & 3) {
+    // @ts-expect-error intentional fallthrough for MurmurHash3 tail processing
     case 3:
       k1 ^= (key.charCodeAt(tail + 2) & 0xff) << 16;
-    // falls through
+    // @ts-expect-error intentional fallthrough for MurmurHash3 tail processing
     case 2:
       k1 ^= (key.charCodeAt(tail + 1) & 0xff) << 8;
     // falls through

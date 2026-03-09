@@ -6,7 +6,6 @@ import logging
 import os
 from typing import Any, AsyncIterator
 
-from asynch import connect
 from asynch.connection import Connection
 from asynch.cursors import DictCursor
 
@@ -44,13 +43,14 @@ class ClickHouseClient:
         )
 
     async def _create_connection(self) -> Connection:
-        conn = await connect(
+        conn = Connection(
             host=self._host,
             port=self._port,
             user=self._user,
             password=self._password,
             database=self._database,
         )
+        await conn.connect()
         return conn
 
     async def _acquire(self) -> Connection:
