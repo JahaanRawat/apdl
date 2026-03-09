@@ -21,10 +21,8 @@ const REDACTED = '[REDACTED]';
  */
 export class Scrubber {
   private pipeline: ScrubFunction[] = [];
-  private builtInEnabled = true;
 
   constructor(enableBuiltIn = true) {
-    this.builtInEnabled = enableBuiltIn;
     if (enableBuiltIn) {
       this.pipeline.push(scrubEmails, scrubCreditCards, scrubSSNs);
     }
