@@ -1,4 +1,4 @@
-"""LangGraph tool definitions for server-driven UI configuration management."""
+"""Server-driven UI configuration management tools — wrappers around the Config Service API."""
 
 from __future__ import annotations
 
@@ -6,13 +6,11 @@ import os
 from typing import Any
 
 import httpx
-from langchain_core.tools import tool
 
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 15.0
 
 
-@tool
 async def create_ui_config(
     project_id: int,
     config_id: str,
@@ -61,7 +59,6 @@ async def create_ui_config(
         return resp.json()
 
 
-@tool
 async def update_ui_config(
     config_id: str,
     targeting: dict[str, Any] | None = None,
@@ -101,7 +98,6 @@ async def update_ui_config(
         return resp.json()
 
 
-@tool
 async def list_ui_configs(
     project_id: int,
     component: str | None = None,

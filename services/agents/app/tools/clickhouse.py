@@ -1,4 +1,4 @@
-"""LangGraph tool definitions for ClickHouse queries via the Query Service HTTP API."""
+"""ClickHouse query tools — thin wrappers around the Query Service HTTP API."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import os
 from typing import Any
 
 import httpx
-from langchain_core.tools import tool
 
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
 _TIMEOUT = 30.0
@@ -20,7 +19,6 @@ async def _post(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         return resp.json()
 
 
-@tool
 async def query_events(
     project_id: int,
     start_date: str,
@@ -45,7 +43,6 @@ async def query_events(
     return await _post("/v1/query/events/count", payload)
 
 
-@tool
 async def query_timeseries(
     project_id: int,
     event_name: str,
@@ -71,7 +68,6 @@ async def query_timeseries(
     })
 
 
-@tool
 async def query_funnel(
     project_id: int,
     steps: list[str],
@@ -97,7 +93,6 @@ async def query_funnel(
     })
 
 
-@tool
 async def query_retention(
     project_id: int,
     cohort_event: str,
@@ -126,7 +121,6 @@ async def query_retention(
     })
 
 
-@tool
 async def query_cohort(
     project_id: int,
     cohort_property: str,
@@ -152,7 +146,6 @@ async def query_cohort(
     })
 
 
-@tool
 async def query_breakdown(
     project_id: int,
     event_name: str,

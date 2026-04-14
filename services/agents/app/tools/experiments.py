@@ -1,4 +1,4 @@
-"""LangGraph tool definitions for experiment management."""
+"""Experiment management tools — wrappers around Config and Query Service APIs."""
 
 from __future__ import annotations
 
@@ -6,14 +6,12 @@ import os
 from typing import Any
 
 import httpx
-from langchain_core.tools import tool
 
 QUERY_SERVICE_URL = os.getenv("QUERY_SERVICE_URL", "http://localhost:8082")
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 30.0
 
 
-@tool
 async def get_active_experiments(project_id: int) -> list[dict[str, Any]]:
     """Get all active experiments for a project from the config service.
 
@@ -29,7 +27,6 @@ async def get_active_experiments(project_id: int) -> list[dict[str, Any]]:
         return resp.json()
 
 
-@tool
 async def create_experiment_config(
     project_id: int,
     experiment_id: str,
@@ -84,7 +81,6 @@ async def create_experiment_config(
         return resp.json()
 
 
-@tool
 async def calculate_sample_size(
     baseline_rate: float,
     minimum_detectable_effect: float,
@@ -116,7 +112,6 @@ async def calculate_sample_size(
     }
 
 
-@tool
 async def get_experiment_results(
     experiment_id: str,
     metric: str,

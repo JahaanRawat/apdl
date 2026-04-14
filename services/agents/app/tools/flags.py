@@ -1,4 +1,4 @@
-"""LangGraph tool definitions for feature flag management via the Config Service."""
+"""Feature flag management tools — wrappers around the Config Service API."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import os
 from typing import Any
 
 import httpx
-from langchain_core.tools import tool
 
 CONFIG_SERVICE_URL = os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081")
 _TIMEOUT = 15.0
@@ -33,7 +32,6 @@ async def _put(path: str, payload: dict[str, Any]) -> Any:
         return resp.json()
 
 
-@tool
 async def get_active_flags(project_id: int) -> list[dict[str, Any]]:
     """Get all active feature flags for a project.
 
@@ -46,7 +44,6 @@ async def get_active_flags(project_id: int) -> list[dict[str, Any]]:
     return await _get("/v1/flags", params={"project_id": project_id})
 
 
-@tool
 async def create_flag(
     project_id: int,
     key: str,
@@ -83,7 +80,6 @@ async def create_flag(
     return await _post("/v1/admin/flags", payload)
 
 
-@tool
 async def update_flag(
     key: str,
     enabled: bool | None = None,

@@ -1,4 +1,4 @@
-"""Experiment design agent — LangGraph implementation.
+"""Experiment design agent — graph-based workflow.
 
 Takes insights from behavior analysis, designs experiments, validates
 them through safety checks, and optionally deploys via feature flags
@@ -11,8 +11,7 @@ import json
 import logging
 from typing import TypedDict
 
-from langgraph.graph import END, StateGraph
-
+from app.graphs.runner import END, Graph
 from app.llm.router import chat_completion
 from app.llm.prompts.experiment import (
     EXPERIMENT_DESIGN_PROMPT,
@@ -55,7 +54,7 @@ async def get_context(state: ExperimentDesignState) -> ExperimentDesignState:
 
     # Fetch active experiments
     try:
-        active = await get_active_experiments.ainvoke({"project_id": project_id})
+        active = await get_active_experiments(project_id=project_id)
     except Exception as exc:
         logger.warning("Could not fetch active experiments: %s", exc)
         active = []
@@ -209,27 +208,27 @@ async def deploy(state: ExperimentDesignState) -> ExperimentDesignState:
         variants = experiment.get("variants", [])
         flag_key = flag_config.get("key", experiment.get("experiment_id", "unknown"))
 
-        await create_flag.ainvoke({
-            "project_id": project_id,
-            "key": flag_key,
-            "description": experiment.get("hypothesis", ""),
-            "variants": [{"key": v["key"], "weight": v.get("weight", 50)} for v in variants],
-            "enabled": True,
-        })
+        await create_flag(
+            project_id=project_id,
+            key=flag_key,
+            description=experiment.get("hypothesis", ""),
+            variants=[{"key": v["key"], "weight": v.get("weight", 50)} for v in variants],
+            enabled=True,
+        )
 
         # Create the experiment configuration
-        await create_experiment_config.ainvoke({
-            "project_id": project_id,
-            "experiment_id": experiment.get("experiment_id", flag_key),
-            "hypothesis": experiment.get("hypothesis", ""),
-            "variants": variants,
-            "primary_metric": experiment.get("primary_metric", {}),
-            "secondary_metrics": experiment.get("secondary_metrics"),
-            "guardrail_metrics": experiment.get("guardrail_metrics"),
-            "targeting": experiment.get("targeting"),
-            "estimated_duration_days": experiment.get("estimated_duration_days", 14),
-            "flag_key": flag_key,
-        })
+        await create_experiment_config(
+            project_id=project_id,
+            experiment_id=experiment.get("experiment_id", flag_key),
+            hypothesis=experiment.get("hypothesis", ""),
+            variants=variants,
+            primary_metric=experiment.get("primary_metric", {}),
+            secondary_metrics=experiment.get("secondary_metrics"),
+            guardrail_metrics=experiment.get("guardrail_metrics"),
+            targeting=experiment.get("targeting"),
+            estimated_duration_days=experiment.get("estimated_duration_days", 14),
+            flag_key=flag_key,
+        )
 
         state["deployed"] = True
         logger.info("Experiment %s deployed successfully", experiment.get("experiment_id"))
@@ -274,12 +273,12 @@ def route_after_approval(state: ExperimentDesignState) -> str:
 
 
 # --------------------------------------------------------------------------
-# Graph compilation
+# Graph construction
 # --------------------------------------------------------------------------
 
-def build_experiment_design_graph() -> StateGraph:
-    """Compile the experiment design LangGraph."""
-    graph = StateGraph(ExperimentDesignState)
+def build_experiment_design_graph() -> Graph:
+    """Build the experiment design graph."""
+    graph = Graph()
 
     graph.add_node("get_context", get_context)
     graph.add_node("design", design)
@@ -308,4 +307,4 @@ def build_experiment_design_graph() -> StateGraph:
     return graph
 
 
-experiment_design_graph = build_experiment_design_graph().compile()
+experiment_design_graph = build_experiment_design_graph()

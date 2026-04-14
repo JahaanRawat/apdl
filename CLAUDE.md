@@ -64,7 +64,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
                                                       ↓
                                               Query Service (Python/FastAPI :8082)
                                                       ↓
-                                              Agents Service (Python/FastAPI+LangGraph :8083)
+                                              Agents Service (Python/FastAPI :8083)
                                               ↕ PostgreSQL (pgvector) for memory
 ```
 
@@ -75,7 +75,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 3. **Flag distribution:** Config Service stores flags/experiments in PostgreSQL, caches in Redis, pushes updates via SSE to SDK
 4. **Flag evaluation:** SDK evaluates flags client-side using MurmurHash3 bucketing (no server round-trip for evaluation)
 5. **Analytics:** Query Service queries ClickHouse for funnels, cohorts, retention, experiment stats (frequentist/Bayesian/sequential)
-6. **Autonomous agents:** LangGraph state machines orchestrate LLM-driven workflows — behavior analysis, experiment design, personalization, feature proposals. Actions pass through safety validation with audit logging and rollback support
+6. **Autonomous agents:** Lightweight graph runner orchestrates LLM-driven workflows — behavior analysis, experiment design, personalization, feature proposals. Actions pass through safety validation with audit logging and rollback support
 
 ### Tech Stack by Service
 
@@ -83,7 +83,7 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
 - **Ingestion** (`services/ingestion/`): Python 3.12, FastAPI, redis (hiredis), Pydantic — uv, pytest, ruff
 - **Config** (`services/config/`): Python 3.12, FastAPI, asyncpg, redis (hiredis), sse-starlette, Pydantic — uv, pytest, ruff
 - **Query** (`services/query/`): Python 3.12, FastAPI, clickhouse-driver/asynch, SciPy, NumPy — uv, pytest-asyncio, ruff
-- **Agents** (`services/agents/`): Python 3.12, FastAPI, LangGraph, LiteLLM, asyncpg, pgvector — uv, pytest-asyncio, ruff
+- **Agents** (`services/agents/`): Python 3.12, FastAPI, openai, anthropic, google-genai, asyncpg, pgvector — uv, pytest-asyncio, ruff
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client, clickhouse-driver
 
 ### Key Ports
@@ -118,4 +118,4 @@ POSTGRES_URL=postgresql://apdl:apdl_dev@localhost:5432/apdl
 CLICKHOUSE_URL=http://localhost:8123 (HTTP) / clickhouse://apdl:apdl_dev@localhost:9000/apdl (native)
 ```
 
-Agents service requires `ANTHROPIC_API_KEY` and/or `OPENAI_API_KEY` for LLM access.
+Agents service requires at least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, or `LOCAL_LLM_URL` for LLM access.

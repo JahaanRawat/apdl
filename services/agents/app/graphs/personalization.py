@@ -1,4 +1,4 @@
-"""Personalization agent — LangGraph implementation.
+"""Personalization agent — graph-based workflow.
 
 Analyses user segments from behavior insights and generates server-driven
 UI configurations to personalise the user experience.
@@ -10,8 +10,7 @@ import json
 import logging
 from typing import TypedDict
 
-from langgraph.graph import END, StateGraph
-
+from app.graphs.runner import END, Graph
 from app.llm.router import chat_completion
 from app.llm.prompts.personalize import PERSONALIZATION_PROMPT, PERSONALIZATION_SYSTEM
 from app.memory.pgvector_store import PgVectorStore
@@ -53,14 +52,14 @@ async def gather_segments(state: PersonalizationState) -> PersonalizationState:
             from datetime import date, timedelta
             end = date.today()
             start = end - timedelta(days=7)
-            result = await query_breakdown.ainvoke({
-                "project_id": project_id,
-                "event_name": "page_view",
-                "property_name": prop,
-                "start_date": start.isoformat(),
-                "end_date": end.isoformat(),
-                "limit": 10,
-            })
+            result = await query_breakdown(
+                project_id=project_id,
+                event_name="page_view",
+                property_name=prop,
+                start_date=start.isoformat(),
+                end_date=end.isoformat(),
+                limit=10,
+            )
             if isinstance(result, dict) and result.get("results"):
                 segments.append({"property": prop, "breakdown": result["results"]})
         except Exception as exc:
@@ -68,7 +67,7 @@ async def gather_segments(state: PersonalizationState) -> PersonalizationState:
 
     # Also fetch existing UI configs to avoid duplication
     try:
-        existing = await list_ui_configs.ainvoke({"project_id": project_id})
+        existing = await list_ui_configs(project_id=project_id)
         state["existing_configs"] = existing if isinstance(existing, list) else []
     except Exception:
         state["existing_configs"] = []
@@ -163,15 +162,15 @@ async def deploy_configs(state: PersonalizationState) -> PersonalizationState:
             continue
 
         try:
-            await create_ui_config.ainvoke({
-                "project_id": project_id,
-                "config_id": config.get("config_id", f"ui_auto_{deployed}"),
-                "component": config.get("component", "feature_card"),
-                "targeting": config.get("targeting", {}),
-                "layout": config.get("layout", {"type": "default", "children": []}),
-                "content": config.get("content", {}),
-                "priority": config.get("priority", 10),
-            })
+            await create_ui_config(
+                project_id=project_id,
+                config_id=config.get("config_id", f"ui_auto_{deployed}"),
+                component=config.get("component", "feature_card"),
+                targeting=config.get("targeting", {}),
+                layout=config.get("layout", {"type": "default", "children": []}),
+                content=config.get("content", {}),
+                priority=config.get("priority", 10),
+            )
             deployed += 1
         except Exception as exc:
             logger.error("Failed to deploy UI config: %s", exc)
@@ -204,12 +203,12 @@ async def store_results(state: PersonalizationState) -> PersonalizationState:
 
 
 # --------------------------------------------------------------------------
-# Graph compilation
+# Graph construction
 # --------------------------------------------------------------------------
 
-def build_personalization_graph() -> StateGraph:
-    """Compile the personalization LangGraph."""
-    graph = StateGraph(PersonalizationState)
+def build_personalization_graph() -> Graph:
+    """Build the personalization graph."""
+    graph = Graph()
 
     graph.add_node("gather_segments", gather_segments)
     graph.add_node("retrieve_context", retrieve_context)
@@ -227,4 +226,4 @@ def build_personalization_graph() -> StateGraph:
     return graph
 
 
-personalization_graph = build_personalization_graph().compile()
+personalization_graph = build_personalization_graph()

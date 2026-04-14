@@ -37,9 +37,9 @@ apdl/
 │   │       ├── routers/     # Funnels, cohorts, retention, experiments
 │   │       └── models/      # Pydantic schemas, statistical analysis (freq/bayesian/sequential)
 │   │
-│   └── agents/              # Python (FastAPI + LangGraph) — autonomous AI agents
+│   └── agents/              # Python (FastAPI) — autonomous AI agents
 │       └── app/
-│           ├── graphs/      # LangGraph workflows (supervisor, behavior, experiments, etc.)
+│           ├── graphs/      # Agent workflows (supervisor, behavior, experiments, etc.)
 │           ├── llm/         # LLM router + prompt templates
 │           ├── memory/      # pgvector-backed agent memory
 │           ├── tools/       # Agent tools (ClickHouse queries, flag/experiment CRUD, UI config)
@@ -65,7 +65,7 @@ apdl/
 | Ingestion Service | Python 3.12, FastAPI, Redis Streams, Pydantic |
 | Config Service | Python 3.12, FastAPI, asyncpg, Redis, SSE, Pydantic |
 | Query Service | Python 3.12, FastAPI, ClickHouse, SciPy, NumPy |
-| Agents Service | Python 3.12, FastAPI, LangGraph, LiteLLM, pgvector, asyncpg |
+| Agents Service | Python 3.12, FastAPI, OpenAI SDK, Anthropic SDK, Google GenAI SDK, pgvector, asyncpg |
 | Event Pipeline | Redis Streams (Phase 1–2), Kafka (Phase 3+) |
 | Analytics Store | ClickHouse (MergeTree, materialized views) |
 | Config Store | PostgreSQL 16 + pgvector |
@@ -187,7 +187,7 @@ apdl.identify('user-42', {
 
 ## Agents
 
-The agents service runs autonomous analysis workflows powered by LLM reasoning (via LiteLLM) and LangGraph state machines.
+The agents service runs autonomous analysis workflows powered by LLM reasoning (via OpenAI, Anthropic, Google, and local model SDKs).
 
 **Agent graphs:**
 - **Behavior Analysis** — queries ClickHouse to identify trends, anomalies, and conversion patterns

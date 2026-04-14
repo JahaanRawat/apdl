@@ -1,4 +1,4 @@
-"""Feature proposal agent — LangGraph implementation.
+"""Feature proposal agent — graph-based workflow.
 
 Analyses experiment results and behavior patterns to propose concrete
 new features with implementation specs. Always requires human approval,
@@ -11,8 +11,7 @@ import json
 import logging
 from typing import Any, TypedDict
 
-from langgraph.graph import END, StateGraph
-
+from app.graphs.runner import END, Graph
 from app.llm.router import chat_completion
 from app.llm.prompts.feature import FEATURE_PROPOSAL_PROMPT, FEATURE_PROPOSAL_SYSTEM
 from app.memory.pgvector_store import PgVectorStore
@@ -43,7 +42,7 @@ async def gather_experiment_data(state: FeatureProposalState) -> FeatureProposal
     project_id = state["project_id"]
 
     try:
-        active = await get_active_experiments.ainvoke({"project_id": project_id})
+        active = await get_active_experiments(project_id=project_id)
         state["active_experiments"] = active if isinstance(active, list) else []
     except Exception as exc:
         logger.warning("Could not fetch active experiments: %s", exc)
@@ -56,11 +55,11 @@ async def gather_experiment_data(state: FeatureProposalState) -> FeatureProposal
         metric = exp.get("primary_metric", {}).get("event", "")
         if exp_id and metric:
             try:
-                result = await get_experiment_results.ainvoke({
-                    "experiment_id": exp_id,
-                    "metric": metric,
-                    "project_id": project_id,
-                })
+                result = await get_experiment_results(
+                    experiment_id=exp_id,
+                    metric=metric,
+                    project_id=project_id,
+                )
                 results.append(result)
             except Exception as exc:
                 logger.debug("Could not fetch results for %s: %s", exp_id, exc)
@@ -170,12 +169,12 @@ def route_after_approval(state: FeatureProposalState) -> str:
 
 
 # --------------------------------------------------------------------------
-# Graph compilation
+# Graph construction
 # --------------------------------------------------------------------------
 
-def build_feature_proposal_graph() -> StateGraph:
-    """Compile the feature proposal LangGraph."""
-    graph = StateGraph(FeatureProposalState)
+def build_feature_proposal_graph() -> Graph:
+    """Build the feature proposal graph."""
+    graph = Graph()
 
     graph.add_node("gather_experiment_data", gather_experiment_data)
     graph.add_node("retrieve_context", retrieve_context)
@@ -199,4 +198,4 @@ def build_feature_proposal_graph() -> StateGraph:
     return graph
 
 
-feature_proposal_graph = build_feature_proposal_graph().compile()
+feature_proposal_graph = build_feature_proposal_graph()

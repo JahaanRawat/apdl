@@ -1,4 +1,4 @@
-"""Behavior analysis agent — LangGraph implementation.
+"""Behavior analysis agent — graph-based workflow.
 
 Analyses user behavior data via ClickHouse queries, synthesises insights,
 and stores them in the vector memory for downstream agents.
@@ -11,8 +11,7 @@ import logging
 from datetime import date, timedelta
 from typing import Any, TypedDict
 
-from langgraph.graph import END, StateGraph
-
+from app.graphs.runner import END, Graph
 from app.llm.router import chat_completion
 from app.llm.prompts.analysis import (
     ANALYSIS_PLAN_PROMPT,
@@ -115,44 +114,44 @@ async def run_queries(state: AnalysisState) -> AnalysisState:
         query_type = q.get("type", "event_count")
         try:
             if query_type == "event_count":
-                result = await query_events.ainvoke({
-                    "project_id": project_id,
-                    "start_date": start_str,
-                    "end_date": end_str,
-                    "event_names": q.get("event_names"),
-                })
+                result = await query_events(
+                    project_id=project_id,
+                    start_date=start_str,
+                    end_date=end_str,
+                    event_names=q.get("event_names"),
+                )
             elif query_type == "timeseries":
-                result = await query_timeseries.ainvoke({
-                    "project_id": project_id,
-                    "event_name": q.get("event_name", "page_view"),
-                    "start_date": start_str,
-                    "end_date": end_str,
-                    "interval": q.get("interval", "1 DAY"),
-                })
+                result = await query_timeseries(
+                    project_id=project_id,
+                    event_name=q.get("event_name", "page_view"),
+                    start_date=start_str,
+                    end_date=end_str,
+                    interval=q.get("interval", "1 DAY"),
+                )
             elif query_type == "funnel":
-                result = await query_funnel.ainvoke({
-                    "project_id": project_id,
-                    "steps": q.get("steps", []),
-                    "start_date": start_str,
-                    "end_date": end_str,
-                })
+                result = await query_funnel(
+                    project_id=project_id,
+                    steps=q.get("steps", []),
+                    start_date=start_str,
+                    end_date=end_str,
+                )
             elif query_type == "retention":
-                result = await query_retention.ainvoke({
-                    "project_id": project_id,
-                    "cohort_event": q.get("cohort_event", "signup"),
-                    "return_event": q.get("return_event", "page_view"),
-                    "start_date": start_str,
-                    "end_date": end_str,
-                    "period": q.get("period", "day"),
-                })
+                result = await query_retention(
+                    project_id=project_id,
+                    cohort_event=q.get("cohort_event", "signup"),
+                    return_event=q.get("return_event", "page_view"),
+                    start_date=start_str,
+                    end_date=end_str,
+                    period=q.get("period", "day"),
+                )
             elif query_type == "cohort":
-                result = await query_cohort.ainvoke({
-                    "project_id": project_id,
-                    "cohort_property": q.get("cohort_property", "plan"),
-                    "metric_event": q.get("metric_event", "page_view"),
-                    "start_date": start_str,
-                    "end_date": end_str,
-                })
+                result = await query_cohort(
+                    project_id=project_id,
+                    cohort_property=q.get("cohort_property", "plan"),
+                    metric_event=q.get("metric_event", "page_view"),
+                    start_date=start_str,
+                    end_date=end_str,
+                )
             else:
                 result = {"error": f"Unknown query type: {query_type}"}
 
@@ -238,12 +237,12 @@ def should_continue(state: AnalysisState) -> str:
 
 
 # --------------------------------------------------------------------------
-# Graph compilation
+# Graph construction
 # --------------------------------------------------------------------------
 
-def build_behavior_analysis_graph() -> StateGraph:
-    """Compile the behavior analysis LangGraph."""
-    graph = StateGraph(AnalysisState)
+def build_behavior_analysis_graph() -> Graph:
+    """Build the behavior analysis graph."""
+    graph = Graph()
 
     graph.add_node("retrieve_context", retrieve_context)
     graph.add_node("plan_analysis", plan_analysis)
@@ -267,4 +266,4 @@ def build_behavior_analysis_graph() -> StateGraph:
     return graph
 
 
-behavior_analysis_graph = build_behavior_analysis_graph().compile()
+behavior_analysis_graph = build_behavior_analysis_graph()
