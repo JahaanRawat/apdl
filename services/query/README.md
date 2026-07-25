@@ -57,7 +57,16 @@ Every value-bearing selector is strict about the property's JSON scalar type.
 Strings, numbers, and booleans are compared only with filters of the same
 canonical type; wrong-type values never satisfy a selector, including `neq`
 and `not_in`. Integer and floating-point JSON values share the numeric filter
-type.
+type. Integer filter values must be in the inclusive
+`-9007199254740991`–`9007199254740991` range, where conversion to the
+ClickHouse floating-point extractor remains exact. Stored `Int64` values outside
+that range and all stored `UInt64` values never satisfy numeric selectors,
+including `neq` and `not_in`.
+
+`exists` means the property key is present, regardless of its value. An
+explicit JSON `null` therefore satisfies `exists`, does not satisfy
+`not_exists`, and never satisfies any value-bearing typed selector. There is no
+equality-to-null selector; JSON null has presence-only semantics.
 
 ## Typed property breakdowns
 
@@ -132,9 +141,11 @@ intervals use simultaneous Newcombe/Wilson bounds. Running, stopped,
 underpowered, identity-conflicted, unknown-variant, pre-horizon, and
 pre-settlement results are strict `non_final` responses with no comparisons.
 Unknown assigned variants use the machine-readable reason
-`unknown_variant_exposures`. A completed experiment whose horizon, settlement
-hold, and arm targets have elapsed returns a `decision_snapshot`, never a
-winner verdict.
+`unknown_variant_exposures`. When unknown variants and identity-alias
+conflicts are both present, the unknown-variant reason takes precedence while
+both counters remain in the response. A completed experiment whose horizon,
+settlement hold, and arm targets have elapsed returns a `decision_snapshot`,
+never a winner verdict.
 
 Completed experiments use an immutable, token-idempotent Redis stream boundary
 plus PostgreSQL's contiguous processed-through watermark before freezing a
@@ -145,6 +156,9 @@ diagnostics, while degraded or unverifiable provenance uses its distinct
 non-final reason. Every response still reports
 `deployment_readiness: not_assessed`; statistical significance is evidence,
 not authorization or a rollout recommendation.
+The completeness decision, terminal failure states, and supported operator
+response are documented in
+[Experiment finality and delivery recovery](../../docs/experiment-finality-and-delivery-recovery.md).
 Config timestamps are converted to explicit UTC epoch-millisecond boundaries
 before querying ClickHouse's `DateTime64(3)` columns, preserving the declared
 half-open `[start, end)` window across offsets and fractional seconds.
@@ -164,7 +178,7 @@ OSS developer preview.
 | `CLICKHOUSE_DB` | `apdl` | Database name |
 | `CLICKHOUSE_POOL_SIZE` | `10` | Connection pool size |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Authoritative experiment metadata service |
-| `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Hashed credential registry |
+| `POSTGRES_URL` | `postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl` | Hashed credential registry through the non-owner runtime role |
 | `QUERY_TIMEOUT_SECONDS` | `10` | Wall-clock and ClickHouse execution limit (1–30s) |
 | `QUERY_MAX_CONCURRENT_PER_PROJECT` | `2` | Fail-fast active-query limit per project (1–10) |
 | `QUERY_MAX_ROWS_TO_READ` | `5000000` | ClickHouse rows-read limit |

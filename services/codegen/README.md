@@ -65,12 +65,15 @@ active operator-verified grant can authorize GitHub access.
 | GET | `/v1/connections/{project_id}/tenant-policy` | Read the strict tenant-owned Codegen preferences |
 | PUT | `/v1/connections/{project_id}/tenant-policy` | Replace tenant preferences (tightening only) |
 | GET | `/v1/connections/{project_id}/repo-context` | Strict canonical `repo_profile@1` for planning agents |
+| GET | `/v1/capabilities/changeset-creation?project_id=…` | Authenticated project capability and exact blocking reasons |
 | POST | `/v1/changesets` | Enqueue a changeset during a PR publication stage |
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |
 | GET | `/v1/changesets/{id}` | Fetch one changeset |
 | GET | `/v1/changesets/{id}/observations` | Read append-only GitHub PR/CI and repair observations |
 | GET | `/v1/changesets/{id}/runtime-observations` | Read exact-head GitHub Actions logs/artifact evidence |
 | POST | `/v1/changesets/{id}/abandon` | Abandon queued pre-PR work |
+| POST | `/v1/changesets/{id}/retry` | Retry an eligible failed changeset after rechecking capability |
+| POST | `/v1/changesets/{id}/revert` | Enqueue a revert changeset after rechecking capability |
 | POST | `/webhooks/github` | HMAC-verified recovery trigger (`pull_request`, `check_run`, `check_suite`, `status`) |
 | GET | `/health`, `/ready` | Liveness / PostgreSQL readiness |
 
@@ -78,6 +81,19 @@ active operator-verified grant can authorize GitHub access.
 always requires `X-Hub-Signature-256` verified with `GITHUB_WEBHOOK_SECRET`.
 When the secret is unset, the endpoint returns `503` before parsing or queuing
 the payload; the service, health checks, and CI poller continue to operate.
+
+Create, retry, and revert synchronously re-evaluate the same project capability
+before writing a new changeset. This is an intentional API change: a project
+without an active repository grant previously received `404`; it now receives
+`409` with `detail.code: changeset_creation_disabled` and an exact `reasons`
+list. The reasons distinguish rollout, automation, repository grant, GitHub App,
+model provider, worker, and runtime blockers. Those deployment diagnostics are
+intentionally available only to an authenticated, same-project
+`agents:manage` principal; they must not be exposed through an unauthenticated
+proxy. The Docker runtime result, including a failed result, is single-flight
+and cached for at most five seconds for the exact rollout stage, editor
+instance, and `CODEGEN_REVISION`. Expiry or any of those identity changes forces
+a fresh probe.
 
 ## Repository authority
 
@@ -164,14 +180,14 @@ Transitions are enforced by `app/models/changeset.py`; illegal moves raise
 ## Environment
 
 ```
-POSTGRES_URL=postgresql://apdl:apdl_dev@localhost:5432/apdl
+POSTGRES_URL=postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl
 GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY=            # PEM inline (escaped \n accepted), or…
 GITHUB_APP_PRIVATE_KEY_BASE64=     # …base64 of the .pem (easiest in Docker), or…
 GITHUB_APP_PRIVATE_KEY_PATH=       # …a path to the .pem file (~ expanded)
 GITHUB_API_URL=https://api.github.com
 GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty returns 503
-CODEGEN_MODEL=claude-opus-4-8      # editor model — any LiteLLM id
+CODEGEN_MODEL=claude-opus-4-8      # canonical supported provider/model ID; see below
 CODEGEN_REVISION=                  # immutable candidate/deployment digest
 CODEGEN_ROLLOUT_STAGE=offline      # offline | shadow | reviewed_pr | low_risk_canary
                                    # release Compose commands force offline
@@ -191,6 +207,22 @@ ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
 CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
 CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
 ```
+
+The secure worker does not accept arbitrary LiteLLM provider prefixes. The
+canonical resolver accepts `anthropic`, `azure`, `cohere`, `deepseek`,
+`fireworks`, `gemini`/`google`, `groq`, `mistral`, `ollama`, `openai`,
+`openrouter`, `together_ai`, and `xai`. Canonical bare Claude, GPT/o-series, and
+Gemini model names resolve to their corresponding providers. `CODEGEN_MODEL`
+and `CODEGEN_HELPER_MODEL` must both select one of those providers and supply
+exactly its required credential and routing variables; unrelated provider
+secrets are not forwarded to the worker.
+
+Vertex AI and Amazon Bedrock are intentionally unsupported. Vertex project and
+location values are routing metadata, not an executable credential contract,
+and AWS credentials are not part of the worker allowlist. Supporting either
+provider requires a reviewed credential, routing, isolation, egress, and
+evaluation-evidence contract; adding only a model prefix or ambient credential
+would fail closed.
 
 Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
 (throwaway-clone base), and the `CODEGEN_TIMEOUT` /
@@ -466,6 +498,36 @@ development-build-only advisories and diskcache's unreachable pickle-cache
 advisory have exact, expiring, machine-validated suppressions. Every advisory
 with an available fix is blocked, as is any new, stale, mismatched, or expired
 suppression.
+
+### Dependency suppression ownership and renewal
+
+The three approved worker suppressions have one accountable owner and two hard
+UTC boundaries:
+
+- **Owner:** `@Sukhikhk`
+- **Review-fail boundary:** `review_by = 2026-08-22`; no unreviewed run is
+  accepted after that date.
+- **Expiry:** `expires_on = 2026-10-21`; the gate rejects the suppressions on
+  that date.
+
+There is no JSON-only renewal path. Prefer upgrading or removing the dependency
+and deleting the suppression. If a no-fix suppression must be renewed, make one
+reviewed change that:
+
+1. revalidates the advisory, installed versions, reachability, and every named
+   evidence test;
+2. updates the approved owner/review/expiry authority in
+   `scripts/audit_worker_dependencies.py`;
+3. updates the matching `owner`, `review_by`, and `expires_on` fields for every
+   affected entry in `dependency-audit-suppressions.json`;
+4. updates constraints, the hashed lock, justification, and evidence references
+   when any package or proof changed; and
+5. runs `make test-codegen` and
+   `services/codegen/scripts/audit_worker_dependencies.sh`.
+
+The Python authority and JSON policy must land together. Any one-sided date,
+owner, advisory, version, evidence, or lock change fails closed; neither file is
+an override for the other.
 
 ## Editor execution model (release-gated worker; publication remains preview)
 

@@ -7,8 +7,11 @@ crashed delivery retryable and keep network calls outside mutation requests.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
+import os
 import time
 
 from app.store import redis_cache
@@ -23,16 +26,55 @@ _last_alert_log: dict[tuple[str, str], float] = {}
 CLAIM_TIMEOUT_SECONDS = 60
 MAX_BACKOFF_SECONDS = 60
 MAX_DELIVERY_ATTEMPTS = 8
-READINESS_MAX_PENDING_AGE_SECONDS = 300.0
-READINESS_MAX_QUARANTINED_ROWS = 0
 FAILURE_EVIDENCE_MAX_CHARS = 2000
 CLEANUP_BATCH_SIZE = 500
 CLEANUP_INTERVAL_SECONDS = 300.0
+QUARANTINE_SWEEP_INTERVAL_SECONDS = 60.0
 PROCESSED_RETENTION_SECONDS = 7 * 24 * 60 * 60
 QUARANTINED_RETENTION_SECONDS = 90 * 24 * 60 * 60
 CLICKHOUSE_EVENT_RETENTION_MAX_SECONDS = 366 * 24 * 60 * 60
 EXPOSURE_RECEIPT_RETENTION_SECONDS = 400 * 24 * 60 * 60
 CLEANUP_READINESS_GRACE_SECONDS = 60 * 60
+
+
+def _environment_float(name: str, default: float, *, minimum: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise RuntimeError(f"{name} must be a finite number")
+    if value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _environment_int(name: str, default: int, *, minimum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}")
+    return value
+
+
+READINESS_MAX_PENDING_AGE_SECONDS = _environment_float(
+    "CONFIG_OUTBOX_DEGRADED_MAX_PENDING_AGE_SECONDS",
+    300.0,
+    minimum=0.0,
+)
+READINESS_MAX_QUARANTINED_ROWS = _environment_int(
+    "CONFIG_OUTBOX_DEGRADED_MAX_QUARANTINED_ROWS",
+    0,
+    minimum=0,
+)
 
 if not 0 < EVENT_STREAM_ALERT_ENTRIES < EVENT_STREAM_MAX_ENTRIES:
     raise RuntimeError("Event stream alert threshold must be below capacity")
@@ -76,6 +118,17 @@ class PermanentDeliveryError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
+
+
+class UnsafeQuarantineReplay(RuntimeError):
+    """A terminal intent cannot be replayed without violating ordering."""
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        super().__init__(
+            "Only exposure outbox rows can be replayed; reconcile the current "
+            "configuration snapshot before discarding a quarantined config row"
+        )
 
 
 def _payload(value) -> dict:
@@ -238,6 +291,153 @@ async def quarantine_exhausted(pool) -> int:
         return int(result.rsplit(" ", 1)[-1])
     except (AttributeError, ValueError):
         return 0
+
+
+def _payload_sha256(payload) -> str:
+    if isinstance(payload, str):
+        encoded = payload.encode("utf-8")
+    else:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _quarantine_entry(row) -> dict:
+    item = dict(row)
+    raw_payload = item["payload"]
+    if isinstance(raw_payload, str):
+        try:
+            item["payload"] = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            # PostgreSQL JSONB is valid JSON, but retaining this branch makes
+            # inspection useful for mocked and legacy failure evidence.
+            item["payload"] = raw_payload
+    for field in ("created_at", "quarantined_at"):
+        value = item[field]
+        item[field] = value.isoformat() if hasattr(value, "isoformat") else str(value)
+    return item
+
+
+async def list_quarantined(
+    pool,
+    project_id: str,
+    *,
+    limit: int,
+    before_id: int | None,
+) -> tuple[list[dict], int | None]:
+    """Return one project-scoped keyset page of terminal delivery evidence."""
+    rows = await pool.fetch(
+        """
+        SELECT id, project_id, kind, payload, attempts, last_error,
+               failure_class, failure_code, created_at, quarantined_at
+        FROM config_outbox
+        WHERE project_id = $1
+          AND quarantined_at IS NOT NULL
+          AND ($2::bigint IS NULL OR id < $2)
+        ORDER BY id DESC
+        LIMIT $3
+        """,
+        project_id,
+        before_id,
+        limit + 1,
+    )
+    has_more = len(rows) > limit
+    entries = [_quarantine_entry(row) for row in rows[:limit]]
+    next_before_id = entries[-1]["id"] if has_more and entries else None
+    return entries, next_before_id
+
+
+async def resolve_quarantined(
+    pool,
+    project_id: str,
+    row_id: int,
+    *,
+    action: str,
+    actor: str,
+    reason: str,
+) -> dict | None:
+    """Atomically replay or discard one quarantined row with audit evidence."""
+    if action not in {"replay", "discard"}:
+        raise ValueError("unsupported quarantine action")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                SELECT id, project_id, kind, payload, attempts, last_error,
+                       failure_class, failure_code, created_at, quarantined_at
+                FROM config_outbox
+                WHERE id = $1
+                  AND project_id = $2
+                  AND quarantined_at IS NOT NULL
+                FOR UPDATE
+                """,
+                row_id,
+                project_id,
+            )
+            if row is None:
+                return None
+            if action == "replay" and row["kind"] != "exposure":
+                # Config-change rows carry a historical project_version. Once
+                # a later row has been delivered, replaying this row could
+                # broadcast a lower version and violate the monotone SSE
+                # contract. Exposure rows have no project-version ordering.
+                raise UnsafeQuarantineReplay(str(row["kind"]))
+
+            await conn.execute(
+                """
+                INSERT INTO config_outbox_operator_log (
+                    project_id, outbox_id, action, actor, reason, kind,
+                    failure_class, failure_code, payload_sha256
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                """,
+                project_id,
+                row_id,
+                action,
+                actor,
+                reason,
+                row["kind"],
+                row["failure_class"],
+                row["failure_code"],
+                _payload_sha256(row["payload"]),
+            )
+
+            if action == "replay":
+                await conn.execute(
+                    """
+                    UPDATE config_outbox
+                    SET attempts = 0,
+                        available_at = now(),
+                        claimed_at = NULL,
+                        quarantined_at = NULL,
+                        failure_class = NULL,
+                        failure_code = NULL,
+                        last_error = ''
+                    WHERE id = $1
+                      AND project_id = $2
+                      AND quarantined_at IS NOT NULL
+                    """,
+                    row_id,
+                    project_id,
+                )
+            else:
+                await conn.execute(
+                    """
+                    DELETE FROM config_outbox
+                    WHERE id = $1
+                      AND project_id = $2
+                      AND quarantined_at IS NOT NULL
+                    """,
+                    row_id,
+                    project_id,
+                )
+    return _quarantine_entry(row)
 
 
 def _exact_payload_keys(payload: dict, expected: set[str]) -> None:
@@ -476,11 +676,11 @@ def _should_log_alert(event: str, stream_key: str) -> bool:
 
 def empty_metrics() -> dict:
     return {
-        "pending_count": 0,
-        "processed_count": 0,
-        "quarantined_count": 0,
+        "estimated_pending_count": 0,
+        "estimated_processed_count": 0,
+        "estimated_quarantined_count": 0,
         "estimated_receipt_count": 0,
-        "max_pending_attempts": 0,
+        "quarantined_threshold_exceeded": False,
         "oldest_pending_age_seconds": 0.0,
         "oldest_processed_age_seconds": 0.0,
         "oldest_quarantined_age_seconds": 0.0,
@@ -489,64 +689,126 @@ def empty_metrics() -> dict:
 
 
 async def metrics_snapshot(conn) -> dict:
-    """Return bounded, low-cardinality delivery lag and quarantine metrics."""
+    """Return index-backed delivery lag and quarantine metrics.
+
+    Row counts come from PostgreSQL statistics. The only exact cardinality
+    check stops after the configured quarantine threshold plus one row, so a
+    readiness probe never aggregates a retained table or partial index.
+    """
     row = await conn.fetchrow(
         """
-        WITH outbox_metrics AS (
+        WITH pending_metrics AS (
             SELECT
-                count(*) FILTER (
-                    WHERE processed_at IS NULL AND quarantined_at IS NULL
-                ) AS pending_count,
-                count(*) FILTER (
-                    WHERE processed_at IS NOT NULL
-                ) AS processed_count,
-                count(*) FILTER (
-                    WHERE quarantined_at IS NOT NULL
-                ) AS quarantined_count,
-                COALESCE(max(attempts) FILTER (
-                    WHERE processed_at IS NULL AND quarantined_at IS NULL
-                ), 0) AS max_pending_attempts,
                 COALESCE(EXTRACT(EPOCH FROM (
                     now() - (
-                        min(created_at) FILTER (
-                            WHERE processed_at IS NULL
-                              AND quarantined_at IS NULL
-                        )
+                        SELECT created_at
+                        FROM config_outbox
+                        WHERE processed_at IS NULL
+                          AND quarantined_at IS NULL
+                        ORDER BY created_at, id
+                        LIMIT 1
                     )
                 )), 0) AS oldest_pending_age_seconds,
+                1 AS join_key
+        ),
+        processed_metrics AS (
+            SELECT
                 COALESCE(EXTRACT(EPOCH FROM (
-                    now() - min(processed_at)
+                    now() - (
+                        SELECT processed_at
+                        FROM config_outbox
+                        WHERE processed_at IS NOT NULL
+                        ORDER BY processed_at, id
+                        LIMIT 1
+                    )
                 )), 0) AS oldest_processed_age_seconds,
+                1 AS join_key
+        ),
+        quarantine_metrics AS (
+            SELECT
                 COALESCE(EXTRACT(EPOCH FROM (
-                    now() - min(quarantined_at)
-                )), 0) AS oldest_quarantined_age_seconds
-            FROM config_outbox
+                    now() - (
+                        SELECT quarantined_at
+                        FROM config_outbox
+                        WHERE quarantined_at IS NOT NULL
+                        ORDER BY quarantined_at, id
+                        LIMIT 1
+                    )
+                )), 0) AS oldest_quarantined_age_seconds,
+                1 AS join_key
         ),
         receipt_metrics AS (
             SELECT COALESCE(EXTRACT(EPOCH FROM (
-                now() - min(last_seen_at)
-            )), 0) AS oldest_receipt_age_seconds
-            FROM config_exposure_receipts
+                now() - (
+                    SELECT last_seen_at
+                    FROM config_exposure_receipts
+                    ORDER BY last_seen_at, project_id, message_id
+                    LIMIT 1
+                )
+            )), 0) AS oldest_receipt_age_seconds,
+            1 AS join_key
         )
         SELECT
-            outbox_metrics.*,
+            pending_metrics.oldest_pending_age_seconds,
+            processed_metrics.oldest_processed_age_seconds,
+            quarantine_metrics.oldest_quarantined_age_seconds,
             receipt_metrics.oldest_receipt_age_seconds,
+            EXISTS (
+                SELECT 1
+                FROM config_outbox
+                WHERE quarantined_at IS NOT NULL
+                ORDER BY quarantined_at, id
+                OFFSET $1
+                LIMIT 1
+            ) AS quarantined_threshold_exceeded,
+            COALESCE((
+                SELECT greatest(index_record.reltuples, 0)::bigint
+                FROM pg_catalog.pg_class AS index_record
+                JOIN pg_catalog.pg_namespace AS index_namespace
+                  ON index_namespace.oid = index_record.relnamespace
+                WHERE index_namespace.nspname = 'public'
+                  AND index_record.relname = 'idx_config_outbox_metrics_pending'
+            ), 0) AS estimated_pending_count,
+            COALESCE((
+                SELECT greatest(index_record.reltuples, 0)::bigint
+                FROM pg_catalog.pg_class AS index_record
+                JOIN pg_catalog.pg_namespace AS index_namespace
+                  ON index_namespace.oid = index_record.relnamespace
+                WHERE index_namespace.nspname = 'public'
+                  AND index_record.relname = 'idx_config_outbox_cleanup_processed'
+            ), 0) AS estimated_processed_count,
+            COALESCE((
+                SELECT greatest(index_record.reltuples, 0)::bigint
+                FROM pg_catalog.pg_class AS index_record
+                JOIN pg_catalog.pg_namespace AS index_namespace
+                  ON index_namespace.oid = index_record.relnamespace
+                WHERE index_namespace.nspname = 'public'
+                  AND index_record.relname =
+                      'idx_config_outbox_cleanup_quarantined'
+            ), 0) AS estimated_quarantined_count,
             COALESCE((
                 SELECT greatest(n_live_tup, 0)::bigint
                 FROM pg_stat_user_tables
                 WHERE schemaname = 'public'
                   AND relname = 'config_exposure_receipts'
             ), 0) AS estimated_receipt_count
-        FROM outbox_metrics
-        CROSS JOIN receipt_metrics
-        """
+        FROM pending_metrics
+        JOIN processed_metrics USING (join_key)
+        JOIN quarantine_metrics USING (join_key)
+        JOIN receipt_metrics USING (join_key)
+        """,
+        READINESS_MAX_QUARANTINED_ROWS,
     )
     return {
-        "pending_count": int(row["pending_count"]),
-        "processed_count": int(row["processed_count"]),
-        "quarantined_count": int(row["quarantined_count"]),
+        "estimated_pending_count": int(row["estimated_pending_count"]),
+        "estimated_processed_count": int(row["estimated_processed_count"]),
+        "estimated_quarantined_count": int(
+            row["estimated_quarantined_count"]
+        ),
         "estimated_receipt_count": int(row["estimated_receipt_count"]),
-        "max_pending_attempts": int(row["max_pending_attempts"]),
+        "quarantined_threshold_exceeded": bool(
+            row["quarantined_threshold_exceeded"]
+        ),
         "oldest_pending_age_seconds": max(
             float(row["oldest_pending_age_seconds"]),
             0.0,
@@ -573,7 +835,7 @@ def readiness_snapshot(metrics: dict) -> dict:
         > READINESS_MAX_PENDING_AGE_SECONDS
     ):
         reasons.append("oldest_pending_age_exceeded")
-    if metrics["quarantined_count"] > READINESS_MAX_QUARANTINED_ROWS:
+    if metrics["quarantined_threshold_exceeded"]:
         reasons.append("quarantined_rows_exceeded")
     if (
         metrics["oldest_processed_age_seconds"]
@@ -692,7 +954,6 @@ def _error_evidence(exc: BaseException) -> str:
 
 async def drain_once(pool, redis, broadcaster) -> bool:
     """Deliver at most one row. Returns whether a row was claimed."""
-    await quarantine_exhausted(pool)
     row = await claim_next(pool)
     if row is None:
         return False
@@ -769,10 +1030,29 @@ async def run_worker(
     *,
     idle_seconds: float = 0.25,
     cleanup_interval_seconds: float = CLEANUP_INTERVAL_SECONDS,
+    quarantine_sweep_interval_seconds: float = QUARANTINE_SWEEP_INTERVAL_SECONDS,
 ) -> None:
     next_cleanup_at = 0.0
+    next_quarantine_sweep_at = 0.0
     while True:
         now = time.monotonic()
+        if now >= next_quarantine_sweep_at:
+            try:
+                quarantined = await quarantine_exhausted(pool)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Config outbox quarantine sweep failed")
+            else:
+                if quarantined:
+                    logger.warning(
+                        "Config outbox sweep quarantined exhausted rows",
+                        extra={
+                            "event": "config_outbox_quarantine_sweep",
+                            "quarantined": quarantined,
+                        },
+                    )
+            next_quarantine_sweep_at = now + quarantine_sweep_interval_seconds
         if now >= next_cleanup_at:
             cleanup_backlog = False
             try:

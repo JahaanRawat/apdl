@@ -85,6 +85,45 @@ await run(
 );
 
 await run(
+  'RA-01 built bundle rejects a legacy-only persisted grant when consent is omitted',
+  async () => {
+    const harness = createHarness();
+    const { window } = harness;
+    const grant = {
+      analytics: true,
+      personalization: true,
+      experiments: true,
+    };
+    window.localStorage.setItem('apdl_consent_apdl', JSON.stringify(grant));
+
+    const client = new harness.APDLClient({
+      endpoint: FIRST_ENDPOINT,
+      auth: { clientKey: CLIENT_KEY },
+      autoCapture: false,
+      persistence: 'localStorage',
+    });
+
+    assert.deepEqual(normalize(client.consent.get()), {
+      analytics: false,
+      personalization: false,
+      experiments: false,
+    });
+    assert.equal(window.localStorage.getItem('apdl_consent_apdl'), null);
+    assert.deepEqual(
+      JSON.parse(window.localStorage.getItem(storageKey('consent', FIRST_ENDPOINT))),
+      {
+        analytics: false,
+        personalization: false,
+        experiments: false,
+      }
+    );
+
+    await client.shutdown();
+    harness.close();
+  }
+);
+
+await run(
   'RA-01 built bundle isolates all persisted state by deployment and project',
   async () => {
     const harness = createHarness();
@@ -152,6 +191,62 @@ await run(
 );
 
 await run(
+  'RA-01 built bundle isolates IndexedDB offline events by deployment and project',
+  async () => {
+    const harness = createHarness({
+      accelerateRetryTimers: true,
+      emulateIndexedDbTargetRealm: true,
+      retryableEventOrigins: [FIRST_ENDPOINT],
+    });
+    const { window } = harness;
+    const consent = {
+      analytics: true,
+      personalization: false,
+      experiments: false,
+    };
+    const first = new harness.APDLClient({
+      endpoint: FIRST_ENDPOINT,
+      auth: { clientKey: CLIENT_KEY },
+      autoCapture: false,
+      persistence: 'localStorage',
+      consent,
+    });
+    await settle(window);
+    first.track('first_deployment_offline_event');
+
+    const firstReport = await first.debug.flush();
+    assert.equal(firstReport.persisted, 1);
+    assert.deepEqual(normalize(firstReport.pending), []);
+    let records = await readOfflineRecords(window);
+    assert.equal(await first.storage.count(), 1);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].deployment_origin, FIRST_ENDPOINT);
+    assert.equal(records[0].project_id, 'apdl');
+    assert.equal(records[0].data.event, 'first_deployment_offline_event');
+
+    const second = new harness.APDLClient({
+      endpoint: SECOND_ENDPOINT,
+      auth: { clientKey: CLIENT_KEY },
+      autoCapture: false,
+      persistence: 'localStorage',
+      consent,
+    });
+    const secondReport = await second.debug.flush();
+
+    assert.equal(secondReport.delivered, 0);
+    assert.equal(secondReport.persisted, 0);
+    assert.deepEqual(normalize(second.debug.getQueue()), []);
+    records = await readOfflineRecords(window);
+    assert.equal(records.length, 1);
+    assert.equal(records[0].deployment_origin, FIRST_ENDPOINT);
+    assert.equal(records[0].data.event, 'first_deployment_offline_event');
+
+    await Promise.all([first.shutdown(), second.shutdown()]);
+    harness.close();
+  }
+);
+
+await run(
   'RA-03 built bundle renders untrusted modal markup as Trusted Types-compatible text',
   async () => {
     const harness = createHarness();
@@ -190,6 +285,60 @@ await run(
       assert.equal(window.__apdlXssExecuted, false);
     } finally {
       Object.defineProperty(window.Element.prototype, 'innerHTML', descriptor);
+    }
+
+    await client.shutdown();
+    harness.close();
+  }
+);
+
+await run(
+  'RA-03 built bundle treats absent-like optional UI URLs as no URL',
+  async () => {
+    const harness = createHarness();
+    const { window } = harness;
+    const client = createUiClient(harness);
+
+    for (const [valueIndex, optionalUrl] of [undefined, null, ''].entries()) {
+      const cases = [
+        ['banner', {
+          text: 'Banner',
+          ctaText: 'Continue',
+          ctaHref: optionalUrl,
+        }],
+        ['card', {
+          title: 'Card',
+          imageUrl: optionalUrl,
+          ctaText: 'Continue',
+          ctaHref: optionalUrl,
+        }],
+        ['cta-button', {
+          text: 'Continue',
+          href: optionalUrl,
+        }],
+        ['modal', {
+          title: 'Modal',
+          ctaText: 'Continue',
+          ctaHref: optionalUrl,
+        }],
+      ];
+
+      for (const [caseIndex, [component, props]] of cases.entries()) {
+        const target = window.document.createElement('div');
+        window.document.body.appendChild(target);
+        const rendered = client.ui.render({
+          component,
+          props,
+          slotId: `absent-url-${valueIndex}-${caseIndex}`,
+        }, target);
+        assert.ok(rendered, `${component} rejected an absent-like optional URL`);
+        assert.equal(rendered.querySelector('a, img'), null);
+        if (component === 'cta-button') {
+          assert.equal(rendered.tagName, 'BUTTON');
+        } else {
+          assert.equal(rendered.textContent.includes('Continue'), true);
+        }
+      }
     }
 
     await client.shutdown();
@@ -258,13 +407,25 @@ await run(
   }
 );
 
-function createHarness() {
+function createHarness(options = {}) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', {
     runScripts: 'dangerously',
     url: 'https://customer.test/',
   });
   const { window } = dom;
   const indexedDB = new IDBFactory();
+  const nativeStructuredClone = globalThis.structuredClone;
+
+  if (options.emulateIndexedDbTargetRealm) {
+    // fake-indexeddb clones through Node's realm even when the IDBFactory is
+    // installed on a JSDOM window. IndexedDB deserializes into the requesting
+    // realm in browsers, so re-home the JSON-only SDK records for this test.
+    globalThis.structuredClone = (value, structuredCloneOptions) => {
+      const clone = nativeStructuredClone(value, structuredCloneOptions);
+      if (clone === null || typeof clone !== 'object') return clone;
+      return window.JSON.parse(JSON.stringify(clone));
+    };
+  }
 
   Object.defineProperty(window, 'indexedDB', {
     configurable: true,
@@ -285,10 +446,19 @@ function createHarness() {
       });
     }
   }
+  if (options.accelerateRetryTimers) {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay = 0, ...args) =>
+      nativeSetTimeout(callback, Number(delay) >= 1000 ? 0 : delay, ...args);
+  }
+  const retryableEventOrigins = new Set(options.retryableEventOrigins ?? []);
 
   window.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url.endsWith('/v1/events')) {
+      if (retryableEventOrigins.has(new URL(url).origin)) {
+        throw new window.TypeError('Simulated offline event endpoint');
+      }
       return new window.Response(null, { status: 202 });
     }
     if (url.endsWith('/v1/flags')) {
@@ -322,7 +492,10 @@ function createHarness() {
   assert.equal(typeof window.APDL?.APDLClient, 'function');
   return {
     APDLClient: window.APDL.APDLClient,
-    close: () => dom.window.close(),
+    close: () => {
+      globalThis.structuredClone = nativeStructuredClone;
+      dom.window.close();
+    },
     window,
   };
 }
@@ -337,6 +510,29 @@ function createUiClient(harness) {
       personalization: true,
       experiments: false,
     },
+  });
+}
+
+function readOfflineRecords(window) {
+  return new Promise((resolve, reject) => {
+    const request = window.indexedDB.open('apdl-offline');
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const transaction = db.transaction('events', 'readonly');
+      const allRecords = transaction.objectStore('events').getAll();
+      let records = [];
+      allRecords.onerror = () => reject(allRecords.error);
+      allRecords.onsuccess = () => {
+        records = normalize(allRecords.result);
+      };
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+      transaction.oncomplete = () => {
+        db.close();
+        resolve(records);
+      };
+    };
   });
 }
 

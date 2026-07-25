@@ -1,5 +1,5 @@
 import type { ComponentDefinition, RenderContext } from './types';
-import { requireSafeUiTarget, requireSafeUiUrl } from '../url-policy';
+import { optionalSafeUiUrl, requireSafeUiTarget } from '../url-policy';
 
 /**
  * Configurable CTA (call-to-action) button component.
@@ -35,10 +35,7 @@ export const CTAButtonComponent: ComponentDefinition = {
 
   render(props: Record<string, unknown>, context: RenderContext): HTMLElement {
     const text = (props.text as string) || '';
-    const href = props.href as string | undefined;
-    const safeHref = href === undefined
-      ? null
-      : requireSafeUiUrl(href, 'cta-button.href');
+    const safeHref = optionalSafeUiUrl(props.href, 'cta-button.href');
     const variant = (props.variant as string) || 'primary';
     const size = (props.size as string) || 'medium';
     const fullWidth = props.fullWidth === true;

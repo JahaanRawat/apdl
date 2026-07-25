@@ -36,6 +36,7 @@ export APDL_DEV_API_KEY="proj_demo_0123456789abcdef0123456789abcdef"
 export APDL_DEV_CLIENT_KEY="client_demo_0123456789abcdef0123456789abcdef"
 export APDL_SERVICE_API_KEYS='{}'
 export POSTGRES_PASSWORD="apdl_dev"
+export APDL_RUNTIME_POSTGRES_PASSWORD="apdl_runtime_dev"
 export APDL_BIND_ADDRESS="127.0.0.1"
 export ANTHROPIC_API_KEY=""
 export OPENAI_API_KEY=""
@@ -165,6 +166,34 @@ local-dev-confidential|demo|confidential|proj_demo_|{events:write,config:read,co
     echo "==> Canonical demo credentials and operator project verified"
 }
 
+assert_operator_recovery_indexes() {
+    local postgres_id quarantine_plan
+    postgres_id="$(compose ps -q postgres)"
+    [ -n "$postgres_id" ] || {
+        echo "PostgreSQL container is unavailable after migrations" >&2
+        return 1
+    }
+
+    quarantine_plan="$(docker exec "$postgres_id" psql -X -A -t \
+        -v ON_ERROR_STOP=1 -U apdl -d apdl -c \
+        "SET enable_seqscan = off;
+         EXPLAIN (COSTS OFF)
+         SELECT id
+         FROM config_outbox
+         WHERE project_id = 'demo'
+           AND quarantined_at IS NOT NULL
+           AND id < 9223372036854775807
+         ORDER BY id DESC
+         LIMIT 50;")"
+    if ! grep -Fq "idx_config_outbox_quarantine_project_id" \
+        <<<"$quarantine_plan"; then
+        echo "Project quarantine listing did not use its partial index" >&2
+        printf '%s\n' "$quarantine_plan" >&2
+        return 1
+    fi
+    echo "==> Operator recovery indexes verified on PostgreSQL"
+}
+
 assert_not_created() {
     local service container_id
     for service in agents codegen; do
@@ -237,6 +266,28 @@ POSTGRES_COMPOSE_FILE="$COMPOSE_FILE" \
 POSTGRES_COMPOSE_OVERRIDE_FILE="${APDL_SMOKE_COMPOSE_OVERRIDE:-}" \
     "$ROOT_DIR/scripts/init-postgres.sh"
 assert_credentials
+assert_operator_recovery_indexes
+
+echo "==> Proving PostgreSQL runtime/operator privilege separation"
+compose run --rm --no-deps \
+    --entrypoint bash \
+    -e PGHOST=postgres \
+    -e PGPORT=5432 \
+    -e PGDATABASE=apdl \
+    -e APDL_OWNER_POSTGRES_USER=apdl \
+    -e APDL_OWNER_POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+    -e APDL_RUNTIME_POSTGRES_PASSWORD="$APDL_RUNTIME_POSTGRES_PASSWORD" \
+    -e APDL_RUNTIME_TEST_POSTGRES_URL=postgresql://apdl_runtime@postgres:5432/apdl \
+    -v "$ROOT_DIR/scripts/test_postgres_operator_privileges.sh:/tmp/test_postgres_operator_privileges.sh:ro" \
+    postgres-migrate \
+    /tmp/test_postgres_operator_privileges.sh
+
+echo "==> Proving real PostgreSQL fence-owner loss rolls back in-flight work"
+compose run --rm --no-deps \
+    --entrypoint python3 \
+    -v "$ROOT_DIR/scripts/test_postgres_fence_owner_loss.py:/tmp/test_postgres_fence_owner_loss.py:ro" \
+    postgres-migrate \
+    /tmp/test_postgres_fence_owner_loss.py
 
 startup_services=(
     ingestion config query clickhouse-writer admin-api admin gateway
@@ -283,7 +334,8 @@ else
         --api-key "$APDL_DEV_API_KEY" \
         --ingestion-url "$APDL_INGESTION_URL" \
         --config-url "$APDL_CONFIG_URL" \
-        --query-url "$APDL_QUERY_URL"
+        --query-url "$APDL_QUERY_URL" \
+        --postgres-container-id "$(compose ps -q postgres)"
 fi
 
 echo "==> Fresh-install $SMOKE_SUITE smoke passed"

@@ -37,9 +37,9 @@ def test_bucket_identity_is_immutable_after_draft_in_postgres():
     )
 
 
-def test_config_startup_requires_migration_043_column_and_constraint():
-    assert schema.MIGRATION_VERSION == 43
-    assert schema.MIGRATION_NAME == "043_experiment_bucket_identity.sql"
+def test_config_startup_retains_migration_043_column_and_constraint():
+    assert schema.MIGRATION_VERSION >= 43
+    assert schema.MIGRATION_NAME.endswith(".sql")
     assert ("experiments", "bucket_by") in schema.REQUIRED_COLUMNS
     assert (
         "experiments",

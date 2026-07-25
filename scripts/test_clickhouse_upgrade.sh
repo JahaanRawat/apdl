@@ -487,6 +487,38 @@ fi
 assert_owner_absent
 assert_gate_state '1'
 
+echo "==> Verifying the closed runtime gate rejects a real ClickHouse insert"
+if query "INSERT INTO events (
+    project_id, message_id, event_type, event_name, user_id, anonymous_id,
+    group_id, session_id, timestamp, received_at, properties, traits, context,
+    ip, source_stream, source_stream_id, source_stream_id_ms,
+    source_stream_id_seq
+) SELECT
+    'maintenance-probe', 'closed-gate-probe', 'track', 'closed_gate_probe', '',
+    'maintenance-anon', '', 'maintenance-session', now64(3), now64(3),
+    '{}', '{}', '{}', '', 'events:raw:maintenance-probe', '1-0', 1, 0
+WHERE throwIf(
+    (
+        SELECT (count() = 0) OR (argMax(writes_blocked, generation) != 0)
+        FROM apdl_maintenance_gate
+        WHERE authority = 'runtime-writes'
+    ),
+    'maintenance'
+) = 0" >"$WORK_DIR/closed-gate-insert.log" 2>&1; then
+    echo "runtime insert succeeded while the ClickHouse maintenance gate was closed" >&2
+    exit 1
+fi
+if ! grep -q "maintenance" \
+    "$WORK_DIR/closed-gate-insert.log"; then
+    echo "closed-gate insert did not fail through the server-side guard" >&2
+    sed -n '1,160p' "$WORK_DIR/closed-gate-insert.log" >&2
+    exit 1
+fi
+assert_equal \
+    '0' \
+    "$(query "SELECT count() FROM events FINAL WHERE project_id = 'maintenance-probe' AND message_id = 'closed-gate-probe'")" \
+    "closed runtime gate allowed a row to persist"
+
 echo "==> Verifying a clean rerun reopens the failed-closed runtime gate"
 run_migrations >/dev/null
 assert_owner_absent

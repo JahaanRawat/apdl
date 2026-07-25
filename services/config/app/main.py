@@ -169,7 +169,7 @@ async def lifespan(application: FastAPI):
     )
     pg_dsn = os.environ.get(
         "POSTGRES_URL",
-        "postgresql://apdl:apdl_dev@localhost:5432/apdl",
+        "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
     )
     pg_pool_size = int(os.environ.get("PG_POOL_SIZE", "4"))
 
@@ -431,7 +431,10 @@ async def readiness_check(request: Request):
             checks["postgres"] = "ready"
             outbox_metrics = await outbox.metrics_snapshot(conn)
         outbox_readiness = outbox.readiness_snapshot(outbox_metrics)
-        checks["outbox"] = outbox_readiness["status"]
+        # Delivery lag is an operational degradation, not an inability for
+        # Config to serve evaluation traffic. Keep it visible without causing
+        # an orchestrator-wide restart/traffic-removal loop.
+        checks["outbox"] = "ready"
     except Exception as exc:
         logger.error("Readiness check: PostgreSQL error: %s", exc)
 

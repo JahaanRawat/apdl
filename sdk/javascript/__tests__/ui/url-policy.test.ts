@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  optionalSafeUiUrl,
   requireSafeUiTarget,
   requireSafeUiUrl,
 } from '../../src/ui/url-policy';
@@ -38,6 +39,26 @@ describe('requireSafeUiUrl', () => {
     `https://example.test/${'x'.repeat(4096)}`,
   ])('rejects unsafe or ambiguous URL %j', (input) => {
     expect(() => requireSafeUiUrl(input, 'test.href'))
+      .toThrow('test.href must be an absolute HTTP(S) URL');
+  });
+});
+
+describe('optionalSafeUiUrl', () => {
+  it.each([undefined, null, ''])(
+    'treats absent-like optional URL value %j as no URL',
+    (input) => {
+      expect(optionalSafeUiUrl(input, 'test.href')).toBeNull();
+    }
+  );
+
+  it('applies the strict URL policy to every nonempty value', () => {
+    expect(optionalSafeUiUrl(
+      'HTTP://EXAMPLE.TEST:80/path',
+      'test.href'
+    )).toBe('http://example.test/path');
+    expect(() => optionalSafeUiUrl('/relative', 'test.href'))
+      .toThrow('test.href must be an absolute HTTP(S) URL');
+    expect(() => optionalSafeUiUrl(false, 'test.href'))
       .toThrow('test.href must be an absolute HTTP(S) URL');
   });
 });

@@ -2,13 +2,14 @@
 
 import json
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import asyncpg
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.models.schemas import MAX_BIGSERIAL_ID
 from app.routers import admin
 from app.store import mutations
 
@@ -964,20 +965,26 @@ async def test_delete_route_reports_launched_experiment_archive(monkeypatch):
 @pytest.mark.asyncio
 async def test_experiment_audit_is_available_after_removal(monkeypatch):
     audit = AsyncMock(
-        return_value=[
-            {
-                "id": 9,
-                "project_id": "apdl",
-                "experiment_key": "checkout_exp",
-                "action": "experiment_archived",
-                "actor": "credential:test-config",
-                "previous_version": 3,
-                "new_version": 4,
-                "before": {"status": "running"},
-                "after": {"status": "running", "archived_at": "2026-07-20"},
-                "created_at": "2026-07-20T00:00:00+00:00",
-            }
-        ]
+        return_value=(
+            [
+                {
+                    "id": 9,
+                    "project_id": "apdl",
+                    "experiment_key": "checkout_exp",
+                    "action": "experiment_archived",
+                    "actor": "credential:test-config",
+                    "previous_version": 3,
+                    "new_version": 4,
+                    "before": {"status": "running"},
+                    "after": {
+                        "status": "running",
+                        "archived_at": "2026-07-20",
+                    },
+                    "created_at": "2026-07-20T00:00:00+00:00",
+                }
+            ],
+            9,
+        )
     )
     monkeypatch.setattr(admin.pg_store, "get_experiment_audit_entries", audit)
 
@@ -988,14 +995,349 @@ async def test_experiment_audit_is_available_after_removal(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.json()["count"] == 1
-    assert response.json()["audit"][0]["action"] == "experiment_archived"
+    assert response.json() == {
+        "experiment_key": "checkout_exp",
+        "history_scope": "experiment_key",
+        "audit": [
+            {
+                "id": 9,
+                "project_id": "apdl",
+                "experiment_key": "checkout_exp",
+                "action": "experiment_archived",
+                "actor": "credential:test-config",
+                "previous_version": 3,
+                "new_version": 4,
+                "before": {"status": "running"},
+                "after": {
+                    "status": "running",
+                    "archived_at": "2026-07-20",
+                },
+                "created_at": "2026-07-20T00:00:00+00:00",
+            }
+        ],
+        "count": 1,
+        "next_before_id": 9,
+    }
     audit.assert_awaited_once_with(
         app.state.pg_pool,
         "apdl",
         "checkout_exp",
         limit=50,
+        before_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_experiment_audit_forwards_keyset_cursor(monkeypatch):
+    audit = AsyncMock(return_value=([], None))
+    monkeypatch.setattr(admin.pg_store, "get_experiment_audit_entries", audit)
+
+    response = await _request(
+        "GET",
+        "/v1/admin/experiments/checkout_exp/audit",
+        params={"project_id": "apdl", "limit": 20, "before_id": 50},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["next_before_id"] is None
+    audit.assert_awaited_once_with(
+        app.state.pg_pool,
+        "apdl",
+        "checkout_exp",
+        limit=20,
+        before_id=50,
+    )
+
+
+@pytest.mark.asyncio
+async def test_outbox_quarantine_routes_are_project_scoped_and_audited(monkeypatch):
+    entries = [
+        {
+            "id": 41,
+            "project_id": "apdl",
+            "kind": "exposure",
+            "payload": {"event": {}},
+            "attempts": 8,
+            "last_error": "timeout",
+            "failure_class": "attempts_exhausted",
+            "failure_code": "delivery_attempts_exhausted",
+            "created_at": "2026-07-20T00:00:00+00:00",
+            "quarantined_at": "2026-07-21T00:00:00+00:00",
+        }
+    ]
+    list_rows = AsyncMock(return_value=(entries, 41))
+    resolve = AsyncMock(return_value=entries[0])
+    monkeypatch.setattr(admin.outbox, "list_quarantined", list_rows)
+    monkeypatch.setattr(admin.outbox, "resolve_quarantined", resolve)
+
+    listed = await _request(
+        "GET",
+        "/v1/admin/outbox/quarantine",
+        params={"project_id": "apdl", "limit": 10, "before_id": 50},
+    )
+    replayed = await _request(
+        "POST",
+        "/v1/admin/outbox/quarantine/41/replay",
+        params={"project_id": "apdl"},
+        json_body={"reason": "dependency restored"},
+    )
+
+    assert listed.status_code == 200
+    assert listed.json() == {
+        "history_scope": "project_quarantine",
+        "quarantine": entries,
+        "count": 1,
+        "next_before_id": 41,
+    }
+    assert replayed.status_code == 200
+    assert replayed.json() == {
+        "resolved": True,
+        "action": "replay",
+        "outbox_id": 41,
+        "entry": entries[0],
+    }
+    list_rows.assert_awaited_once_with(
+        ANY,
+        "apdl",
+        limit=10,
+        before_id=50,
+    )
+    resolve.assert_awaited_once_with(
+        ANY,
+        "apdl",
+        41,
+        action="replay",
+        actor="credential:test-config",
+        reason="dependency restored",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "legacy-invalid-object-payload",
+        ["legacy", "array"],
+        None,
+    ],
+)
+async def test_outbox_quarantine_inspection_preserves_malformed_json_evidence(
+    monkeypatch,
+    payload,
+):
+    entry = {
+        "id": 41,
+        "project_id": "apdl",
+        "kind": "exposure",
+        "payload": payload,
+        "attempts": 1,
+        "last_error": "Config outbox payload must be an object",
+        "failure_class": "permanent",
+        "failure_code": "invalid_payload",
+        "created_at": "2026-07-20T00:00:00+00:00",
+        "quarantined_at": "2026-07-21T00:00:00+00:00",
+    }
+    monkeypatch.setattr(
+        admin.outbox,
+        "list_quarantined",
+        AsyncMock(return_value=([entry], None)),
+    )
+
+    response = await _request(
+        "GET",
+        "/v1/admin/outbox/quarantine",
+        params={"project_id": "apdl"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["quarantine"][0]["payload"] == payload
+
+
+@pytest.mark.asyncio
+async def test_config_change_quarantine_replay_returns_clear_conflict(monkeypatch):
+    resolve = AsyncMock(
+        side_effect=admin.outbox.UnsafeQuarantineReplay("flag_change")
+    )
+    monkeypatch.setattr(admin.outbox, "resolve_quarantined", resolve)
+
+    response = await _request(
+        "POST",
+        "/v1/admin/outbox/quarantine/41/replay",
+        params={"project_id": "apdl"},
+        json_body={"reason": "dependency restored"},
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "unsafe_outbox_replay",
+        "message": (
+            "Only exposure outbox rows can be replayed; reconcile the current "
+            "configuration snapshot before discarding a quarantined config row"
+        ),
+        "kind": "flag_change",
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolved_quarantine_route_preserves_not_found_status(monkeypatch):
+    monkeypatch.setattr(
+        admin.outbox,
+        "resolve_quarantined",
+        AsyncMock(return_value=None),
+    )
+
+    response = await _request(
+        "POST",
+        "/v1/admin/outbox/quarantine/41/discard",
+        params={"project_id": "apdl"},
+        json_body={"reason": "incident accepted"},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "not_found",
+        "message": "Quarantined outbox row '41' not found",
+    }
+
+
+@pytest.mark.asyncio
+async def test_outbox_quarantine_action_requires_canonical_reason():
+    response = await _request(
+        "POST",
+        "/v1/admin/outbox/quarantine/41/discard",
+        params={"project_id": "apdl"},
+        json_body={"reason": "   "},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path", "params", "json_body"),
+    [
+        (
+            "GET",
+            "/v1/admin/outbox/quarantine",
+            {"before_id": MAX_BIGSERIAL_ID + 1},
+            None,
+        ),
+        (
+            "GET",
+            "/v1/admin/experiments/checkout_exp/audit",
+            {"before_id": MAX_BIGSERIAL_ID + 1},
+            None,
+        ),
+        (
+            "POST",
+            f"/v1/admin/outbox/quarantine/{MAX_BIGSERIAL_ID + 1}/replay",
+            None,
+            {"reason": "dependency restored"},
+        ),
+        (
+            "POST",
+            f"/v1/admin/outbox/quarantine/{MAX_BIGSERIAL_ID + 1}/discard",
+            None,
+            {"reason": "incident accepted"},
+        ),
+    ],
+)
+async def test_operator_bigserial_inputs_reject_values_outside_postgres_range(
+    method,
+    path,
+    params,
+    json_body,
+):
+    response = await _request(
+        method,
+        path,
+        params=params,
+        json_body=json_body,
+    )
+
+    assert response.status_code == 422
+
+
+def test_operator_recovery_openapi_uses_strict_canonical_response_models():
+    openapi = app.openapi()
+    expected_response_models = {
+        "/v1/admin/outbox/quarantine": "OutboxQuarantinePage",
+        "/v1/admin/outbox/quarantine/{row_id}/replay": (
+            "OutboxQuarantineResolution"
+        ),
+        "/v1/admin/outbox/quarantine/{row_id}/discard": (
+            "OutboxQuarantineResolution"
+        ),
+        "/v1/admin/experiments/{key}/audit": "ExperimentAuditPage",
+    }
+
+    for path, model_name in expected_response_models.items():
+        operation = (
+            openapi["paths"][path]["get"]
+            if path in {
+                "/v1/admin/outbox/quarantine",
+                "/v1/admin/experiments/{key}/audit",
+            }
+            else openapi["paths"][path]["post"]
+        )
+        response_schema = operation["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        assert response_schema == {
+            "$ref": f"#/components/schemas/{model_name}",
+        }
+
+    components = openapi["components"]["schemas"]
+    expected_properties = {
+        "OutboxQuarantineEntry": {
+            "id",
+            "project_id",
+            "kind",
+            "payload",
+            "attempts",
+            "last_error",
+            "failure_class",
+            "failure_code",
+            "created_at",
+            "quarantined_at",
+        },
+        "OutboxQuarantinePage": {
+            "history_scope",
+            "quarantine",
+            "count",
+            "next_before_id",
+        },
+        "OutboxQuarantineResolution": {
+            "resolved",
+            "action",
+            "outbox_id",
+            "entry",
+        },
+        "ExperimentAuditEntry": {
+            "id",
+            "project_id",
+            "experiment_key",
+            "action",
+            "actor",
+            "previous_version",
+            "new_version",
+            "before",
+            "after",
+            "created_at",
+        },
+        "ExperimentAuditPage": {
+            "experiment_key",
+            "history_scope",
+            "audit",
+            "count",
+            "next_before_id",
+        },
+    }
+    for model_name, properties in expected_properties.items():
+        schema = components[model_name]
+        assert schema["additionalProperties"] is False
+        assert set(schema["properties"]) == properties
+        assert set(schema["required"]) == properties
 
 
 @pytest.mark.asyncio

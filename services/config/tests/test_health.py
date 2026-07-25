@@ -19,8 +19,9 @@ class ReadyConnection:
         assert sql == "SELECT 1"
         return 1
 
-    async def fetchrow(self, sql):
+    async def fetchrow(self, sql, *args):
         assert "FROM config_outbox" in sql
+        assert args == (outbox.READINESS_MAX_QUARANTINED_ROWS,)
         return self.metrics
 
 
@@ -149,7 +150,7 @@ async def test_readiness_returns_200_when_dependencies_are_ready(health_state):
         "redis": "ready",
         "outbox": "ready",
     }
-    assert payload["outbox"]["pending_count"] == 0
+    assert payload["outbox"]["estimated_pending_count"] == 0
     assert payload["outbox"]["estimated_receipt_count"] == 0
     assert payload["outbox"]["thresholds"][
         "exposure_receipt_retention_seconds"
@@ -195,12 +196,12 @@ async def test_readiness_returns_503_without_leaking_dependency_errors(
             "oldest_pending_age_exceeded",
         ),
         (
-            {"quarantined_count": outbox.READINESS_MAX_QUARANTINED_ROWS + 1},
+            {"quarantined_threshold_exceeded": True},
             "quarantined_rows_exceeded",
         ),
     ],
 )
-async def test_readiness_degrades_when_outbox_crosses_threshold(
+async def test_readiness_reports_outbox_degradation_without_removing_traffic(
     health_state,
     metrics_update,
     reason,
@@ -214,9 +215,10 @@ async def test_readiness_degrades_when_outbox_crosses_threshold(
     ) as client:
         response = await client.get("/ready")
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "not_ready"
+    assert payload["status"] == "ready"
     assert payload["checks"]["postgres"] == "ready"
-    assert payload["checks"]["outbox"] == "degraded"
+    assert payload["checks"]["outbox"] == "ready"
+    assert payload["outbox"]["status"] == "degraded"
     assert payload["outbox"]["degraded_reasons"] == [reason]

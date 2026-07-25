@@ -261,22 +261,26 @@ async def get_experiment_audit_entries(
     experiment_key: str,
     *,
     limit: int = 50,
-) -> list[dict]:
-    """Fetch retained lifecycle evidence for an experiment."""
+    before_id: int | None = None,
+) -> tuple[list[dict], int | None]:
+    """Fetch a keyset page of retained evidence for one experiment key."""
     rows = await pool.fetch(
         """
         SELECT id, project_id, experiment_key, action, actor,
                previous_version, new_version, before, after, created_at
         FROM experiment_audit_log
         WHERE project_id = $1 AND experiment_key = $2
-        ORDER BY created_at DESC, id DESC
-        LIMIT $3
+          AND ($3::bigint IS NULL OR id < $3)
+        ORDER BY id DESC
+        LIMIT $4
         """,
         project_id,
         experiment_key,
-        limit,
+        before_id,
+        limit + 1,
     )
-    return [
+    has_more = len(rows) > limit
+    entries = [
         {
             "id": row["id"],
             "project_id": row["project_id"],
@@ -289,5 +293,7 @@ async def get_experiment_audit_entries(
             "after": _json_field(row["after"], None),
             "created_at": str(row["created_at"]),
         }
-        for row in rows
+        for row in rows[:limit]
     ]
+    next_before_id = entries[-1]["id"] if has_more and entries else None
+    return entries, next_before_id

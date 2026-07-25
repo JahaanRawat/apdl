@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -43,6 +44,8 @@ _PUBLICATION_STAGES = frozenset(
         RolloutStage.low_risk_canary,
     }
 )
+_RUNTIME_PROBE_TTL_SECONDS = 5.0
+_RUNTIME_PROBE_STATE_ATTRIBUTE = "_changeset_runtime_probe_state"
 
 
 class CapabilityChecks(BaseModel):
@@ -74,6 +77,36 @@ class ChangesetCreationCapability(BaseModel):
 class CapabilityEvaluation:
     report: ChangesetCreationCapability
     connection: Any | None
+
+
+@dataclass(frozen=True)
+class _RuntimeProbeKey:
+    editor_identity: int
+    stage: RolloutStage
+    revision: str
+
+
+@dataclass(frozen=True)
+class _RuntimeProbeResult:
+    editor: Any
+    ready: bool
+    expires_at: float
+
+
+@dataclass(frozen=True)
+class _RuntimeProbeInFlight:
+    editor: Any
+    task: asyncio.Task[bool]
+
+
+@dataclass
+class _RuntimeProbeState:
+    results: dict[_RuntimeProbeKey, _RuntimeProbeResult] = field(
+        default_factory=dict
+    )
+    in_flight: dict[_RuntimeProbeKey, _RuntimeProbeInFlight] = field(
+        default_factory=dict
+    )
 
 
 def _provider_configured() -> bool:
@@ -111,20 +144,96 @@ def _worker_dependencies(app: Any) -> dict[str, Any] | None:
         "close_pr",
         "publication_gate",
     )
-    if any(name not in dependencies for name in required):
+    if any(dependencies.get(name) is None for name in required):
         return None
     return dependencies
 
 
-def _assert_runtime_ready(editor: Any, stage: RolloutStage) -> None:
+def _assert_runtime_ready(
+    editor: Any,
+    stage: RolloutStage,
+    revision: str,
+) -> None:
     if stage is RolloutStage.development_pr:
         editor.assert_runtime_ready(
-            expected_revision=codegen_revision(),
+            expected_revision=revision,
             require_immutable_image=False,
             require_egress_policy=False,
         )
         return
-    editor.assert_runtime_ready(expected_revision=codegen_revision())
+    editor.assert_runtime_ready(expected_revision=revision)
+
+
+def _runtime_probe_state(app: Any) -> _RuntimeProbeState:
+    state = getattr(app.state, _RUNTIME_PROBE_STATE_ATTRIBUTE, None)
+    if isinstance(state, _RuntimeProbeState):
+        return state
+    state = _RuntimeProbeState()
+    setattr(app.state, _RUNTIME_PROBE_STATE_ATTRIBUTE, state)
+    return state
+
+
+async def _run_runtime_probe(
+    state: _RuntimeProbeState,
+    key: _RuntimeProbeKey,
+    editor: Any,
+) -> bool:
+    try:
+        try:
+            await asyncio.to_thread(
+                _assert_runtime_ready,
+                editor,
+                key.stage,
+                key.revision,
+            )
+        except (OSError, RuntimeError, ValueError):
+            ready = False
+        else:
+            ready = True
+        state.results[key] = _RuntimeProbeResult(
+            editor=editor,
+            ready=ready,
+            expires_at=monotonic() + _RUNTIME_PROBE_TTL_SECONDS,
+        )
+        return ready
+    finally:
+        current = state.in_flight.get(key)
+        if current is not None and current.task is asyncio.current_task():
+            del state.in_flight[key]
+
+
+async def _runtime_ready(
+    app: Any,
+    editor: Any,
+    stage: RolloutStage,
+    revision: str,
+) -> bool:
+    """Return a short-lived, single-flight probe result for one exact runtime."""
+    state = _runtime_probe_state(app)
+    now = monotonic()
+    expired = [
+        key
+        for key, result in state.results.items()
+        if result.expires_at <= now
+    ]
+    for key in expired:
+        del state.results[key]
+
+    key = _RuntimeProbeKey(
+        editor_identity=id(editor),
+        stage=stage,
+        revision=revision,
+    )
+    cached = state.results.get(key)
+    if cached is not None and cached.editor is editor:
+        return cached.ready
+
+    in_flight = state.in_flight.get(key)
+    if in_flight is None or in_flight.editor is not editor:
+        task = asyncio.create_task(_run_runtime_probe(state, key, editor))
+        in_flight = _RuntimeProbeInFlight(editor=editor, task=task)
+        state.in_flight[key] = in_flight
+    return await asyncio.shield(in_flight.task)
 
 
 async def evaluate_changeset_creation(
@@ -143,16 +252,12 @@ async def evaluate_changeset_creation(
     worker_ready = dependencies is not None
     runtime_ready = False
     if stage_ready and dependencies is not None:
-        try:
-            await asyncio.to_thread(
-                _assert_runtime_ready,
-                dependencies["editor"],
-                stage,
-            )
-        except (OSError, RuntimeError, ValueError):
-            runtime_ready = False
-        else:
-            runtime_ready = True
+        runtime_ready = await _runtime_ready(
+            app,
+            dependencies["editor"],
+            stage,
+            codegen_revision(),
+        )
 
     states: tuple[tuple[CapabilityReason, bool], ...] = (
         ("rollout_stage_blocked", stage_ready),

@@ -5,6 +5,13 @@
 **Branch treatment:** Per the audit request, the checked-out snapshot is treated as `main`.  
 **Verdict:** **No-go for a production-ready OSS/GA release.** A deliberately scoped developer preview is feasible after the critical experiment defects and unsafe defaults are fixed or the affected features are disabled and clearly marked experimental.
 
+> **Finding identifier scope:** the `C-01`–`C-02` and `H-01`–`H-17`
+> identifiers in this historical snapshot are namespaced
+> `OSS-2026-07-22`. They are not the separate `PR125:H-01`–`PR125:H-18`
+> follow-up findings recorded after this audit. See the
+> [PR #125 High-finding crosswalk](oss-release-high-findings-crosswalk-2026-07-23.md)
+> for the explicit source and remediation mapping.
+
 ## Executive assessment
 
 APDL has a credible, well-tested core data plane. Fresh PostgreSQL and ClickHouse migrations work, the SDK-to-Ingestion-to-Redis-to-ClickHouse path works, flag creation/evaluation works on its happy path, and the authoritative experiment-analysis smoke succeeds. The codebase also contains unusually strong tenant scoping, request validation, mutation auditing, optimistic concurrency, durable delivery patterns, and release-contract verification.

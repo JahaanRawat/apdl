@@ -58,6 +58,13 @@ class FreshSmokeContractTests(unittest.TestCase):
         self.assertIn('if [ "$SMOKE_SUITE" = "core" ]', script)
         self.assertEqual(script.count('scripts/smoke_core.py"'), 1)
         self.assertEqual(script.count('scripts/smoke_experiment_analysis.py"'), 1)
+        self.assertIn("test_postgres_fence_owner_loss.py", script)
+        fence_probe = (
+            ROOT / "scripts" / "test_postgres_fence_owner_loss.py"
+        ).read_text()
+        self.assertIn("pg_terminate_backend", fence_probe)
+        self.assertIn("SELECT pg_sleep(30)", fence_probe)
+        self.assertIn('if count != "0"', fence_probe)
         experiment_smoke = (
             ROOT / "scripts" / "smoke_experiment_analysis.py"
         ).read_text()

@@ -1110,7 +1110,10 @@ async def test_exposure_insert_race_rechecks_durable_message_payload(conflicting
         event=requested_event,
     )
     if conflicting:
-        with pytest.raises(mutations.IntegrityError, match="was reused"):
+        with pytest.raises(
+            mutations.IntegrityError,
+            match="unique per exposure.*different canonical payload",
+        ):
             await command
     else:
         await command

@@ -6,7 +6,14 @@ from math import ceil, isfinite, sqrt
 from statistics import NormalDist
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    model_validator,
+)
 
 from app.flags.targeting_contract import (
     MAX_CONDITIONS_PER_RULE,
@@ -31,6 +38,119 @@ class StrictModel(BaseModel):
     """Base model for public API contracts."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+MAX_BIGSERIAL_ID = (1 << 63) - 1
+
+
+class OutboxQuarantineAction(StrictModel):
+    """Required operator evidence for a quarantine replay or discard."""
+
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=500,
+        pattern=r"(?s)^.*\S.*$",
+    )
+
+
+class OutboxQuarantineEntry(StrictModel):
+    """One terminal Config delivery intent visible to a project operator."""
+
+    id: int = Field(..., ge=1, le=MAX_BIGSERIAL_ID)
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9]+$",
+    )
+    kind: Literal["flag_change", "experiment_change", "exposure"]
+    # The normal delivery contract is an object, but terminal inspection must
+    # remain usable for a malformed legacy JSON scalar that was quarantined
+    # precisely because it could not satisfy that contract.
+    payload: JsonValue
+    attempts: int = Field(..., ge=0)
+    last_error: str
+    failure_class: Literal["permanent", "attempts_exhausted"]
+    failure_code: str = Field(..., min_length=1)
+    created_at: str = Field(..., min_length=1)
+    quarantined_at: str = Field(..., min_length=1)
+
+
+class OutboxQuarantinePage(StrictModel):
+    """Canonical keyset page for one project's terminal Config deliveries."""
+
+    history_scope: Literal["project_quarantine"]
+    quarantine: list[OutboxQuarantineEntry]
+    count: int = Field(..., ge=0)
+    next_before_id: int | None = Field(
+        ...,
+        ge=1,
+        le=MAX_BIGSERIAL_ID,
+    )
+
+    @model_validator(mode="after")
+    def validate_count(self) -> "OutboxQuarantinePage":
+        if self.count != len(self.quarantine):
+            raise ValueError("count must equal the number of quarantine entries")
+        return self
+
+
+class OutboxQuarantineResolution(StrictModel):
+    """Successful audited replay or discard result."""
+
+    resolved: Literal[True]
+    action: Literal["replay", "discard"]
+    outbox_id: int = Field(..., ge=1, le=MAX_BIGSERIAL_ID)
+    entry: OutboxQuarantineEntry
+
+
+class ExperimentAuditEntry(StrictModel):
+    """One retained lifecycle mutation for an experiment key."""
+
+    id: int = Field(..., ge=1, le=MAX_BIGSERIAL_ID)
+    project_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9]+$",
+    )
+    experiment_key: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+    )
+    action: str = Field(..., min_length=1)
+    actor: str = Field(..., min_length=1)
+    previous_version: int | None = Field(..., ge=1)
+    new_version: int | None = Field(..., ge=1)
+    before: dict[str, Any] | None
+    after: dict[str, Any] | None
+    created_at: str = Field(..., min_length=1)
+
+
+class ExperimentAuditPage(StrictModel):
+    """Canonical keyset page for all retained history of one experiment key."""
+
+    # This field echoes the existing route scope. Creation enforces the
+    # canonical resource-key pattern, while a lookup for a noncanonical key
+    # retains the endpoint's existing empty-page behavior.
+    experiment_key: str
+    history_scope: Literal["experiment_key"]
+    audit: list[ExperimentAuditEntry]
+    count: int = Field(..., ge=0)
+    next_before_id: int | None = Field(
+        ...,
+        ge=1,
+        le=MAX_BIGSERIAL_ID,
+    )
+
+    @model_validator(mode="after")
+    def validate_count(self) -> "ExperimentAuditPage":
+        if self.count != len(self.audit):
+            raise ValueError("count must equal the number of audit entries")
+        return self
 
 
 ConditionOperator = Literal[
@@ -429,7 +549,7 @@ class GateEvaluateRequest(StrictModel):
     )
     key: str = Field(..., min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
     context: EvalContext = Field(default_factory=EvalContext)
-    log_exposure: bool = True
+    log_exposure: bool = False
     session_id: str = Field(default="", max_length=MAX_IDENTIFIER_LENGTH)
     message_id: str = Field(default="", max_length=MAX_IDENTIFIER_LENGTH)
     page: str = Field(default="", max_length=MAX_EVAL_PAGE_LENGTH)

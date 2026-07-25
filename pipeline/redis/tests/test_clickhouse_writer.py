@@ -346,6 +346,11 @@ def test_boundary_marker_schema_gate_rejects_wrong_ledger_checksum():
 def test_writer_schema_gate_failure_precedes_and_unwinds_runtime_locks(
     monkeypatch,
 ):
+    monkeypatch.setenv(
+        "POSTGRES_URL",
+        "postgresql://apdl:apdl_dev@postgres.test:5432/apdl",
+    )
+
     class Pool:
         def __init__(self):
             self.connection = object()
@@ -404,6 +409,16 @@ def test_writer_schema_gate_failure_precedes_and_unwinds_runtime_locks(
         assert pool.closed is True
 
     asyncio.run(scenario())
+
+
+def test_writer_requires_postgres_authority_url(monkeypatch):
+    monkeypatch.delenv("POSTGRES_URL", raising=False)
+
+    with pytest.raises(
+        RuntimeError,
+        match="POSTGRES_URL is required for the ClickHouse writer",
+    ):
+        asyncio.run(writer_module.main())
 
 
 def test_maintenance_inhibitor_loss_stops_writer() -> None:

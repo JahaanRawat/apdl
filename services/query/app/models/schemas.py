@@ -119,6 +119,7 @@ class DateRangeRequest(BaseModel):
 
 MAX_FILTER_MEMBERSHIP_VALUES = 100
 MAX_FILTER_STRING_LENGTH = 1_024
+MAX_EXACT_FILTER_INTEGER = (1 << 53) - 1
 
 
 def _is_filter_scalar(value: Any) -> bool:
@@ -126,11 +127,10 @@ def _is_filter_scalar(value: Any) -> bool:
         return len(value) <= MAX_FILTER_STRING_LENGTH
     if isinstance(value, bool):
         return True
-    if isinstance(value, int | float):
-        try:
-            return math.isfinite(float(value))
-        except OverflowError:
-            return False
+    if isinstance(value, int):
+        return -MAX_EXACT_FILTER_INTEGER <= value <= MAX_EXACT_FILTER_INTEGER
+    if isinstance(value, float):
+        return math.isfinite(value)
     return False
 
 

@@ -14,6 +14,8 @@ def test_evaluate_openapi_retains_canonical_request_schema():
     assert operation["requestBody"]["required"] is True
     schema = operation["requestBody"]["content"]["application/json"]["schema"]
     assert schema == {"$ref": "#/components/schemas/GateEvaluateRequest"}
+    request_schema = app.openapi()["components"]["schemas"]["GateEvaluateRequest"]
+    assert request_schema["properties"]["log_exposure"]["default"] is False
 
 
 @pytest.mark.asyncio
@@ -60,6 +62,7 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "log_exposure": True,
                 "message_id": "eval_checkout_001",
                 "page": "/checkout",
                 "component": "CheckoutPage",
@@ -114,6 +117,33 @@ async def test_evaluate_server_gate_logs_exposure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_evaluate_defaults_to_no_exposure_persistence(monkeypatch):
+    monkeypatch.setattr(
+        evaluate.pg_store,
+        "get_flag",
+        AsyncMock(return_value=make_flag({"evaluation_mode": "server"})),
+    )
+    enqueue = AsyncMock()
+    monkeypatch.setattr(evaluate.mutations, "enqueue_exposure", enqueue)
+    app.state.pg_pool = object()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/v1/evaluate",
+            json={
+                "project_id": "apdl",
+                "key": "checkout",
+                "context": {"user_id": "user_123", "attributes": {}},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["variant"] in {"control", "treatment"}
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_evaluate_server_gate_derives_metadata_from_stable_message_id(
     monkeypatch,
 ):
@@ -134,6 +164,7 @@ async def test_evaluate_server_gate_derives_metadata_from_stable_message_id(
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "log_exposure": True,
                 "message_id": "eval_checkout_002",
             },
         )
@@ -185,6 +216,7 @@ async def test_evaluate_reports_corrupt_rollout_without_exposure(
                     "project_id": "apdl",
                     "key": "checkout",
                     "context": {"user_id": "user_123", "attributes": {}},
+                    "log_exposure": True,
                     "message_id": "eval_corrupt_001",
                 },
             )
@@ -244,6 +276,7 @@ async def test_evaluate_does_not_persist_rollout_exclusion(monkeypatch):
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "log_exposure": True,
                 "message_id": "eval_excluded_001",
             },
         )
@@ -273,6 +306,7 @@ async def test_evaluate_rejects_client_only_gate(monkeypatch):
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "log_exposure": True,
                 "message_id": "eval_client_only_001",
             },
         )
@@ -295,6 +329,7 @@ async def test_evaluate_requires_identity_when_logging_exposure(monkeypatch):
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"attributes": {}},
+                "log_exposure": True,
                 "message_id": "eval_identity_001",
             },
         )
@@ -316,6 +351,7 @@ async def test_evaluate_requires_caller_owned_message_id_before_storage(
         "project_id": "apdl",
         "key": "checkout",
         "context": {"user_id": "user_123", "attributes": {}},
+        "log_exposure": True,
     }
     if message_id is not None:
         payload["message_id"] = message_id
@@ -341,7 +377,8 @@ async def test_evaluate_maps_message_id_payload_reuse_to_conflict(monkeypatch):
         "enqueue_exposure",
         AsyncMock(
             side_effect=evaluate.mutations.IntegrityError(
-                "Exposure message_id 'eval_conflict_001' was reused"
+                "Exposure message_id 'eval_conflict_001' is unique per exposure "
+                "and was reused for a different canonical payload"
             )
         ),
     )
@@ -355,12 +392,90 @@ async def test_evaluate_maps_message_id_payload_reuse_to_conflict(monkeypatch):
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "log_exposure": True,
                 "message_id": "eval_conflict_001",
             },
         )
 
     assert response.status_code == 409
     assert response.json()["error"] == "message_id_conflict"
+    assert "unique per exposure" in response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_rejects_one_message_id_across_two_flag_exposures(
+    monkeypatch,
+):
+    async def get_flag(_pool, _project_id, key):
+        return make_flag({"key": key, "name": key})
+
+    class Context:
+        def __init__(self, value):
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class ReceiptConnection:
+        def __init__(self):
+            self.canonical_payload = None
+
+        def transaction(self):
+            return Context(None)
+
+        async def fetchrow(self, sql, *args):
+            if "INSERT INTO config_exposure_receipts" in sql:
+                if self.canonical_payload is None:
+                    self.canonical_payload = args[2]
+                    return {"project_id": args[0]}
+                return None
+            if "SELECT canonical_payload" in sql:
+                return {"canonical_payload": self.canonical_payload}
+            raise AssertionError(sql)
+
+        async def execute(self, sql, *args):
+            assert "INSERT INTO config_outbox" in sql
+            return "INSERT 0 1"
+
+    class ReceiptPool:
+        def __init__(self):
+            self.connection = ReceiptConnection()
+
+        def acquire(self):
+            return Context(self.connection)
+
+    monkeypatch.setattr(evaluate.pg_store, "get_flag", get_flag)
+    app.state.pg_pool = ReceiptPool()
+    shared = {
+        "project_id": "apdl",
+        "context": {"user_id": "user_123", "attributes": {}},
+        "log_exposure": True,
+        "message_id": "request_cycle_001",
+    }
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        first = await client.post(
+            "/v1/evaluate",
+            json={**shared, "key": "checkout"},
+        )
+        second = await client.post(
+            "/v1/evaluate",
+            json={**shared, "key": "search"},
+        )
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+    assert second.json() == {
+        "error": "message_id_conflict",
+        "message": (
+            "Exposure message_id 'request_cycle_001' is unique per exposure "
+            "and was reused for a different canonical payload"
+        ),
+    }
 
 
 @pytest.mark.asyncio
@@ -459,6 +574,7 @@ async def test_evaluate_fails_closed_when_exposure_intent_cannot_persist(monkeyp
                 "project_id": "apdl",
                 "key": "checkout",
                 "context": {"user_id": "user_123", "attributes": {}},
+                "log_exposure": True,
                 "message_id": "eval_persistence_001",
             },
         )

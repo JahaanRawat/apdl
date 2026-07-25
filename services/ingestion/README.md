@@ -173,7 +173,7 @@ curl -X POST http://localhost:8080/v1/events \
 | Variable    | Default                  | Description                          |
 |-------------|--------------------------|--------------------------------------|
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection for stream output   |
-| `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Hashed credential registry |
+| `POSTGRES_URL` | `postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl` | Hashed credential registry through the non-owner runtime role |
 | `INGESTION_TRUSTED_PROXY_CIDRS` | empty | Comma-separated canonical CIDRs allowed to supply the single-hop `X-Forwarded-For` contract |
 
 JSON, rate-limit, and stream-admission settings are compile-time constants under

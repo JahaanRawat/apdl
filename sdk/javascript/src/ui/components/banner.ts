@@ -1,5 +1,5 @@
 import type { ComponentDefinition, RenderContext } from './types';
-import { requireSafeUiUrl } from '../url-policy';
+import { optionalSafeUiUrl } from '../url-policy';
 
 /**
  * Dismissible banner component.
@@ -29,10 +29,7 @@ export const BannerComponent: ComponentDefinition = {
   render(props: Record<string, unknown>, context: RenderContext): HTMLElement {
     const text = (props.text as string) || '';
     const ctaText = props.ctaText as string | undefined;
-    const ctaHref = props.ctaHref as string | undefined;
-    const safeCtaHref = ctaHref === undefined
-      ? null
-      : requireSafeUiUrl(ctaHref, 'banner.ctaHref');
+    const safeCtaHref = optionalSafeUiUrl(props.ctaHref, 'banner.ctaHref');
     const backgroundColor = (props.backgroundColor as string) || '#1a73e8';
     const textColor = (props.textColor as string) || '#ffffff';
     const dismissible = props.dismissible !== false;

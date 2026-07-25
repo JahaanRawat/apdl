@@ -13,10 +13,12 @@ flip its Status to `Fixed` and link the PR/commit.
 - **Integration status:** the audited stack merged into `main` on 2026-07-17 via
   PRs #98–#109 with all CI gates green, so every finding below applies to current
   `main` unless its Status says otherwise.
-- **Register status as of:** 2026-07-22 — RA-01 through RA-12 have
+- **Register status as of:** 2026-07-25 — RA-01 through RA-12 have
   remediation PRs on cumulative branches but remain **Open** pending merge into
-  `main` and independent re-audit. RA-13 through RA-18 remain
-  **Open** and are outside this implementation pass.
+  `main` and independent re-audit. The later cumulative stack remediates RA-14
+  in PR #125 and partially addresses RA-16 and RA-17 in PR #124. RA-13, RA-15,
+  and RA-18 remain Open. “Remediated” here records implementation evidence; it
+  does not mean `Fixed` until merge and independent re-audit.
 
 ## Pending remediation PR stack
 
@@ -25,29 +27,46 @@ branch contains its finding commit plus all preceding rows. These commits record
 remediation work, not finding closure; every finding remains **Open** until the
 stack is merged and independently re-audited.
 
-| Order | Finding | PR | Cumulative branch | Finding commit |
-|---:|---|---|---|---|
-| 1 | RA-01 | [#111](https://github.com/kuvera-apdl/apdl/pull/111) | `audit/ra-01-sdk-consent-isolation` | `53cae5b` |
-| 2 | RA-02 | [#112](https://github.com/kuvera-apdl/apdl/pull/112) | `audit/ra-02-database-maintenance-fence` | `6d91b36` |
-| 3 | RA-03 | [#113](https://github.com/kuvera-apdl/apdl/pull/113) | `audit/ra-03-sdk-safe-rendering` | `2fb64b7` |
-| 4 | RA-04 | [#114](https://github.com/kuvera-apdl/apdl/pull/114) | `audit/ra-04-clickhouse-selector-compatibility` | `4dfdd50` |
-| 5 | RA-05 | [#115](https://github.com/kuvera-apdl/apdl/pull/115) | `audit/ra-05-strict-selector-types` | `f753848` |
-| 6 | RA-06 | [#116](https://github.com/kuvera-apdl/apdl/pull/116) | `audit/ra-06-immutable-enrollment` | `62c56d8` |
-| 7 | RA-07 | [#117](https://github.com/kuvera-apdl/apdl/pull/117) | `audit/ra-07-archive-experiment-authority` | `ee5489a` |
-| 8 | RA-08 | [#118](https://github.com/kuvera-apdl/apdl/pull/118) | `audit/ra-08-stable-exposure-message-id` | `884a083` |
-| 9 | RA-09 | [#119](https://github.com/kuvera-apdl/apdl/pull/119) | `audit/ra-09-unknown-variant-finality` | `d84fd28` |
-| 10 | RA-10 | [#120](https://github.com/kuvera-apdl/apdl/pull/120) | `audit/ra-10-tenant-codegen-capability` | `b038c14` |
-| 11 | RA-12 | [#121](https://github.com/kuvera-apdl/apdl/pull/121) | `audit/ra-12-config-outbox-quarantine` | `6d13be6` |
-| 12 | RA-11 | [#122](https://github.com/kuvera-apdl/apdl/pull/122) | `audit/ra-11-agent-run-concurrency-lane` | `2c60f24` |
+| Order | Finding / layer | PR | Cumulative branch | Layer-tip commit | PostgreSQL migrations | ClickHouse migrations | Checked-in CI evidence |
+|---:|---|---|---|---|---|---|---|
+| 1 | RA-01 | [#111](https://github.com/kuvera-apdl/apdl/pull/111) | `audit/ra-01-sdk-consent-isolation` | `53cae5b` | — | — | JavaScript SDK |
+| 2 | RA-02 | [#112](https://github.com/kuvera-apdl/apdl/pull/112) | `audit/ra-02-database-maintenance-fence` | `6d91b36` | — | — | ClickHouse Writer; Fresh Install Core/Experiment; ClickHouse Upgrade |
+| 3 | RA-03 | [#113](https://github.com/kuvera-apdl/apdl/pull/113) | `audit/ra-03-sdk-safe-rendering` | `2fb64b7` | — | — | JavaScript SDK |
+| 4 | RA-04 | [#114](https://github.com/kuvera-apdl/apdl/pull/114) | `audit/ra-04-clickhouse-selector-compatibility` | `4dfdd50` | — | — | Query Service exact-ClickHouse step |
+| 5 | RA-05 | [#115](https://github.com/kuvera-apdl/apdl/pull/115) | `audit/ra-05-strict-selector-types` | `f753848` | — | — | Query Service exact-ClickHouse step |
+| 6 | RA-06 | [#116](https://github.com/kuvera-apdl/apdl/pull/116) | `audit/ra-06-immutable-enrollment` | `62c56d8` | `031` | — | Config Service; Fresh Install Experiment |
+| 7 | RA-07 | [#117](https://github.com/kuvera-apdl/apdl/pull/117) | `audit/ra-07-archive-experiment-authority` | `ee5489a` | `032` | — | Config Service; Query Service; Fresh Install Experiment |
+| 8 | RA-08 | [#118](https://github.com/kuvera-apdl/apdl/pull/118) | `audit/ra-08-stable-exposure-message-id` | `884a083` | — | — | Config Service; Fresh Install Experiment |
+| 9 | RA-09 | [#119](https://github.com/kuvera-apdl/apdl/pull/119) | `audit/ra-09-unknown-variant-finality` | `d84fd28` | — | — | Query Service; Fresh Install Experiment |
+| 10 | RA-10 | [#120](https://github.com/kuvera-apdl/apdl/pull/120) | `audit/ra-10-tenant-codegen-capability` | `b038c14` | — | — | Agents Service; Codegen Service and Worker |
+| 11 | RA-12 | [#121](https://github.com/kuvera-apdl/apdl/pull/121) | `audit/ra-12-config-outbox-quarantine` | `6d13be6` | `033` | — | Config Service |
+| 12 | RA-11 | [#122](https://github.com/kuvera-apdl/apdl/pull/122) | `audit/ra-11-agent-run-concurrency-lane` | `2c60f24` | `034` | — | Agents Service plus live PostgreSQL execution-lane races on the follow-up head |
+| 13 | Register | [#123](https://github.com/kuvera-apdl/apdl/pull/123) | `audit/reaudit-critical-high-register` | `67a7e6c` | — | — | Documentation layer; PR test-plan evidence |
+| 14 | First later release stack | [#124](https://github.com/kuvera-apdl/apdl/pull/124) | `stacked-release/39-experiment-smoke-enrollment-contract` | `23fdc88` | `035`–`038` | `013`–`014` | Config, Query, Agents, Writer; boundary-marker; fresh core/experiment |
+| 15 | Follow-up High stack | [#125](https://github.com/kuvera-apdl/apdl/pull/125) | `stacked-release/58-experiment-bucketing-identity` | `77997e3` | `039`–`043` | `015`–`016` | Service suites; dependency audit; fresh core/experiment; ClickHouse upgrade; exact-image release contracts |
 
 RA-12 intentionally precedes RA-11 in the stack because their PostgreSQL
 migrations are respectively `033_config_outbox_quarantine.sql` and
 `034_agent_project_execution_lane.sql`.
 
-This pass covers the formal Critical and High entries in the register's
-**Release blockers** table (RA-01–RA-12). RA-13–RA-18 remain important and
-Open, but the register classifies them as **High-priority gaps**, not formal
-High-severity entries in that table.
+The stacked-PR migration spans are contiguous: PostgreSQL `031`–`043` and
+ClickHouse `013`–`016`; the post-#125 review follow-up appends PostgreSQL
+migration `044`. “Checked-in CI evidence” names the jobs or steps in
+[`ci.yml`](../../.github/workflows/ci.yml) that exercise the layer at the
+current cumulative head. It is not a substitute for a recorded successful run:
+as of 2026-07-25, GitHub exposes no check runs for the current heads of
+PRs #123–#125. The merge gate must require green results for the exact rebased
+head before each layer lands. The post-#125 review follow-up additionally wires
+the RA-11 transaction races to a real PostgreSQL CI service and extends the
+fresh experiment smoke with direct database immutability attacks plus isolated
+contaminated/non-final and clean/final runs derived from the same canonical
+three-arm fixture; those gates also require a recorded successful run on the
+eventual PR head.
+
+The original pass covers the formal Critical and High entries in the
+register's **Release blockers** table (RA-01–RA-12). Later PRs also carry
+evidence for RA-14 and portions of RA-16/RA-17; those additions do not silently
+expand the declared scope of PR #123 or erase the remaining work.
 
 ## Release blockers
 
@@ -71,11 +90,67 @@ High-severity entries in that table.
 | ID | Severity | Finding | Area | Status |
 |---|---|---|---|---|
 | RA-13 | High-priority gap | Full client IP stored on every event for 12 months with no runtime consumer | Ingestion / events schema | Open |
-| RA-14 | High-priority gap | Derived personal-data tables (exposures, health events) have no TTL or purge path | ClickHouse migrations | Open |
+| RA-14 | High-priority gap | Derived personal-data tables (exposures, health events) have no TTL or purge path | ClickHouse migrations | Remediated in #125; pending merge/re-audit |
 | RA-15 | High-priority gap | `cookieless` is deterministic device fingerprinting and can split identity at startup | JS SDK privacy | Open |
-| RA-16 | High-priority gap | Valid-format invalid credentials reach PostgreSQL before any quota and can exhaust auth pools | Ingestion / Config / gateway | Open |
-| RA-17 | High-priority gap | Python SDK exposure dedupe is unbounded, process-scoped, and assigns one synthetic session to all users | Python SDK | Open |
+| RA-16 | High-priority gap | Valid-format invalid credentials reach PostgreSQL before any quota and can exhaust auth pools | Ingestion / Config / gateway | Partially remediated in #124 |
+| RA-17 | High-priority gap | Python SDK exposure dedupe is unbounded, process-scoped, and assigns one synthetic session to all users | Python SDK | Partially remediated in #124 |
 | RA-18 | High-priority gap | Singleton SDK init returns the first instance and silently ignores conflicting endpoint/consent/capture config | JS SDK init | Open |
+
+### Later-stack evidence for RA-14, RA-16, and RA-17
+
+- **RA-14 — remediated, pending merge/re-audit.** PR
+  [#125](https://github.com/kuvera-apdl/apdl/pull/125), commit
+  [`97fe46c`](https://github.com/kuvera-apdl/apdl/commit/97fe46cda64dc7b373fdfe3f40661715d1e9e0a7),
+  adds ClickHouse migration `016_personal_data_retention.sql`, PostgreSQL
+  migration `040_analytics_data_deletion_audit.sql`, the bounded
+  `delete_analytics_data.py` operator workflow, and upgrade/deletion tests.
+  Raw and derived personal analytics now share the twelve-calendar-month
+  server-receipt boundary, while project/user deletion verifies every explicit
+  table and records append-only completion evidence.
+- **RA-16 — partial.** PR
+  [#124](https://github.com/kuvera-apdl/apdl/pull/124), commit
+  [`5124d8f`](https://github.com/kuvera-apdl/apdl/commit/5124d8fccf21c968dc21c43d1ad1474d0cb1dacf),
+  adds fail-closed global/IP admission before Ingestion credential lookup, with
+  tests proving rejected traffic does not acquire PostgreSQL. The original
+  finding also covers Config and gateway admission plus a bounded negative
+  credential cache; those parts remain Open.
+- **RA-17 — partial.** PR
+  [#124](https://github.com/kuvera-apdl/apdl/pull/124), commit
+  [`3af524f`](https://github.com/kuvera-apdl/apdl/commit/3af524ffb46181c873a0475c09493cac1ab44ca8),
+  bounds successful exposure and missing-flag keys in both SDKs with FIFO
+  caches. The Python SDK still uses process-local deduplication and one
+  synthetic per-client session for unrelated callers, so caller-owned session
+  semantics or a time-bounded dedupe contract remains Open.
+
+## Migration handoff and re-audit notes
+
+Migration `036_config_outbox_retention.sql` is an additive successor to the
+contracts reviewed in PRs #118 and #121. PR #118 originally relied on the
+durable outbox row as exposure `message_id` conflict authority, and migration
+`033` in PR #121 added terminal quarantine to that retained row. Migration
+`036` moves long-lived exposure conflict authority into the
+`config_exposure_receipts` ledger so processed and quarantined outbox rows can
+be pruned. The ledger intentionally outlives the maximum ClickHouse event
+retention horizon.
+
+Do not rewrite, move, squash, or renumber the applied SQL history to make
+`036` appear adjacent to those earlier reviews. Both migrators bind each
+version to its exact filename and checksum; the correct merge is the existing
+contiguous order, followed by a combined-contract re-audit of `012`, `033`,
+and `036`. That re-audit must prove:
+
+1. an identical exposure retry remains a no-op after its outbox row is cleaned;
+2. conflicting `message_id` reuse still fails;
+3. a poison row quarantines without blocking later tenant delivery;
+4. cleanup respects processed, quarantined, and receipt-ledger horizons; and
+5. readiness/metrics do not scan the retained terminal-row population.
+
+The post-#125 follow-up migration
+`044_operator_recovery_and_retention.sql` adds explicit audited replay/discard
+and privacy-purge authority. It is another forward migration, not a reason to
+alter the historical chain. Operational decisions and recovery boundaries are
+documented in
+[Experiment finality and delivery recovery](../experiment-finality-and-delivery-recovery.md).
 
 ## Required closure per finding (condensed)
 

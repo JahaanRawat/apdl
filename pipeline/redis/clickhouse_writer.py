@@ -3658,10 +3658,12 @@ class ClickHouseWriter:
 
 async def main():
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    postgres_url = os.environ.get(
-        "POSTGRES_URL",
-        "postgresql://apdl:apdl_dev@localhost:5432/apdl",
-    )
+    postgres_url = os.environ.get("POSTGRES_URL", "").strip()
+    if not postgres_url:
+        raise RuntimeError(
+            "POSTGRES_URL is required for the ClickHouse writer maintenance "
+            "and completeness authorities"
+        )
     clickhouse_url = os.environ.get(
         "CLICKHOUSE_NATIVE_URL",
         "clickhouse://apdl:apdl_dev@localhost:9000/apdl",

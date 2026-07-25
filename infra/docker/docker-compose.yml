@@ -46,10 +46,12 @@ services:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init-apdl-roles.sh:/docker-entrypoint-initdb.d/10-apdl-roles.sh:ro
     environment:
       POSTGRES_DB: apdl
       POSTGRES_USER: apdl
       POSTGRES_PASSWORD: apdl_dev
+      APDL_RUNTIME_POSTGRES_PASSWORD: ${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}
     healthcheck:
       test:
         - CMD-SHELL
@@ -91,7 +93,7 @@ services:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_INGESTION_HOST_PORT:-8080}:8080"
     environment:
       REDIS_URL: redis://redis:6379
-      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       # Docker's default bridge address pool. Production deployments should
       # narrow this to the exact public-edge proxy network.
       INGESTION_TRUSTED_PROXY_CIDRS: ${INGESTION_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
@@ -123,11 +125,13 @@ services:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_CONFIG_HOST_PORT:-8081}:8081"
     environment:
       REDIS_URL: redis://redis:6379
-      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       # Docker's default bridge address pool. Production deployments should
       # narrow this to the exact public-edge proxy network.
       CONFIG_TRUSTED_PROXY_CIDRS: ${CONFIG_TRUSTED_PROXY_CIDRS:-172.16.0.0/12}
       SSE_CREDENTIAL_CHECK_INTERVAL_SECONDS: ${SSE_CREDENTIAL_CHECK_INTERVAL_SECONDS:-5}
+      CONFIG_OUTBOX_DEGRADED_MAX_PENDING_AGE_SECONDS: ${CONFIG_OUTBOX_DEGRADED_MAX_PENDING_AGE_SECONDS:-300}
+      CONFIG_OUTBOX_DEGRADED_MAX_QUARANTINED_ROWS: ${CONFIG_OUTBOX_DEGRADED_MAX_QUARANTINED_ROWS:-0}
       LOG_LEVEL: info
     healthcheck:
       test:
@@ -161,7 +165,7 @@ services:
       CLICKHOUSE_USER: apdl
       CLICKHOUSE_PASSWORD: apdl_dev
       CLICKHOUSE_DB: apdl
-      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       CONFIG_SERVICE_URL: http://config:8081
     healthcheck:
       test:
@@ -192,7 +196,7 @@ services:
     ports:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_AGENTS_HOST_PORT:-8083}:8083"
     environment:
-      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       REDIS_URL: redis://redis:6379
       CLICKHOUSE_URL: http://clickhouse:8123
       QUERY_SERVICE_URL: http://query:8082
@@ -235,7 +239,7 @@ services:
     expose:
       - "8084"
     environment:
-      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       # Provide the private key one of three ways (see .env.example). Base64 is
       # the simplest to carry through .env in Docker (no multi-line / no mount).
@@ -354,6 +358,10 @@ services:
         condition: service_completed_successfully
 
   clickhouse-writer:
+    # This service is intentionally not a bare `docker compose up` entrypoint.
+    # `make dev-core` / `make dev-all` apply ClickHouse migrations before
+    # starting it; PostgreSQL ordering remains encoded below because Compose
+    # can represent that one-shot migrator directly.
     build:
       context: ../../pipeline/redis
       dockerfile: Dockerfile
@@ -363,7 +371,7 @@ services:
       replicas: 1
     environment:
       REDIS_URL: redis://redis:6379
-      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       CLICKHOUSE_NATIVE_URL: clickhouse://apdl:apdl_dev@clickhouse:9000/apdl
       CLICKHOUSE_CONNECT_TIMEOUT_SECONDS: ${CLICKHOUSE_CONNECT_TIMEOUT_SECONDS:-5}
       CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS: ${CLICKHOUSE_SEND_RECEIVE_TIMEOUT_SECONDS:-30}
@@ -387,7 +395,7 @@ services:
       context: ../../services/admin-api
       dockerfile: Dockerfile
     environment:
-      POSTGRES_URL: postgresql://apdl:apdl_dev@postgres:5432/apdl
+      POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       INGESTION_SERVICE_URL: http://ingestion:8080
       CONFIG_SERVICE_URL: http://config:8081
       QUERY_SERVICE_URL: http://query:8082

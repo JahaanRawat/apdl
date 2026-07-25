@@ -140,7 +140,8 @@ async def lifespan(application: FastAPI):
     try:
         await client.connect()
         postgres_url = os.environ.get(
-            "POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl"
+            "POSTGRES_URL",
+            "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
         )
         auth_pool = await asyncpg.create_pool(
             postgres_url,

@@ -255,6 +255,10 @@ apdl/
 | Health overview / smoke test | `make status` / `make smoke` |
 | Stop containers | `make dev-down` |
 
+See [Database migration maintenance](docs/database-maintenance.md) for the
+drain barriers, timeout controls, failed-closed rerun procedure, and guarded
+recovery of a stale ClickHouse maintenance owner.
+
 Run a single test while iterating:
 
 ```bash

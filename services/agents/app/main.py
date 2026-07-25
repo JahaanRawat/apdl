@@ -138,7 +138,10 @@ async def _close_maintenance_monitor(connection, task, listener) -> None:
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
-    dsn = os.getenv("POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl")
+    dsn = os.getenv(
+        "POSTGRES_URL",
+        "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
+    )
 
     pool = await asyncpg.create_pool(
         dsn,

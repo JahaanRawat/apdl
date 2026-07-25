@@ -2,8 +2,19 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+QUERY_DIR="$ROOT_DIR/services/query"
+QUERY_PYTHON="$QUERY_DIR/.venv/bin/python"
 COMPOSE_FILE="$ROOT_DIR/infra/docker/docker-compose.yml"
 PROJECT_NAME="apdl-query-selectors-$$"
+
+if [[ ! -x "$QUERY_PYTHON" ]] || ! (
+    cd "$QUERY_DIR"
+    "$QUERY_PYTHON" -c 'import asynch, pytest' >/dev/null 2>&1
+); then
+    echo "Query virtualenv is missing or incomplete: $QUERY_DIR/.venv" >&2
+    echo "Run 'make setup' before 'make test-query-clickhouse'." >&2
+    exit 1
+fi
 
 compose() {
     APDL_BIND_ADDRESS=127.0.0.1 \
@@ -42,11 +53,11 @@ engine_version="$(
 )"
 echo "==> Executing selector matrix on ClickHouse $engine_version"
 (
-    cd "$ROOT_DIR/services/query"
+    cd "$QUERY_DIR"
     APDL_TEST_CLICKHOUSE_HOST=127.0.0.1 \
     APDL_TEST_CLICKHOUSE_PORT="$native_port" \
     APDL_TEST_CLICKHOUSE_USER=apdl \
     APDL_TEST_CLICKHOUSE_PASSWORD=apdl_dev \
     APDL_TEST_CLICKHOUSE_DB=apdl \
-        .venv/bin/python -m pytest -q tests/test_selector_clickhouse.py
+        "$QUERY_PYTHON" -m pytest -q tests/test_selector_clickhouse.py
 )

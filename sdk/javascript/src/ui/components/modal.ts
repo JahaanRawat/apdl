@@ -1,5 +1,5 @@
 import type { ComponentDefinition, RenderContext } from './types';
-import { requireSafeUiUrl } from '../url-policy';
+import { optionalSafeUiUrl } from '../url-policy';
 
 /**
  * Modal overlay component.
@@ -26,10 +26,7 @@ export const ModalComponent: ComponentDefinition = {
     const title = (props.title as string) || '';
     const body = (props.body as string) || '';
     const ctaText = props.ctaText as string | undefined;
-    const ctaHref = props.ctaHref as string | undefined;
-    const safeCtaHref = ctaHref === undefined
-      ? null
-      : requireSafeUiUrl(ctaHref, 'modal.ctaHref');
+    const safeCtaHref = optionalSafeUiUrl(props.ctaHref, 'modal.ctaHref');
     const cancelText = props.cancelText as string | undefined;
     const width = (props.width as string) || '480px';
     const closeOnBackdrop = props.closeOnBackdrop !== false;
