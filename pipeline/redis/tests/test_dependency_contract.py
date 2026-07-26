@@ -13,7 +13,7 @@ def test_fresh_setup_installs_writer_tools_without_bloating_runtime_image():
 
     assert "-r requirements.txt" in dev_requirements
     assert any(line.startswith("pytest>=") for line in dev_requirements)
-    assert any(line.startswith("ruff>=") for line in dev_requirements)
+    assert any(line.startswith("ruff==") for line in dev_requirements)
     assert "uv pip install -r requirements-dev.txt" in makefile
     assert "COPY requirements.lock ." in dockerfile
     assert "--require-hashes -r requirements.lock" in dockerfile
