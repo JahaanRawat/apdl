@@ -54,6 +54,13 @@ def _assert_matches_config_getters(configuration: dict) -> None:
     assert configuration["require_verify"] == config.codegen_require_verify()
 
 
+def test_unsupported_vertex_routing_is_not_advertised() -> None:
+    vertex_environment = {"VERTEXAI_PROJECT", "VERTEXAI_LOCATION"}
+
+    assert vertex_environment.isdisjoint(MODEL_PROVIDER_ENV)
+    assert vertex_environment.isdisjoint(MODEL_PROVIDER_ROUTING_ENV)
+
+
 def test_default_configuration_matches_effective_app_config(monkeypatch) -> None:
     _replace_relevant_environment(monkeypatch, {})
 
@@ -152,7 +159,6 @@ def test_ignored_or_equivalent_values_do_not_alter_fingerprint() -> None:
                 "CODEGEN_SDK_REFERENCE": "true",
                 "CODEGEN_REQUIRE_VERIFY": "true",
                 "OPENAI_API_BASE": "",
-                "VERTEXAI_PROJECT": "unrelated-project",
                 "AZURE_API_VERSION": "unrelated-version",
             }
         )
@@ -226,7 +232,6 @@ def test_provider_environment_is_the_exact_main_and_helper_union() -> None:
         "OPENAI_API_KEY": "openai-secret",
         "OPENAI_BASE_URL": "https://openai-gateway.example/v1",
         "GROQ_API_KEY": "unrelated-secret",
-        "VERTEXAI_PROJECT": "unrelated-project",
     }
 
     assert resolve_model_provider_environment(environment) == {

@@ -28,6 +28,12 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
   when a project has no active repository grant. Clients that treated the
   former `404 repository_not_configured` response as missing route/resource
   must migrate to the capability-conflict response.
+- Codegen's three no-fix worker dependency suppressions have a hard
+  `2026-08-22` UTC review boundary, after which CI deliberately fails without
+  renewed review. Renewal must update the Python approval authority in
+  `services/codegen/scripts/audit_worker_dependencies.py` and
+  `services/codegen/dependency-audit-suppressions.json` together; one-sided
+  changes fail closed.
 - ClickHouse migration now requires the PostgreSQL maintenance coordinator;
   ClickHouse-only deployment and bare-Compose migration startup are unsupported.
 - Fresh PostgreSQL installs now separate the migration owner from one shared

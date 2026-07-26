@@ -59,6 +59,8 @@ def test_base_compose_cannot_be_promoted_by_ambient_rollout_environment() -> Non
         "http://127.0.0.1:3128"
     )
     assert "CODEGEN_DEVELOPMENT_MODE" not in codegen_environment
+    assert "VERTEXAI_PROJECT" not in codegen_environment
+    assert "VERTEXAI_LOCATION" not in codegen_environment
 
 
 def test_development_overlay_wires_the_local_sandbox_runtime() -> None:
@@ -230,6 +232,8 @@ def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
     )
     assert codegen_environment["CODEGEN_SANDBOX_NETWORK"] == ""
     assert codegen_environment["CODEGEN_MAX_CONCURRENT_JOBS"] == "1"
+    assert "VERTEXAI_PROJECT" not in codegen_environment
+    assert "VERTEXAI_LOCATION" not in codegen_environment
     assert codegen["depends_on"]["codegen-egress-proxy"]["condition"] == (
         "service_healthy"
     )

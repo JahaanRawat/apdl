@@ -2,7 +2,8 @@
 
 Set ``APDL_AGENTS_LANE_TEST_POSTGRES_URL`` to a disposable, fully migrated
 database owned by a superuser.  The normal unit suite does not require a live
-database; release verification runs this test explicitly against PostgreSQL.
+database; release verification runs this test explicitly against PostgreSQL
+and fails during collection if CI loses the database configuration.
 """
 
 from __future__ import annotations
@@ -25,10 +26,18 @@ from app.store.approval_effects import (
 from app.store.run_leases import cancel_run
 
 
-POSTGRES_URL = os.getenv("APDL_AGENTS_LANE_TEST_POSTGRES_URL")
+POSTGRES_URL = (
+    os.getenv("APDL_AGENTS_LANE_TEST_POSTGRES_URL", "").strip() or None
+)
+
+if os.getenv("GITHUB_ACTIONS") == "true" and POSTGRES_URL is None:
+    raise RuntimeError(
+        "APDL_AGENTS_LANE_TEST_POSTGRES_URL is required in GitHub Actions; "
+        "the execution-lane race suite must not be skipped"
+    )
 
 pytestmark = pytest.mark.skipif(
-    not POSTGRES_URL,
+    POSTGRES_URL is None,
     reason="APDL_AGENTS_LANE_TEST_POSTGRES_URL is not configured",
 )
 
