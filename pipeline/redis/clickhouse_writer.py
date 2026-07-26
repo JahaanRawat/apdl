@@ -412,6 +412,27 @@ async def _heartbeat_maintenance_inhibitor(connection) -> None:
         )
 
 
+async def _verify_writer_authority(
+    maintenance_connections,
+    *,
+    heartbeat_seconds: float = MAINTENANCE_HEARTBEAT_SECONDS,
+) -> None:
+    """Verify every session without overlapping queries on one connection."""
+    await asyncio.gather(
+        *(
+            asyncio.wait_for(
+                _heartbeat_maintenance_inhibitor(maintenance_connection),
+                timeout=heartbeat_seconds,
+            )
+            for maintenance_connection in maintenance_connections
+        )
+    )
+    await asyncio.wait_for(
+        _heartbeat_writer_singleton(maintenance_connections[0]),
+        timeout=heartbeat_seconds,
+    )
+
+
 async def _monitor_maintenance_inhibitor(
     connection,
     writer,
@@ -3778,19 +3799,7 @@ async def main():
         try:
             # Close the acquire-to-monitor gap: no Redis consumption begins until
             # both backends positively prove both lock IDs are still held.
-            await asyncio.gather(
-                *(
-                    asyncio.wait_for(
-                        _heartbeat_maintenance_inhibitor(maintenance_connection),
-                        timeout=MAINTENANCE_HEARTBEAT_SECONDS,
-                    )
-                    for maintenance_connection in maintenance_connections
-                ),
-                asyncio.wait_for(
-                    _heartbeat_writer_singleton(maintenance_connections[0]),
-                    timeout=MAINTENANCE_HEARTBEAT_SECONDS,
-                ),
-            )
+            await _verify_writer_authority(maintenance_connections)
             for inhibitor_index, (
                 maintenance_connection,
                 connection_lost,

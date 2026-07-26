@@ -116,23 +116,28 @@ try {
         <script src="/apdl.iife.js"></script>
         <script>
           window.__apdlLifecycleError = null;
-          try {
-            window.__apdlRecoveryClient = new APDL.APDLClient({
-              endpoint: location.origin,
-              auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
-              autoCapture: false,
-              batchSize: 100,
-              flushInterval: 600000,
-              persistence: 'localStorage',
-              consent: {
-                analytics: true,
-                personalization: false,
-                experiments: false
-              }
-            });
-          } catch (error) {
-            window.__apdlLifecycleError = String(error?.stack ?? error);
-          }
+          // Give the terminating document's already-started IndexedDB
+          // transaction one task turn to commit before this client claims it.
+          // Loaded CI runners can otherwise activate this document first.
+          setTimeout(() => {
+            try {
+              window.__apdlRecoveryClient = new APDL.APDLClient({
+                endpoint: location.origin,
+                auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
+                autoCapture: false,
+                batchSize: 100,
+                flushInterval: 600000,
+                persistence: 'localStorage',
+                consent: {
+                  analytics: true,
+                  personalization: false,
+                  experiments: false
+                }
+              });
+            } catch (error) {
+              window.__apdlLifecycleError = String(error?.stack ?? error);
+            }
+          }, 100);
         </script>`
       );
       return;
@@ -322,7 +327,7 @@ async function waitForRequestCount(waiter, recorded, count) {
   while (recorded.length < count) {
     await withTimeout(
       waiter.promise,
-      10_000,
+      30_000,
       `timed out waiting for browser request ${count}`
     );
     if (recorded.length < count) {

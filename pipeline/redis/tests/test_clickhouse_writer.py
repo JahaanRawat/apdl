@@ -44,6 +44,41 @@ def test_each_maintenance_session_acquires_and_verifies_both_lock_ids() -> None:
     asyncio.run(scenario())
 
 
+def test_startup_authority_checks_do_not_overlap_queries_per_connection() -> None:
+    class GuardConnection:
+        def __init__(self) -> None:
+            self.busy = False
+            self.calls: list[str] = []
+
+        async def fetchval(self, query: str, _lock_ids) -> int:
+            assert self.busy is False, "asyncpg connections reject concurrent queries"
+            self.busy = True
+            try:
+                await asyncio.sleep(0)
+                if "mode = 'ShareLock'" in query:
+                    self.calls.append("inhibitor")
+                    return 2
+                assert "mode = 'ExclusiveLock'" in query
+                self.calls.append("singleton")
+                return 1
+            finally:
+                self.busy = False
+
+    async def scenario() -> None:
+        primary = GuardConnection()
+        redundant = GuardConnection()
+
+        await writer_module._verify_writer_authority(
+            [primary, redundant],
+            heartbeat_seconds=0.1,
+        )
+
+        assert primary.calls == ["inhibitor", "singleton"]
+        assert redundant.calls == ["inhibitor"]
+
+    asyncio.run(scenario())
+
+
 def test_boundary_marker_schema_gate_requires_exact_ledger_columns_and_state(
     monkeypatch,
 ):
