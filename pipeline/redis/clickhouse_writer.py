@@ -1001,12 +1001,25 @@ class ClickHouseWriter:
 
         await self._ensure_consumer_groups_for_streams(stream_keys)
 
-    async def _ensure_consumer_groups_for_streams(self, stream_keys: list[str]) -> None:
+    async def _ensure_consumer_groups_for_streams(
+        self,
+        stream_keys: list[str],
+        *,
+        validate_existing_authority: bool = True,
+    ) -> None:
         """Ensure groups for one already-resolved registry snapshot."""
         for stream_key in stream_keys:
-            await self._ensure_consumer_group(stream_key)
+            await self._ensure_consumer_group(
+                stream_key,
+                validate_existing_authority=validate_existing_authority,
+            )
 
-    async def _ensure_consumer_group(self, stream_key: str) -> None:
+    async def _ensure_consumer_group(
+        self,
+        stream_key: str,
+        *,
+        validate_existing_authority: bool = True,
+    ) -> None:
         """Create the required group without an unnecessary DENYOOM write."""
         try:
             groups = await self.redis_client.xinfo_groups(stream_key)
@@ -1037,13 +1050,14 @@ class ClickHouseWriter:
                 CONSUMER_GROUP,
                 stream_key,
             )
-            await self._initialize_pipeline_authority(
-                stream_key,
-                group_was_created=False,
-                observed_group_frontier=existing_group_frontier,
-                observed_group_entries_read=existing_group_entries_read,
-                safe_genesis=(existing_group_frontier == "0-0"),
-            )
+            if validate_existing_authority:
+                await self._initialize_pipeline_authority(
+                    stream_key,
+                    group_was_created=False,
+                    observed_group_frontier=existing_group_frontier,
+                    observed_group_entries_read=existing_group_entries_read,
+                    safe_genesis=(existing_group_frontier == "0-0"),
+                )
             return
 
         created = False
@@ -2030,17 +2044,38 @@ class ClickHouseWriter:
     async def _refresh_discovered_stream_registry(self) -> list[str]:
         """Atomically replace the registry after a complete valid refresh.
 
-        Discovery, legacy-history reconciliation, and consumer-group creation
-        must all succeed before readers can observe the new snapshot. Any
-        failure therefore leaves the last usable snapshot intact.
+        Discovery, legacy-history reconciliation, and consumer-group checks
+        must all succeed before readers can observe the new snapshot. Existing
+        groups were already validated at startup, so periodic refresh only
+        confirms that they still exist; revalidating their moving frontier
+        would mistake the normal Redis-to-PostgreSQL finalization gap for
+        restart drift. A deleted group is still recreated and permanently
+        degrades its existing authority. Any failure leaves the last usable
+        snapshot intact.
         """
         async with self._stream_registry_lock:
             stream_keys = self._normalized_stream_keys(await self._discover_streams())
+            new_stream_keys = [
+                stream_key
+                for stream_key in stream_keys
+                if stream_key not in self._known_stream_keys
+            ]
             await self._reconcile_acknowledged_history(
                 stream_keys,
                 require_group=False,
             )
-            await self._ensure_consumer_groups_for_streams(stream_keys)
+            if new_stream_keys:
+                await self._ensure_consumer_groups_for_streams(new_stream_keys)
+            known_stream_keys = [
+                stream_key
+                for stream_key in stream_keys
+                if stream_key in self._known_stream_keys
+            ]
+            if known_stream_keys:
+                await self._ensure_consumer_groups_for_streams(
+                    known_stream_keys,
+                    validate_existing_authority=False,
+                )
             self._replace_stream_registry(stream_keys)
             return sorted(self._known_stream_keys)
 
