@@ -845,7 +845,6 @@ describe('ExperimentDetailPage', () => {
           id: 'eu',
           name: 'EU',
           conditions: [{ attribute: 'country', operator: 'equals', value: 'DE' }],
-          rollout: { percentage: 100, bucket_by: 'user_id' },
         },
       ]),
     )
