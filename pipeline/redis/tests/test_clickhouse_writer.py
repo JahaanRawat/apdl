@@ -1769,6 +1769,39 @@ def test_existing_consumer_group_avoids_group_creation_write(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_known_consumer_group_skips_inflight_frontier_revalidation(monkeypatch):
+    async def scenario():
+        writer, redis_client, _ = make_writer(monkeypatch)
+        redis_client.stream_groups["events:raw:demo"] = [
+            {
+                "name": "clickhouse-writer",
+                "pending": 1,
+                "lag": 0,
+                "last-delivered-id": "2-0",
+                "entries-read": 2,
+            }
+        ]
+
+        async def reject_revalidation(*_args, **_kwargs):
+            raise AssertionError("known in-flight streams must not be revalidated")
+
+        monkeypatch.setattr(
+            writer,
+            "_initialize_pipeline_authority",
+            reject_revalidation,
+        )
+
+        await writer._ensure_consumer_groups_for_streams(
+            ["events:raw:demo"],
+            validate_existing_authority=False,
+        )
+
+        assert redis_client.group_creates == []
+        assert redis_client.xinfo_group_calls == ["events:raw:demo"]
+
+    asyncio.run(scenario())
+
+
 def test_dynamic_start_forces_discovery_before_group_creation(monkeypatch):
     async def scenario():
         writer, _, _ = make_writer(monkeypatch)
@@ -1873,8 +1906,14 @@ def test_successful_discovery_refresh_atomically_publishes_new_snapshot(
         async def reconcile(stream_keys, *, require_group=True):
             calls.append(("reconcile", tuple(stream_keys), require_group))
 
-        async def ensure(stream_keys):
-            calls.append(("ensure", tuple(stream_keys)))
+        async def ensure(stream_keys, *, validate_existing_authority=True):
+            calls.append(
+                (
+                    "ensure",
+                    tuple(stream_keys),
+                    validate_existing_authority,
+                )
+            )
 
         monkeypatch.setattr(writer, "_discover_streams", discover)
         monkeypatch.setattr(writer, "_reconcile_acknowledged_history", reconcile)
@@ -1891,7 +1930,46 @@ def test_successful_discovery_refresh_atomically_publishes_new_snapshot(
                 ("events:raw:new", "events:raw:old"),
                 False,
             ),
-            ("ensure", ("events:raw:new", "events:raw:old")),
+            ("ensure", ("events:raw:new",), True),
+            ("ensure", ("events:raw:old",), False),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_discovery_refresh_does_not_revalidate_known_inflight_stream(
+    monkeypatch,
+):
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch)
+        writer._replace_stream_registry(["events:raw:inflight"])
+        calls = []
+
+        async def discover():
+            return ["events:raw:inflight"]
+
+        async def reconcile(stream_keys, *, require_group=True):
+            calls.append(("reconcile", tuple(stream_keys), require_group))
+
+        async def ensure(stream_keys, *, validate_existing_authority=True):
+            calls.append(
+                (
+                    "ensure",
+                    tuple(stream_keys),
+                    validate_existing_authority,
+                )
+            )
+
+        monkeypatch.setattr(writer, "_discover_streams", discover)
+        monkeypatch.setattr(writer, "_reconcile_acknowledged_history", reconcile)
+        monkeypatch.setattr(writer, "_ensure_consumer_groups_for_streams", ensure)
+
+        assert await writer._refresh_discovered_stream_registry() == [
+            "events:raw:inflight"
+        ]
+        assert calls == [
+            ("reconcile", ("events:raw:inflight",), False),
+            ("ensure", ("events:raw:inflight",), False),
         ]
 
     asyncio.run(scenario())
