@@ -141,7 +141,22 @@ try {
   cdp?.close();
   await stopProcess(chrome);
   if (profileDirectory) {
-    await rm(profileDirectory, { recursive: true, force: true });
+    try {
+      // Chrome can still be flushing its profile when the parent process has
+      // already exited, so removal races it (observed: ENOTEMPTY on
+      // Default/). Retry, and never let temp-directory cleanup throw — a
+      // failure here replaces the real harness error in the finally block.
+      await rm(profileDirectory, {
+        recursive: true,
+        force: true,
+        maxRetries: 20,
+        retryDelay: 100,
+      });
+    } catch (error) {
+      console.warn(
+        `warning: could not remove ${profileDirectory}: ${error.message}`
+      );
+    }
   }
 }
 
