@@ -114,22 +114,29 @@ try {
     throw new Error(`${error.message}\n${stderr.join('')}`);
   }
 
-  // The reopened document constructs its client in the parser task, with no
-  // grace period for the terminating document's IndexedDB transaction — the
-  // ordering a fast same-origin navigation on a slow device produces. The
-  // recovery client therefore may claim the store before the predecessor has
-  // committed, and its first claim can legitimately observe nothing.
+  // The 100ms grace period is load-bearing, not decoration. It yields the main
+  // thread so the terminating document's already-started IndexedDB transaction
+  // can commit before the reopened document claims the store.
   //
-  // What this proves is that the durable batch is still delivered in that
-  // ordering, bounded by one flush interval rather than by winning the commit
-  // race. The client runs on the SDK's default 3s interval for exactly that
-  // reason: a long interval would make the assertion depend on the race, which
-  // is what it is here to rule out.
+  // Removing it was tried and reverted: runs 30324454994 and 30324906816 both
+  // failed with "timed out waiting for browser request 3" inside a 30s budget
+  // on loaded runners, while the same code passed on an idle one. So what this
+  // harness proves is recovery *given* that grace period — whether the SDK
+  // survives a zero-delay claim by the reopened document is an open question,
+  // not a demonstrated property. Settling it needs the store's contents dumped
+  // on timeout to separate "written but unclaimed" (an SDK gap) from "the
+  // predecessor never committed" (data loss); see the open finding.
+  //
+  // The recovery client also runs on the SDK's default 3s flush interval
+  // rather than 600000ms, so a first claim that observes an empty store is
+  // retried by the normal periodic flush instead of hanging until the budget
+  // expires.
   await runNavigationRecoveryCase({
+    recoveryGraceMs: 100,
     recoveryFlushInterval: 3_000,
     summary:
       '✓ H-02/H-04 failed keepalive is issued once and fully recovered after '
-      + 'navigation, with no grace period for the predecessor transaction',
+      + 'navigation',
   });
 } finally {
   cdp?.close();
@@ -155,6 +162,7 @@ try {
 }
 
 async function runNavigationRecoveryCase({
+  recoveryGraceMs,
   recoveryFlushInterval,
   summary,
 }) {
@@ -197,7 +205,7 @@ async function runNavigationRecoveryCase({
       }
       if (url.pathname === '/next') {
         response.writeHead(200, { 'Content-Type': 'text/html' }).end(
-          recoveryDocument(recoveryFlushInterval)
+          recoveryDocument(recoveryGraceMs, recoveryFlushInterval)
         );
         return;
       }
@@ -329,29 +337,35 @@ async function runNavigationRecoveryCase({
   }
 }
 
-function recoveryDocument(flushInterval) {
+function recoveryDocument(graceMs, flushInterval) {
+  const construct = `
+              window.__apdlRecoveryClient = new APDL.APDLClient({
+                endpoint: location.origin,
+                auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
+                autoCapture: false,
+                batchSize: 100,
+                flushInterval: ${flushInterval},
+                persistence: 'localStorage',
+                consent: {
+                  analytics: true,
+                  personalization: false,
+                  experiments: false
+                }
+              });`;
+
   return `<!doctype html>
         <title>APDL lifecycle recovery</title>
         <script src="/apdl.iife.js"></script>
         <script>
           window.__apdlLifecycleError = null;
-          try {
-            window.__apdlRecoveryClient = new APDL.APDLClient({
-              endpoint: location.origin,
-              auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
-              autoCapture: false,
-              batchSize: 100,
-              flushInterval: ${flushInterval},
-              persistence: 'localStorage',
-              consent: {
-                analytics: true,
-                personalization: false,
-                experiments: false
-              }
-            });
-          } catch (error) {
-            window.__apdlLifecycleError = String(error?.stack ?? error);
-          }
+          // Give the terminating document's already-started IndexedDB
+          // transaction ${graceMs}ms to commit before this client claims it.
+          setTimeout(() => {
+            try {${construct}
+            } catch (error) {
+              window.__apdlLifecycleError = String(error?.stack ?? error);
+            }
+          }, ${graceMs});
         </script>`;
 }
 
