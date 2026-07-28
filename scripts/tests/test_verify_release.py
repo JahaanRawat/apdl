@@ -197,18 +197,22 @@ class ReleaseManifestTests(unittest.TestCase):
             "matrix: ${{ fromJSON(needs.build-artifacts.outputs.docker_matrix) }}",
             workflow,
         )
-        self.assertIn(
-            "uses: docker/build-push-action@"
-            "10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2",
+        # Assert the action and its pin *form*, not one exact commit. Which
+        # commit is current is owned by test_github_action_pins.py, which
+        # rejects every mutable, tag, branch, or short-SHA reference in every
+        # workflow. Naming a specific SHA here as well only means a reviewed
+        # action bump fails this contract until someone edits this file, which
+        # is a maintenance trap, not a security property.
+        self.assertRegex(
             workflow,
+            r"uses: docker/build-push-action@[0-9a-f]{40} # v\d+(?:\.\d+)*",
         )
         self.assertIn("platforms: linux/amd64,linux/arm64", workflow)
         self.assertIn("provenance: mode=max", workflow)
         self.assertIn("sbom: true", workflow)
-        self.assertIn(
-            "uses: actions/attest-build-provenance@"
-            "977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0",
+        self.assertRegex(
             workflow,
+            r"uses: actions/attest-build-provenance@[0-9a-f]{40} # v\d+(?:\.\d+)*",
         )
         self.assertIn("packages: write", workflow)
         self.assertIn("Check immutable GHCR publication state", workflow)
