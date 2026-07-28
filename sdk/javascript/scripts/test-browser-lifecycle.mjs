@@ -293,7 +293,26 @@ async function runNavigationRecoveryCase({
       null,
       'the reopened SDK page must initialize without an exception'
     );
-    await waitForRequestCount(requestWaiter, requests, 3);
+    try {
+      await waitForRequestCount(requestWaiter, requests, 3);
+    } catch (error) {
+      // A timeout here has two very different causes and the message alone
+      // cannot tell them apart: the batch is durable but the reopened client
+      // never re-claimed it (an SDK gap in the one-shot restore), or the
+      // terminating document never committed it (H-02 data loss). Attach the
+      // store's contents so the failure carries its own diagnosis.
+      let durable = 'unavailable';
+      try {
+        durable = JSON.stringify(await readOfflineEvents(page));
+      } catch (readError) {
+        durable = `unreadable: ${readError.message}`;
+      }
+      error.message +=
+        `\n  requests observed: ${requests.length}`
+        + `\n  page error: ${await pageError(page).catch(() => 'unreadable')}`
+        + `\n  durable offline records: ${durable}`;
+      throw error;
+    }
     assert.deepEqual(
       requests[2].payload.events.map((event) => event.message_id),
       requests[0].payload.events.map((event) => event.message_id),
@@ -387,11 +406,19 @@ async function listen(httpServer) {
   return `http://127.0.0.1:${address.port}`;
 }
 
+// Recovery is bounded by the reopened client's flush interval plus however
+// long a contended runner takes to schedule it, which is not a property of
+// the SDK. 30s was not enough on a loaded runner even with the grace period
+// (runs 30324906816 and 30325100847), so this budget is deliberately far
+// above the real bound: a genuine regression still fails, it just fails
+// slower, and the diagnostic attached at the call site says why.
+const REQUEST_BUDGET_MS = 120_000;
+
 async function waitForRequestCount(waiter, recorded, count) {
   while (recorded.length < count) {
     await withTimeout(
       waiter.promise,
-      30_000,
+      REQUEST_BUDGET_MS,
       `timed out waiting for browser request ${count}`
     );
     if (recorded.length < count) {
