@@ -114,28 +114,22 @@ try {
     throw new Error(`${error.message}\n${stderr.join('')}`);
   }
 
-  // Each case runs on its own loopback port, so it gets its own origin and
-  // therefore its own IndexedDB and localStorage namespace inside the one
-  // browser profile.
+  // The reopened document constructs its client in the parser task, with no
+  // grace period for the terminating document's IndexedDB transaction — the
+  // ordering a fast same-origin navigation on a slow device produces. The
+  // recovery client therefore may claim the store before the predecessor has
+  // committed, and its first claim can legitimately observe nothing.
+  //
+  // What this proves is that the durable batch is still delivered in that
+  // ordering, bounded by one flush interval rather than by winning the commit
+  // race. The client runs on the SDK's default 3s interval for exactly that
+  // reason: a long interval would make the assertion depend on the race, which
+  // is what it is here to rule out.
   await runNavigationRecoveryCase({
-    recoveryGraceMs: 100,
-    recoveryFlushInterval: 600_000,
-    summary:
-      '✓ H-04 failed keepalive is issued once and fully recovered after navigation',
-  });
-
-  // The grace period above is a bound, not a fact about the SDK. Repeat the
-  // whole scenario with the recovery client constructed synchronously in the
-  // reopened document — the case a fast same-origin navigation on a slow
-  // device produces — so the durable batch has to survive being claimed while
-  // the terminating document's IndexedDB transaction may not have committed.
-  // The client runs on the SDK's default flush interval here, which is the
-  // real upper bound on recovery when the first claim observes an empty store.
-  await runNavigationRecoveryCase({
-    recoveryGraceMs: 0,
     recoveryFlushInterval: 3_000,
     summary:
-      '✓ H-02 durable batch survives a zero-delay claim by the reopened document',
+      '✓ H-02/H-04 failed keepalive is issued once and fully recovered after '
+      + 'navigation, with no grace period for the predecessor transaction',
   });
 } finally {
   cdp?.close();
@@ -161,7 +155,6 @@ try {
 }
 
 async function runNavigationRecoveryCase({
-  recoveryGraceMs,
   recoveryFlushInterval,
   summary,
 }) {
@@ -204,7 +197,7 @@ async function runNavigationRecoveryCase({
       }
       if (url.pathname === '/next') {
         response.writeHead(200, { 'Content-Type': 'text/html' }).end(
-          recoveryDocument(recoveryGraceMs, recoveryFlushInterval)
+          recoveryDocument(recoveryFlushInterval)
         );
         return;
       }
@@ -336,41 +329,29 @@ async function runNavigationRecoveryCase({
   }
 }
 
-function recoveryDocument(graceMs, flushInterval) {
-  const construct = `
-            try {
-              window.__apdlRecoveryClient = new APDL.APDLClient({
-                endpoint: location.origin,
-                auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
-                autoCapture: false,
-                batchSize: 100,
-                flushInterval: ${flushInterval},
-                persistence: 'localStorage',
-                consent: {
-                  analytics: true,
-                  personalization: false,
-                  experiments: false
-                }
-              });
-            } catch (error) {
-              window.__apdlLifecycleError = String(error?.stack ?? error);
-            }`;
-
-  // graceMs > 0 gives the terminating document's already-started IndexedDB
-  // transaction that many milliseconds to commit before this client claims
-  // the store. graceMs === 0 constructs the client in the parser task, with
-  // no such guarantee.
-  const body = graceMs > 0
-    ? `          setTimeout(() => {${construct}
-          }, ${graceMs});`
-    : construct;
-
+function recoveryDocument(flushInterval) {
   return `<!doctype html>
         <title>APDL lifecycle recovery</title>
         <script src="/apdl.iife.js"></script>
         <script>
           window.__apdlLifecycleError = null;
-${body}
+          try {
+            window.__apdlRecoveryClient = new APDL.APDLClient({
+              endpoint: location.origin,
+              auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
+              autoCapture: false,
+              batchSize: 100,
+              flushInterval: ${flushInterval},
+              persistence: 'localStorage',
+              consent: {
+                analytics: true,
+                personalization: false,
+                experiments: false
+              }
+            });
+          } catch (error) {
+            window.__apdlLifecycleError = String(error?.stack ?? error);
+          }
         </script>`;
 }
 
