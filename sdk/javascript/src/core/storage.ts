@@ -227,7 +227,22 @@ export class OfflineStorage {
     }
   }
 
-  async store(events: TrackEvent[]): Promise<OfflineStoreResult> {
+  /**
+   * Persists events durably.
+   *
+   * `deferBounds` drops the eviction scan from this write's transaction. Use
+   * it only on the unload path: the scan is a full-store cursor walk that
+   * spans many event-loop turns, and it shares its transaction with the adds,
+   * so a document destroyed mid-scan aborts the whole transaction and rolls
+   * the adds back with it. Trading one deferred bound for a durable write is
+   * the right way round — the bound is re-enforced by the very next normal
+   * store, including the recovering document's first write, whereas a lost
+   * transaction is lost analytics.
+   */
+  async store(
+    events: TrackEvent[],
+    { deferBounds = false }: { deferBounds?: boolean } = {}
+  ): Promise<OfflineStoreResult> {
     if (events.length === 0) return emptyStoreResult();
 
     const candidates: StoreCandidate[] = [];
@@ -251,7 +266,12 @@ export class OfflineStorage {
     // yields. Lifecycle drains rely on that synchronous hand-off so the browser
     // can finish a queued durable write while the document is terminating.
     if (this.readyDb !== null) {
-      return this.storeInDatabase(this.readyDb, candidates, rejected);
+      return this.storeInDatabase(
+        this.readyDb,
+        candidates,
+        rejected,
+        deferBounds
+      );
     }
 
     const db = await this.getDB();
@@ -259,13 +279,14 @@ export class OfflineStorage {
       return this.storeInFallback(candidates, rejected);
     }
 
-    return this.storeInDatabase(db, candidates, rejected);
+    return this.storeInDatabase(db, candidates, rejected, deferBounds);
   }
 
   private storeInDatabase(
     db: IDBDatabase,
     candidates: StoreCandidate[],
-    rejected: OfflineRejectedEvent[]
+    rejected: OfflineRejectedEvent[],
+    deferBounds = false
   ): Promise<OfflineStoreResult> {
     return new Promise<OfflineStoreResult>((resolve) => {
       let settled = false;
@@ -334,16 +355,23 @@ export class OfflineStorage {
             }
           };
         }
-        this.enforceIndexedDBBounds(
-          store,
-          activeTx,
-          Date.now(),
-          evicted,
-          evictedIds,
-          () => {
-            scanFinished = true;
-          }
-        );
+        if (deferBounds) {
+          // No cursor walk: the transaction now holds nothing but the adds, so
+          // it is the shortest write the browser can be asked to commit while
+          // the document is going away.
+          scanFinished = true;
+        } else {
+          this.enforceIndexedDBBounds(
+            store,
+            activeTx,
+            Date.now(),
+            evicted,
+            evictedIds,
+            () => {
+              scanFinished = true;
+            }
+          );
+        }
       } catch {
         if (tx === null) {
           finishFallback();
