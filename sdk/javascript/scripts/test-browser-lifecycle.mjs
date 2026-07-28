@@ -7,6 +7,14 @@ import { join } from 'node:path';
 
 const CLIENT_KEY = 'client_apdl_0123456789abcdef';
 const KEEPALIVE_BUDGET_BYTES = 48 * 1024;
+
+// Recovery is bounded by the reopened client's flush interval plus however
+// long a contended runner takes to schedule it, which is not a property of
+// the SDK. 30s was not enough on a loaded runner even with the grace period
+// (runs 30324906816 and 30325100847), so this budget is deliberately far
+// above the real bound: a genuine regression still fails, it just fails
+// slower, and the diagnostic attached at the call site says why.
+const REQUEST_BUDGET_MS = 120_000;
 const bundle = await readFile(
   new URL('../dist/apdl.iife.js', import.meta.url),
   'utf8'
@@ -405,14 +413,6 @@ async function listen(httpServer) {
   assert.ok(address && typeof address === 'object');
   return `http://127.0.0.1:${address.port}`;
 }
-
-// Recovery is bounded by the reopened client's flush interval plus however
-// long a contended runner takes to schedule it, which is not a property of
-// the SDK. 30s was not enough on a loaded runner even with the grace period
-// (runs 30324906816 and 30325100847), so this budget is deliberately far
-// above the real bound: a genuine regression still fails, it just fails
-// slower, and the diagnostic attached at the call site says why.
-const REQUEST_BUDGET_MS = 120_000;
 
 async function waitForRequestCount(waiter, recorded, count) {
   while (recorded.length < count) {
