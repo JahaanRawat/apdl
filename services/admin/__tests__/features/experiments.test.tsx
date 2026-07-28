@@ -46,6 +46,7 @@ const STATISTICAL_PLAN = {
 const EXPERIMENT = {
   key: 'checkout-test',
   flag_key: 'checkout-test',
+  bucket_by: 'anonymous_id',
   status: 'running',
   description: 'CTA experiment',
   default_variant: 'control',
@@ -103,6 +104,7 @@ const server = setupServer(
       updated: true,
       key: String(params.key),
       flag_key: 'checkout-test',
+      bucket_by: 'anonymous_id',
       version: 3,
     })
   }),
@@ -129,6 +131,10 @@ describe('experiment schemas', () => {
     // The record is canonical now — the flag link is required, not optional.
     const { flag_key: _flagKey, ...withoutFlagKey } = EXPERIMENT
     expect(experimentEntrySchema.safeParse(withoutFlagKey).success).toBe(false)
+    const { bucket_by: _bucketBy, ...withoutBucketBy } = EXPERIMENT
+    expect(experimentEntrySchema.safeParse(withoutBucketBy).success).toBe(false)
+    expect(experimentEntrySchema.safeParse({ ...EXPERIMENT, bucket_by: 'account_id' }).success)
+      .toBe(false)
     expect(experimentEntrySchema.safeParse({ ...EXPERIMENT, status: 'scheduled' }).success).toBe(true)
     expect(experimentEntrySchema.safeParse({ ...EXPERIMENT, start_date: '2026-06-01' }).success).toBe(false)
     expect(experimentEntrySchema.safeParse(ARCHIVED_EXPERIMENT).success).toBe(true)
@@ -139,15 +145,22 @@ describe('experiment schemas', () => {
   test('write schemas require versions and response versions', () => {
     const create = buildCreate({ ...emptyExperimentValues(), key: 'checkout-test' })
     expect(experimentCreateSchema.safeParse(create).success).toBe(true)
+    const { bucket_by: _bucketBy, ...createWithoutBucketBy } = create
+    expect(experimentCreateSchema.safeParse(createWithoutBucketBy).success).toBe(false)
+    expect(experimentCreateSchema.safeParse({ ...create, bucket_by: 'account_id' }).success)
+      .toBe(false)
     expect(experimentCreateSchema.safeParse({ ...create, status: 'completed' }).success).toBe(false)
     expect(experimentCreateSchema.safeParse({ ...create, status: 'stopped' }).success).toBe(false)
     expect(experimentUpdateSchema.safeParse({ version: 2, description: 'updated' }).success).toBe(true)
+    expect(experimentUpdateSchema.safeParse({ version: 2, bucket_by: 'user_id' }).success).toBe(true)
+    expect(experimentUpdateSchema.safeParse({ version: 2, bucket_by: null }).success).toBe(false)
     expect(experimentUpdateSchema.safeParse({ description: 'updated' }).success).toBe(false)
     expect(
       experimentCreateResponseSchema.safeParse({
         created: true,
         key: 'checkout-test',
         flag_key: 'checkout-flag',
+        bucket_by: 'anonymous_id',
         version: 1,
       }).success,
     ).toBe(true)
@@ -156,6 +169,32 @@ describe('experiment schemas', () => {
         updated: true,
         key: 'checkout-test',
         flag_key: 'checkout-flag',
+        version: 3,
+      }).success,
+    ).toBe(false)
+    expect(
+      experimentCreateResponseSchema.safeParse({
+        created: false,
+        key: 'checkout-test',
+        flag_key: 'checkout-flag',
+        bucket_by: 'user_id',
+        version: 1,
+      }).success,
+    ).toBe(true)
+    expect(
+      experimentCreateResponseSchema.safeParse({
+        created: false,
+        key: 'checkout-test',
+        flag_key: 'checkout-flag',
+        version: 1,
+      }).success,
+    ).toBe(false)
+    expect(
+      experimentUpdateResponseSchema.safeParse({
+        updated: true,
+        key: 'checkout-test',
+        flag_key: 'checkout-flag',
+        bucket_by: 'anonymous_id',
         version: 3,
       }).success,
     ).toBe(true)
@@ -341,6 +380,7 @@ describe('experiment form model', () => {
       flagKey: '',
       status: 'running',
       description: 'd',
+      bucket_by: 'anonymous_id',
       traffic_percentage: 50,
       start_date: '2026-06-01',
       end_date: '',
@@ -364,6 +404,7 @@ describe('experiment form model', () => {
       flag_key: 'exp-1',
       status: 'running',
       description: 'd',
+      bucket_by: 'anonymous_id',
       traffic_percentage: 50,
       start_date: '2026-06-01T00:00:00Z',
       end_date: null,
@@ -390,6 +431,7 @@ describe('experiment form model', () => {
     })
     const draftValues = entryToFormValues(draft)
     draftValues.description = 'Changed'
+    draftValues.bucket_by = 'user_id'
     draftValues.start_date = '2026-06-01'
     draftValues.traffic_percentage = 50
     draftValues.targetingRulesJson = JSON.stringify([
@@ -402,6 +444,7 @@ describe('experiment form model', () => {
     expect(buildUpdate(draftValues, draft, 7)).toEqual({
       version: 7,
       description: 'Changed',
+      bucket_by: 'user_id',
       traffic_percentage: 50,
       targeting_rules: [
         {
@@ -648,6 +691,10 @@ describe('ExperimentDetailPage', () => {
 
     await screen.findByDisplayValue('CTA experiment')
     expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toHaveValue(
+      'anonymous_id',
+    )
     expect(screen.getByRole('textbox', { name: 'Targeting rules JSON' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Control variant' })).toHaveValue('control')
     expect(
