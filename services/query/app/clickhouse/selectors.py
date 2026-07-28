@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models.schemas import EventFilterOperator, EventPropertyFilter, EventSelector
+from app.models.schemas import (
+    MAX_EXACT_FILTER_INTEGER,
+    EventFilterOperator,
+    EventPropertyFilter,
+    EventSelector,
+)
 
 
 def selector_label(selector: EventSelector) -> str:
@@ -66,13 +71,12 @@ def _build_filter_condition(
 ) -> str:
     property_param = f"{prefix}_property"
     params[property_param] = filter_.property
-    has_property = f"JSONHas({properties_column}, %({property_param})s)"
 
     operator = filter_.operator
     if operator == EventFilterOperator.exists:
-        return has_property
+        return f"JSONHas({properties_column}, %({property_param})s)"
     if operator == EventFilterOperator.not_exists:
-        return f"NOT {has_property}"
+        return f"NOT JSONHas({properties_column}, %({property_param})s)"
 
     if operator == EventFilterOperator.contains:
         value_param = f"{prefix}_value"
@@ -84,8 +88,7 @@ def _build_filter_condition(
             property_param,
         )
         return (
-            f"({has_property} AND {json_type} "
-            f"AND position({extractor}, %({value_param})s) > 0)"
+            f"({json_type} AND position({extractor}, %({value_param})s) > 0)"
         )
 
     if operator in {
@@ -103,10 +106,7 @@ def _build_filter_condition(
             properties_column,
             property_param,
         )
-        return (
-            f"({has_property} AND {json_type} "
-            f"AND {extractor} {comparator} %({value_param})s)"
-        )
+        return f"({json_type} AND {extractor} {comparator} %({value_param})s)"
 
     if operator in {EventFilterOperator.in_, EventFilterOperator.not_in}:
         value_params = []
@@ -124,8 +124,7 @@ def _build_filter_condition(
         comparator = "IN" if operator == EventFilterOperator.in_ else "NOT IN"
         values_sql = ", ".join(value_params)
         return (
-            f"({has_property} AND {json_type} "
-            f"AND {extractor} {comparator} ({values_sql}))"
+            f"({json_type} AND {extractor} {comparator} ({values_sql}))"
         )
 
     value_param = f"{prefix}_value"
@@ -137,10 +136,7 @@ def _build_filter_condition(
         property_param,
     )
     comparator = "=" if operator == EventFilterOperator.eq else "!="
-    return (
-        f"({has_property} AND {json_type} "
-        f"AND {extractor} {comparator} %({value_param})s)"
-    )
+    return f"({json_type} AND {extractor} {comparator} %({value_param})s)"
 
 
 def _extractor_for_value(value: Any, properties_column: str, property_param: str) -> str:
@@ -160,7 +156,14 @@ def _json_type_condition(
     if isinstance(value, bool):
         return f"{json_type} = 'Bool'"
     if isinstance(value, int | float):
-        return f"{json_type} IN ('Int64', 'UInt64', 'Double')"
+        signed_value = (
+            f"JSONExtractInt({properties_column}, %({property_param})s)"
+        )
+        return (
+            f"(({json_type} = 'Int64' AND {signed_value} "
+            f"BETWEEN {-MAX_EXACT_FILTER_INTEGER} AND {MAX_EXACT_FILTER_INTEGER}) "
+            f"OR {json_type} = 'Double')"
+        )
     return f"{json_type} = 'String'"
 
 

@@ -269,7 +269,11 @@ def _stop_operation(
         except ProcessLookupError:
             pass
         except BaseException:
-            continue
+            # The launcher may raise while its state is still ambiguous (for
+            # example from a signal handler or a broken process wrapper).
+            # Retain the database guard, but never turn that ambiguity into an
+            # unlogged hot spin.
+            pass
         if not warned_about_launcher:
             print(
                 "CRITICAL: local migration client termination is unproven; "

@@ -157,13 +157,10 @@ export class APDLClient implements APDLApi {
   };
 
   constructor(config: PartialAPDLConfig) {
-    const consentWasExplicitlySupplied = Object.prototype.hasOwnProperty.call(
-      config,
-      'consent'
-    );
+    const consentWasExplicitlySupplied = config.consent !== undefined;
     this.config = resolveConfig(config, { strict: true });
     const storageScope = this.storageScope();
-    rejectLegacyProjectStorage(this.config.projectId, this.config.persistence);
+    rejectLegacyProjectStorage(this.config.projectId);
 
     // Privacy subsystems
     this.consentManager = new ConsentManager(

@@ -99,6 +99,40 @@ describe('built-in UI security', () => {
     }
   );
 
+  it.each([undefined, null, ''])(
+    'treats optional URL value %j as no URL in every built-in',
+    (optionalUrl) => {
+      const banner = BannerComponent.render({
+        text: 'Banner',
+        ctaText: 'Continue',
+        ctaHref: optionalUrl,
+      }, context);
+      const card = CardComponent.render({
+        title: 'Card',
+        imageUrl: optionalUrl,
+        ctaText: 'Continue',
+        ctaHref: optionalUrl,
+      }, context);
+      const cta = CTAButtonComponent.render({
+        text: 'Continue',
+        href: optionalUrl,
+      }, context);
+      const modal = ModalComponent.render({
+        title: 'Modal',
+        ctaText: 'Continue',
+        ctaHref: optionalUrl,
+      }, context);
+
+      expect(banner.querySelector('a')).toBeNull();
+      expect(card.querySelector('a, img')).toBeNull();
+      expect(cta).toBeInstanceOf(HTMLButtonElement);
+      expect(modal.querySelector('a')).toBeNull();
+      expect(banner.textContent).toContain('Continue');
+      expect(card.textContent).toContain('Continue');
+      expect(modal.textContent).toContain('Continue');
+    }
+  );
+
   it('keeps href-less actions as buttons and hardens new-window links', () => {
     const hrefLess = CTAButtonComponent.render({ text: 'Submit' }, context);
     const linked = CTAButtonComponent.render({

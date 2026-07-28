@@ -35,11 +35,16 @@ def test_bucket_identity_is_immutable_after_draft_in_postgres():
         "BEFORE UPDATE OF status, bucket_by, traffic_percentage"
         in MIGRATION_SQL
     )
+    assert (
+        "paired with experiments_minimum_exposure_version_check"
+        in MIGRATION_SQL
+    )
+    assert "blocks status-only draft downgrades" in MIGRATION_SQL
 
 
-def test_config_startup_requires_migration_043_column_and_constraint():
-    assert schema.MIGRATION_VERSION == 43
-    assert schema.MIGRATION_NAME == "043_experiment_bucket_identity.sql"
+def test_config_startup_retains_migration_043_column_and_constraint():
+    assert schema.MIGRATION_VERSION >= 43
+    assert schema.MIGRATION_NAME.endswith(".sql")
     assert ("experiments", "bucket_by") in schema.REQUIRED_COLUMNS
     assert (
         "experiments",

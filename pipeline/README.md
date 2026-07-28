@@ -102,6 +102,10 @@ an explicit aggregate memory ceiling with `maxmemory-policy noeviction`. Route
 Logging is only the checked-in signal; it does not become an operational alert
 until the deployment routes it.
 
+The boundary/watermark decision record, non-final reason mapping, and response
+to pending, quarantined, or irreversibly degraded authority are documented in
+[Experiment finality and delivery recovery](../docs/experiment-finality-and-delivery-recovery.md).
+
 Persistent pre-policy streams are reconciled by the writer before consumption:
 an exact `XTRIM MINID` removes only legacy entries proven acknowledged before
 the earliest pending delivery. This makes old acknowledged history stop
@@ -121,9 +125,10 @@ bounded producers. Mixed old/new producers are unsupported because one legacy
 producer can still trim entries admitted by another process.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
-`POSTGRES_URL` (default
-`postgresql://apdl:apdl_dev@localhost:5432/apdl`, used for singleton writer and
-migration-inhibitor authority),
+`POSTGRES_URL` (required; for local development use
+`postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl`; it provides
+singleton-writer and migration-inhibitor authority, while the database owner is
+migration-only),
 `CLICKHOUSE_NATIVE_URL` (default
 `clickhouse://apdl:apdl_dev@localhost:9000/apdl`), `BUFFER_SIZE`,
 `FLUSH_INTERVAL`, `DLQ_MAXLEN` (default 10000 per project),
@@ -261,8 +266,11 @@ renaming, editing, deleting, or inserting an older file fails closed.
 Config, Agents, and Codegen never create or alter tables at process startup.
 They verify the required ledger entry and schema columns, then fail with a
 `make migrate-postgres` instruction if the database is behind. Docker Compose
-gates all PostgreSQL consumers on the one-shot `postgres-migrate` service, so a
-plain full-stack Compose start has the same ordering as `make dev-all`.
+gates all PostgreSQL consumers on the one-shot `postgres-migrate` service.
+That gives PostgreSQL consumers the same ordering within the full-stack file,
+but bare Compose is not a supported startup path because it does not sequence
+the independently coordinated ClickHouse migration. Use `make dev-core` or
+`make dev-all`.
 
 The obsolete PostgreSQL files formerly numbered 005 and 011 under the
 ClickHouse directory are not applied verbatim. Their UUID/`vector(1536)` Agent

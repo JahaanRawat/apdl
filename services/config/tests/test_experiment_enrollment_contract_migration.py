@@ -85,3 +85,15 @@ def test_migration_restores_stricter_lifecycle_guards():
         MIGRATION_SQL
     )
     assert "CREATE TRIGGER experiments_enforce_archive_lifecycle" in MIGRATION_SQL
+
+
+def test_status_downgrade_guards_document_their_load_bearing_pair():
+    assert (
+        "COMMENT ON CONSTRAINT experiments_minimum_exposure_version_check"
+        in MIGRATION_SQL
+    )
+    assert "blocks status-only draft downgrades" in MIGRATION_SQL
+    assert (
+        "paired with experiments_minimum_exposure_version_check"
+        in MIGRATION_SQL
+    )

@@ -1010,7 +1010,10 @@ describe('APDLClient', () => {
         flaggedClient as unknown as { featureFlagExposureKeys: Set<string> }
       ).featureFlagExposureKeys;
       expect(exposureKeys.size).toBe(10_000);
-    });
+      // 10,000 evaluations are CPU-bound, not time-bound: this case has been
+      // measured at 4.6s of the 5s default on a shared runner. The explicit
+      // budget keeps the bound assertion without racing the default timeout.
+    }, 60_000);
 
     it('should return the fallback without exposing rollout-excluded actors', async () => {
       fetchMock.mockResolvedValueOnce({
@@ -1709,6 +1712,27 @@ describe('APDLClient', () => {
       await restoredClient.shutdown();
     });
 
+    it('should treat an explicitly undefined consent value as omitted', async () => {
+      const consentKey = browserStorageKey('consent', 'apdl');
+      const persistedConsent = {
+        analytics: true,
+        personalization: false,
+        experiments: true,
+      };
+      localStorage.setItem(consentKey, JSON.stringify(persistedConsent));
+
+      const restoredClient = new APDLClient(createTestConfig({
+        persistence: 'localStorage',
+        consent: undefined,
+      }));
+
+      expect(restoredClient.consent.get()).toEqual(persistedConsent);
+      expect(JSON.parse(localStorage.getItem(consentKey) ?? 'null'))
+        .toEqual(persistedConsent);
+
+      await restoredClient.shutdown();
+    });
+
     it('should clear accepted events and stop auto-capture until consent is regranted', async () => {
       const captureClient = new APDLClient(createTestConfig({
         autoCapture: {
@@ -1886,6 +1910,18 @@ describe('APDLClient', () => {
     });
 
     it('should namespace browser identity, session, consent, and flags by deployment and project', async () => {
+      localStorage.setItem('apdl_anonymous_id', 'first-generation-anonymous-id');
+      localStorage.setItem('apdl_session', JSON.stringify({
+        id: 'first-generation-session',
+      }));
+      localStorage.setItem('apdl_consent', JSON.stringify({
+        analytics: true,
+        personalization: true,
+        experiments: true,
+      }));
+      localStorage.setItem('apdl_flags', JSON.stringify({
+        flags: ['first-generation'],
+      }));
       localStorage.setItem('apdl_anonymous_id_apdl', 'legacy-anonymous-id');
       localStorage.setItem('apdl_session_apdl', JSON.stringify({ id: 'legacy-session' }));
       localStorage.setItem('apdl_consent_apdl', JSON.stringify({
@@ -1935,6 +1971,10 @@ describe('APDLClient', () => {
       expect(localStorage.getItem('apdl_session_apdl')).toBeNull();
       expect(localStorage.getItem('apdl_consent_apdl')).toBeNull();
       expect(localStorage.getItem('apdl_flags_apdl')).toBeNull();
+      expect(localStorage.getItem('apdl_anonymous_id')).toBeNull();
+      expect(localStorage.getItem('apdl_session')).toBeNull();
+      expect(localStorage.getItem('apdl_consent')).toBeNull();
+      expect(localStorage.getItem('apdl_flags')).toBeNull();
       expect(localStorage.getItem(browserStorageKey('anonymous_id', 'apdl')))
         .not.toBe(localStorage.getItem(
           browserStorageKey('anonymous_id', 'apdl', SECOND_ENDPOINT)
@@ -1952,6 +1992,15 @@ describe('APDLClient', () => {
 
     it('should keep identity, session, consent, flags, and offline storage in memory mode', async () => {
       localStorage.clear();
+      for (const kind of [
+        'anonymous_id',
+        'session',
+        'consent',
+        'flags',
+      ] satisfies BrowserStorageKind[]) {
+        localStorage.setItem(`apdl_${kind}`, 'first-generation-value');
+        localStorage.setItem(`apdl_${kind}_apdl`, 'project-only-value');
+      }
       const memoryClient = new APDLClient(createTestConfig({
         persistence: 'memory',
       }));

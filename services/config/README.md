@@ -26,8 +26,11 @@ SDK bootstrap config from a Redis cache, and pushes live updates over SSE.
   (`POST /v1/evaluate`), durably enqueueing `$feature_flag_exposure` events
   through the same bounded, non-trimming Redis admission policy as Ingestion;
   stream pressure leaves the PostgreSQL outbox row pending for retry. Requests
-  with `log_exposure: true` must carry a caller-owned stable `message_id`; a
-  retry reuses that ID and cannot create a second exposure.
+  default to `log_exposure: false`. Opted-in requests must carry a caller-owned
+  stable `message_id` that is unique to one exposure (one flag assignment), not
+  merely to a surrounding HTTP request or batch. A retry reuses that ID only
+  with the same canonical exposure payload; using it for another flag or
+  payload returns `409 message_id_conflict`.
 - Owns the canonical FNV-1a 32-bit bucketing implementation: hash of
   `{flag_key}:{salt}:{unit_id}` with a per-flag salt generated at create time.
   The JS and Python SDKs are byte-for-byte compatible, so a user buckets
@@ -55,7 +58,26 @@ never from query parameters. See
 | `POST /v1/evaluate` | Trusted server-side gate evaluation with optional exposure logging |
 | `GET /v1/experiments/{key}/analysis` | Tenant-scoped authoritative experiment metadata delegated by Query (`query:read`) |
 | `GET /health` | Process liveness probe; does not touch dependencies |
-| `GET /ready` | Dependency and delivery readiness; includes outbox backlog age/attempt/quarantine plus low-cardinality SSE metrics, and returns 503 when the oldest pending row exceeds 300 seconds or any row is quarantined |
+| `GET /ready` | Dependency readiness plus delivery health; includes index-backed oldest-row ages, estimated outbox counts, a bounded quarantine-threshold check, and low-cardinality SSE metrics. Outbox lag/quarantine reports nested `degraded` without turning a dependency-ready process into 503 |
+
+Exposure logging is explicitly opt-in:
+
+```bash
+curl -X POST "${CONFIG_SERVICE_URL:-http://localhost:8081}/v1/evaluate" \
+  -H "x-api-key: ${APDL_DEV_API_KEY}" \
+  -H "content-type: application/json" \
+  -d '{
+    "project_id": "demo",
+    "key": "new-checkout",
+    "context": {"user_id": "user-123", "attributes": {}},
+    "log_exposure": true,
+    "message_id": "exposure-new-checkout-user-123-v7"
+  }'
+```
+
+Omitting `log_exposure` performs evaluation without recording an exposure.
+Generate a separate `message_id` for every flag assignment, and reuse it only
+when retrying that exact exposure.
 
 ### Admin (`/v1/admin`)
 
@@ -70,10 +92,13 @@ never from query parameters. See
 | `POST /flags/{key}/cleanup` | Archive an eligible fully rolled-out flag; body requires current `version` |
 | `DELETE /flags/{key}?version=N` | Archive a standalone flag with optimistic locking |
 | `GET /flags/{key}/audit` | Audit history (`?limit`, default 50, max 200) |
+| `GET /outbox/quarantine` | Inspect this credential's project quarantine with keyset pagination (`?limit`, `?before_id`) |
+| `POST /outbox/quarantine/{id}/replay` | Retry one terminal exposure delivery; body requires a nonblank operator `reason`; config-change rows return 409 because replay could regress `project_version` |
+| `POST /outbox/quarantine/{id}/discard` | Permanently discard one terminal delivery; body requires a nonblank operator `reason` and immutable evidence is retained |
 | `GET /experiments` / `POST /experiments` | List / create experiments |
 | `PUT /experiments/{key}` | Atomically update an experiment and its backing flag; body requires current `version` |
 | `DELETE /experiments/{key}?version=N` | Hard-delete a draft, or preserve a launched experiment as an immutable archive; always archive its backing flag |
-| `GET /experiments/{key}/audit` | Retained experiment lifecycle history (`?limit`, default 50, max 200) |
+| `GET /experiments/{key}/audit` | This experiment key's retained lifecycle history with keyset pagination (`?limit`, `?before_id`); response declares `history_scope: experiment_key` |
 
 Create a flag:
 
@@ -175,7 +200,7 @@ database upgrades are unsupported.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Authoritative flag/experiment/outbox store (must be migrated before startup) |
+| `POSTGRES_URL` | `postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl` | Authoritative flag/experiment/outbox store through the non-owner runtime role (must be migrated before startup) |
 | `PG_POOL_SIZE` | `4` | Max asyncpg pool size |
 | `REDIS_URL` | `redis://localhost:6379` | Flag cache + exposure event stream |
 | `CONFIG_TRUSTED_PROXY_CIDRS` | empty | Exact proxy networks allowed to supply one `X-Forwarded-For` client IP; untrusted peers cannot override their socket IP |
@@ -190,6 +215,13 @@ database upgrades are unsupported.
 | `SSE_MAX_LIFETIME_SECONDS` | `300` | Hard connection lifetime before a snapshot-required reconnect |
 | `EXPERIMENT_LIFECYCLE_ENABLED` | `true` | Run scheduled-start/completion sweeps |
 | `EXPERIMENT_LIFECYCLE_INTERVAL_SECONDS` | `300` | Lifecycle sweep interval, bounded to 1-86,400 seconds |
+| `CONFIG_OUTBOX_DEGRADED_MAX_PENDING_AGE_SECONDS` | `300` | Non-negative pending-age threshold for nested outbox degradation |
+| `CONFIG_OUTBOX_DEGRADED_MAX_QUARANTINED_ROWS` | `0` | Non-negative quarantine-count threshold for nested outbox degradation |
+
+See
+[Experiment finality and delivery recovery](../../docs/experiment-finality-and-delivery-recovery.md)
+for quarantine inspection, audited replay/discard, finality failure states, and
+the database-operator privacy purge for retained experiment audit snapshots.
 
 ## Running locally
 

@@ -169,6 +169,12 @@ Thin async HTTP wrappers the agents call (`app/tools/`):
 - `flags.py` — Config Service admin API: list/create/update flags, evaluate gates
 - `experiments.py` — list active experiments, create experiment config + its flag, fetch results
 
+The `flags.evaluate_gate` tool follows Config's fail-safe request default:
+exposure logging is off unless the caller passes `log_exposure=True` together
+with a stable `message_id` unique to that one flag exposure. This avoids silent
+duplicate analytics, but callers that previously relied on implicit logging
+must opt in or experiment sample sizes will decrease.
+
 `ui_config.py` remains only as code for the parked personalization prototype;
 no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 
@@ -176,7 +182,7 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `POSTGRES_URL` | `postgresql://apdl:apdl_dev@localhost:5432/apdl` | Runs, audit log, pgvector memory |
+| `POSTGRES_URL` | `postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl` | Runs, audit log, and pgvector memory through the non-owner runtime role |
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
 | `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |

@@ -41,6 +41,20 @@ export function requireSafeUiUrl(value: unknown, path: string): string {
   return parsed.href;
 }
 
+/**
+ * Resolves one optional built-in UI URL.
+ *
+ * CMS and JSON-authored optional fields commonly arrive as null or an empty
+ * string. Treat only those absent-like values as no URL; every nonempty value
+ * still passes through the strict absolute HTTP(S) policy.
+ */
+export function optionalSafeUiUrl(value: unknown, path: string): string | null {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+  return requireSafeUiUrl(value, path);
+}
+
 export function requireSafeUiTarget(value: unknown, path: string): string {
   if (typeof value !== 'string' || !SAFE_UI_TARGETS.has(value)) {
     throw new Error(`APDL: ${path} must be one of: _self, _blank`);

@@ -24,7 +24,7 @@ from app.clickhouse.queries import (
     identity_alias_join_sql,
 )
 from app.clickhouse.selectors import build_selector_condition, selector_label
-from app.models.schemas import EventSelector
+from app.models.schemas import MAX_EXACT_FILTER_INTEGER, EventSelector
 from app.routers.experiments import _datetime64_boundary_milliseconds
 
 
@@ -52,11 +52,12 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
-        assert "event_name = %(unit_event_name)s" in sql
-        assert "JSONHas(properties, %(unit_filter_0_property)s)" in sql
-        assert "JSONType(properties, %(unit_filter_0_property)s) = 'String'" in sql
-        assert "JSONExtractString(properties, %(unit_filter_0_property)s)" in sql
-        assert "= %(unit_filter_0_value)s" in sql
+        assert sql == (
+            "(event_name = %(unit_event_name)s AND "
+            "(JSONType(properties, %(unit_filter_0_property)s) = 'String' AND "
+            "JSONExtractString(properties, %(unit_filter_0_property)s) "
+            "= %(unit_filter_0_value)s))"
+        )
         assert "/catalog" not in sql
         assert params["unit_event_name"] == "$click"
         assert params["unit_filter_0_property"] == "href"
@@ -71,8 +72,12 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
-        assert "JSONType(properties, %(unit_filter_0_property)s) = 'String'" in sql
-        assert "position(JSONExtractString" in sql
+        assert sql == (
+            "(event_name = %(unit_event_name)s AND "
+            "(JSONType(properties, %(unit_filter_0_property)s) = 'String' AND "
+            "position(JSONExtractString(properties, "
+            "%(unit_filter_0_property)s), %(unit_filter_0_value)s) > 0))"
+        )
         assert "positionCaseSensitive" not in sql
         assert params["unit_filter_0_value"] == "Start"
 
@@ -85,8 +90,12 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
-        assert "JSONType(properties, %(unit_filter_0_property)s) = 'String'" in sql
-        assert "IN (%(unit_filter_0_value_0)s, %(unit_filter_0_value_1)s)" in sql
+        assert sql == (
+            "(event_name = %(unit_event_name)s AND "
+            "(JSONType(properties, %(unit_filter_0_property)s) = 'String' AND "
+            "JSONExtractString(properties, %(unit_filter_0_property)s) IN "
+            "(%(unit_filter_0_value_0)s, %(unit_filter_0_value_1)s)))"
+        )
         assert params["unit_filter_0_value_0"] == "pro"
         assert params["unit_filter_0_value_1"] == "team"
 
@@ -99,13 +108,29 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
-        assert (
-            "JSONType(properties, %(unit_filter_0_property)s) "
-            "IN ('Int64', 'UInt64', 'Double')"
-        ) in sql
-        assert "JSONExtractFloat(properties, %(unit_filter_0_property)s)" in sql
-        assert ">= %(unit_filter_0_value)s" in sql
+        assert sql == (
+            "(event_name = %(unit_event_name)s AND "
+            "(((JSONType(properties, %(unit_filter_0_property)s) = 'Int64' AND "
+            "JSONExtractInt(properties, %(unit_filter_0_property)s) "
+            "BETWEEN -9007199254740991 AND 9007199254740991) OR "
+            "JSONType(properties, %(unit_filter_0_property)s) = 'Double') AND "
+            "JSONExtractFloat(properties, %(unit_filter_0_property)s) "
+            ">= %(unit_filter_0_value)s))"
+        )
         assert params["unit_filter_0_value"] == 100
+
+    def test_numeric_filter_guards_integer_extraction_to_exact_float_range(self):
+        selector = _selector(
+            "purchase",
+            [{"property": "revenue", "operator": "neq", "value": 100}],
+        )
+
+        sql = build_selector_condition(selector, {}, "unit")
+
+        assert "JSONExtractInt(" in sql
+        assert "BETWEEN -9007199254740991 AND 9007199254740991" in sql
+        assert "JSONExtractUInt(" not in sql
+        assert "JSONType(properties, %(unit_filter_0_property)s) = 'UInt64'" not in sql
 
     def test_exists_filter_does_not_accept_value(self):
         selector = _selector(
@@ -116,8 +141,24 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
-        assert sql.count("JSONHas(properties, %(unit_filter_0_property)s)") == 1
+        assert sql == (
+            "(event_name = %(unit_event_name)s AND "
+            "JSONHas(properties, %(unit_filter_0_property)s))"
+        )
         assert "unit_filter_0_value" not in params
+
+    def test_not_exists_filter_is_only_a_negated_presence_check(self):
+        selector = _selector(
+            "$pageview",
+            [{"property": "path", "operator": "not_exists"}],
+        )
+
+        sql = build_selector_condition(selector, {}, "unit")
+
+        assert sql == (
+            "(event_name = %(unit_event_name)s AND "
+            "NOT JSONHas(properties, %(unit_filter_0_property)s))"
+        )
 
     def test_boolean_filter_requires_boolean_json_type(self):
         selector = _selector(
@@ -128,8 +169,12 @@ class TestSelectorSql:
 
         sql = build_selector_condition(selector, params, "unit")
 
-        assert "JSONType(properties, %(unit_filter_0_property)s) = 'Bool'" in sql
-        assert "JSONExtractBool(properties, %(unit_filter_0_property)s)" in sql
+        assert sql == (
+            "(event_name = %(unit_event_name)s AND "
+            "(JSONType(properties, %(unit_filter_0_property)s) = 'Bool' AND "
+            "JSONExtractBool(properties, %(unit_filter_0_property)s) "
+            "= %(unit_filter_0_value)s))"
+        )
         assert params["unit_filter_0_value"] == 1
 
     @pytest.mark.parametrize(
@@ -155,6 +200,7 @@ class TestSelectorSql:
         sql = build_selector_condition(selector, {}, "unit")
 
         assert "JSONType(properties, %(unit_filter_0_property)s)" in sql
+        assert "JSONHas(" not in sql
 
     def test_selector_label_includes_structured_filters(self):
         selector = _selector(
@@ -213,6 +259,42 @@ class TestSelectorValidation:
                 "$click",
                 [{"property": "href", "operator": "exists", "value": None}],
             )
+
+    @pytest.mark.parametrize(
+        ("operator", "value"),
+        [
+            ("eq", MAX_EXACT_FILTER_INTEGER + 1),
+            ("neq", -(MAX_EXACT_FILTER_INTEGER + 1)),
+            ("in", [MAX_EXACT_FILTER_INTEGER + 1]),
+            ("not_in", [-(MAX_EXACT_FILTER_INTEGER + 1)]),
+            ("gt", MAX_EXACT_FILTER_INTEGER + 1),
+            ("gte", -(MAX_EXACT_FILTER_INTEGER + 1)),
+            ("lt", MAX_EXACT_FILTER_INTEGER + 1),
+            ("lte", -(MAX_EXACT_FILTER_INTEGER + 1)),
+        ],
+    )
+    def test_rejects_integer_filter_values_outside_exact_float_range(
+        self,
+        operator,
+        value,
+    ):
+        with pytest.raises(ValidationError):
+            _selector(
+                "purchase",
+                [{"property": "revenue", "operator": operator, "value": value}],
+            )
+
+    @pytest.mark.parametrize(
+        "value",
+        [MAX_EXACT_FILTER_INTEGER, -MAX_EXACT_FILTER_INTEGER],
+    )
+    def test_accepts_integer_filter_values_at_exact_float_boundaries(self, value):
+        selector = _selector(
+            "purchase",
+            [{"property": "revenue", "operator": "eq", "value": value}],
+        )
+
+        assert selector.filters[0].value == value
 
 
 class TestQueryBuilders:

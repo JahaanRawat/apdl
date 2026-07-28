@@ -8,6 +8,42 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 ## [Unreleased]
 
+### Changed
+
+- Server-side flag evaluation now defaults exposure logging off consistently in
+  Config and Agents. Callers that require experiment exposure analytics must
+  explicitly send `log_exposure: true` with a stable message ID unique to one
+  flag exposure; otherwise observed experiment sample sizes will decrease.
+- JavaScript SDK browser state now uses deployment-scoped storage. Existing
+  project-only/unscoped state is deliberately discarded on first startup, so
+  anonymous visitor counts can temporarily rise and pre-upgrade funnels cannot
+  be joined across that boundary.
+- Built-in SDK UI copy, including modal bodies, is rendered as text. Callers
+  that previously supplied HTML must migrate to application-owned rendering.
+- Query selectors now enforce exact JSON types instead of ClickHouse coercion;
+  selectors that relied on string/number/boolean coercion no longer match, and
+  integer filter values are limited to the exactly representable JSON range
+  from `-9007199254740991` through `9007199254740991`.
+- Codegen changeset creation now returns `409 changeset_creation_disabled`
+  when a project has no active repository grant. Clients that treated the
+  former `404 repository_not_configured` response as missing route/resource
+  must migrate to the capability-conflict response.
+- Codegen's three no-fix worker dependency suppressions have a hard
+  `2026-08-22` UTC review boundary, after which CI deliberately fails without
+  renewed review. Renewal must update the Python approval authority in
+  `services/codegen/scripts/audit_worker_dependencies.py` and
+  `services/codegen/dependency-audit-suppressions.json` together; one-sided
+  changes fail closed.
+- ClickHouse migration now requires the PostgreSQL maintenance coordinator;
+  ClickHouse-only deployment and bare-Compose migration startup are unsupported.
+- Fresh PostgreSQL installs now separate the migration owner from one shared
+  non-owner runtime login and two dedicated audit roles. Existing databases and
+  owner-valued local `POSTGRES_URL` files must be replaced with a fresh install;
+  this preview does not support the in-place role handoff.
+- Operators now have a confirmation-bound, reason-audited purge path for
+  experiment audit retention and authenticated replay/discard recovery for
+  quarantined Config exposure outbox rows.
+
 ### Removed
 
 - Removed the disconnected Kafka topic definitions and Flink job scaffolding.

@@ -226,6 +226,19 @@ class MigrationQuiescenceTests(unittest.TestCase):
         self.assertIn("clickhouse-writer", dev_core[stop:clickhouse_migration])
         self.assertIn("stop_grace_period: 30s", COMPOSE)
 
+    def test_dependency_stack_loads_the_repo_root_environment(self) -> None:
+        self.assertIn(
+            "DEPS_COMPOSE := docker compose "
+            "$(if $(wildcard .env),--env-file .env,)",
+            MAKEFILE,
+        )
+        dev = MAKEFILE[MAKEFILE.index("dev:") : MAKEFILE.index("dev-core:")]
+        self.assertIn("$(DEPS_COMPOSE) up -d", dev)
+        self.assertNotIn(
+            "docker compose -f infra/docker/docker-compose.deps.yml up -d",
+            dev,
+        )
+
     def test_allows_only_when_forbidden_services_are_stopped(self) -> None:
         responses = iter(("apdl-project\n", "db-id\tpostgres\napi-id\tconfig\n"))
         with patch.object(

@@ -196,8 +196,8 @@ built from repo/webhook/user data; an outbound call that keeps the auth header a
   placeholders) is tracked. Confirm with `git ls-files | grep -i env` and check git history,
   not just the working tree.
 - **Fail closed** on missing production config. Don't fall back to a hardcoded default DSN /
-  credential (`postgresql://apdl:apdl_dev@localhost...` is a *dev-only* default) — require the
-  env var and fail startup if absent in prod.
+  credential (the checked-in local fallback is the non-owner `apdl_runtime` role; the `apdl`
+  owner is migration-only) — require the env var and fail startup if absent in prod.
 - Never log secrets, keys, tokens, or DSN-bearing exceptions. Readiness/health handlers must
   keep connection strings out of their responses.
 - Keep provider/App keys out of prompts, agent memory, audit logs, and sandbox/subprocess

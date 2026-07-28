@@ -221,9 +221,12 @@ Infrastructure defaults for local dev, set via `make setup` from `.env.example`:
 
 ```text
 REDIS_URL=redis://localhost:6379
-POSTGRES_URL=postgresql://apdl:apdl_dev@localhost:5432/apdl
+POSTGRES_URL=postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl
 CLICKHOUSE_URL=http://localhost:8123 (HTTP) / clickhouse://apdl:apdl_dev@localhost:9000/apdl (native)
 ```
+
+The PostgreSQL `apdl` owner is migration-only; long-running services use the
+non-owner `apdl_runtime` role.
 
 Agents service requires at least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `GOOGLE_API_KEY`, or `LOCAL_LLM_URL` for LLM access.

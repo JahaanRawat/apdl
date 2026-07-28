@@ -191,7 +191,8 @@ class Settings:
                 raise ValueError(f"Invalid {name} service URL")
         settings = cls(
             postgres_url=os.getenv(
-                "POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl"
+                "POSTGRES_URL",
+                "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
             ),
             service_urls=service_urls,
             service_api_keys=_service_keys(),

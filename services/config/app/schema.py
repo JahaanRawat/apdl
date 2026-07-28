@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 43
-MIGRATION_NAME = "043_experiment_bucket_identity.sql"
+MIGRATION_VERSION = 44
+MIGRATION_NAME = "044_operator_recovery_and_retention.sql"
 REQUIRED_CONSTRAINTS = frozenset(
     {
         ("flags", "flags_variants_canonical_check"),
@@ -61,6 +61,12 @@ REQUIRED_COLUMNS = frozenset(
         ("experiment_audit_log", "before"),
         ("experiment_audit_log", "after"),
         ("experiment_audit_log", "created_at"),
+        ("experiment_audit_purge_log", "project_id"),
+        ("experiment_audit_purge_log", "purge_before"),
+        ("experiment_audit_purge_log", "deleted_rows"),
+        ("experiment_audit_purge_log", "actor"),
+        ("experiment_audit_purge_log", "reason"),
+        ("experiment_audit_purge_log", "created_at"),
         ("config_outbox", "id"),
         ("config_outbox", "project_id"),
         ("config_outbox", "kind"),
@@ -75,6 +81,16 @@ REQUIRED_COLUMNS = frozenset(
         ("config_outbox", "quarantined_at"),
         ("config_outbox", "failure_class"),
         ("config_outbox", "failure_code"),
+        ("config_outbox_operator_log", "project_id"),
+        ("config_outbox_operator_log", "outbox_id"),
+        ("config_outbox_operator_log", "action"),
+        ("config_outbox_operator_log", "actor"),
+        ("config_outbox_operator_log", "reason"),
+        ("config_outbox_operator_log", "kind"),
+        ("config_outbox_operator_log", "failure_class"),
+        ("config_outbox_operator_log", "failure_code"),
+        ("config_outbox_operator_log", "payload_sha256"),
+        ("config_outbox_operator_log", "created_at"),
         ("config_exposure_receipts", "project_id"),
         ("config_exposure_receipts", "message_id"),
         ("config_exposure_receipts", "canonical_payload"),

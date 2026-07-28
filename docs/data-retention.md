@@ -13,6 +13,9 @@ remains queryable but cannot extend or shorten retention.
 | Session analytics | `sessions` | 12 calendar months from the latest matching source receipt; a legacy session with no retained source is anchored to migration time |
 | Identity linkage | `identity_alias_assertions` and the computed `resolved_identity_aliases` view | 12 calendar months from the assertion's receipt date |
 | Deletion evidence | PostgreSQL `analytics_data_deletion_audit` | No automatic expiry; append-only operator audit evidence |
+| Config experiment change snapshots | PostgreSQL `experiment_audit_log` | No automatic expiry; project/cutoff purge is available only through the audited migration-044 operator function |
+| Delivery recovery evidence | PostgreSQL `config_outbox_operator_log` | No automatic expiry; immutable and payload-free |
+| Experiment snapshot purge evidence | PostgreSQL `experiment_audit_purge_log` | No automatic expiry; immutable and payload-free |
 
 All retained ClickHouse tables partition by project rather than client event
 time. ClickHouse applies TTL removal asynchronously. The deletion workflow
@@ -46,7 +49,7 @@ one of the strict commands from the repository root:
 scripts/delete-analytics-data.sh project \
   --request-id 11111111-1111-4111-8111-111111111111 \
   --project-id demo \
-  --actor privacy@example.test \
+  --actor privacy-operator \
   --reason "approved project erasure request"
 ```
 
@@ -55,7 +58,7 @@ scripts/delete-analytics-data.sh user \
   --request-id 22222222-2222-4222-8222-222222222222 \
   --project-id demo \
   --user-id user-42 \
-  --actor privacy@example.test \
+  --actor privacy-operator \
   --reason "verified user erasure request"
 ```
 
@@ -83,3 +86,31 @@ the same request UUID, scope, project, user target, actor, and reason. A
 completed retry performs no mutations and reports `already_completed`; reuse
 of the UUID with different input fails closed. Update, delete, and truncate of
 audit evidence are rejected by PostgreSQL triggers.
+
+## Experiment audit snapshot retention
+
+Config's `experiment_audit_log` contains full before/after lifecycle snapshots
+and is deliberately outside the automatic ClickHouse TTL. When a privacy or
+retention policy requires removal, migration
+`044_operator_recovery_and_retention.sql` supplies the project-scoped
+`public.apdl_purge_experiment_audit(...)` function and an immutable,
+payload-free `experiment_audit_purge_log`.
+
+The function is destructive, requires the exact confirmation phrase, and is
+not executable by `PUBLIC` or the runtime service role. Its immutable actor is
+the named PostgreSQL `session_user`; a separate ungranted `NOLOGIN` definer
+holds only the narrow delete/log privileges. Follow the preview, execution,
+verification, and privilege guidance in
+[Experiment finality and delivery recovery](experiment-finality-and-delivery-recovery.md#privacy-purge-for-experiment-change-snapshots).
+It does not replace the analytics deletion workflow above and does not delete
+Query's immutable verified decision snapshots.
+
+Operator-log `reason` and `actor` fields are retained evidence, not a place to
+copy the data being recovered or deleted. Outbox recovery records the
+authenticated Config credential ID; use a stable, non-personal operator
+credential ID. Experiment purge records the named, non-shared PostgreSQL
+`session_user`. Use a ticket/policy reference for either reason. Never include
+raw user identifiers, payloads, secrets, free-form incident transcripts, or
+unnecessary personal data. If an identity-management policy requires a
+personally identifying login name, treat that actor field as personal data in
+access controls and retention reviews.

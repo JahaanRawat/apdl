@@ -1707,6 +1707,53 @@ async def test_declared_first_unknown_exposure_prevents_finality(client, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_unknown_variant_reason_precedes_identity_alias_conflicts(
+    client,
+    monkeypatch,
+):
+    """Authority drift is reported before identity drift when both are present."""
+    monkeypatch.setattr(
+        experiments,
+        "fetch_experiment_analysis",
+        AsyncMock(return_value=_experiment_metadata()),
+    )
+    app.state.ch_client.execute = AsyncMock(
+        return_value=[
+            {
+                "variant": "control",
+                "sample_size": 20,
+                "conversions": 1,
+                "crossover_actors": 0,
+                "unknown_variant_actors": 1,
+                "identity_conflict_actors": 1,
+            },
+            {
+                "variant": "treatment",
+                "sample_size": 20,
+                "conversions": 2,
+                "crossover_actors": 0,
+                "unknown_variant_actors": 0,
+                "identity_conflict_actors": 1,
+            },
+        ]
+    )
+
+    response = await client.get(
+        "/v1/query/experiment/exp_123",
+        params={"project_id": PROJECT_ID},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["analysis_status"] == "non_final"
+    assert body["reason"] == "unknown_variant_exposures"
+    assert body["unknown_variant_actors"] == 1
+    assert body["identity_conflict_actors"] == 1
+    assert body["identity_quality"] == "degraded"
+    assert "comparisons" not in body
+
+
+@pytest.mark.asyncio
 async def test_identity_alias_conflicts_prevent_decision_snapshot(client, monkeypatch):
     monkeypatch.setattr(
         experiments,

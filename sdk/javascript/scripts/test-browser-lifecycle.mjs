@@ -73,106 +73,9 @@ class CdpClient {
 
 let chrome;
 let cdp;
-let page;
-let server;
 let profileDirectory;
-let heldResponse;
-const requests = [];
 
 try {
-  const requestWaiter = deferred();
-  server = createServer((request, response) => {
-    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-    if (request.method === 'POST' && url.pathname === '/v1/events') {
-      const chunks = [];
-      request.on('data', (chunk) => chunks.push(chunk));
-      request.on('end', () => {
-        const body = Buffer.concat(chunks);
-        const recorded = {
-          body,
-          headers: request.headers,
-          payload: JSON.parse(body.toString('utf8')),
-        };
-        requests.push(recorded);
-        requestWaiter.resolve(requests.length);
-
-        if (requests.length === 1) {
-          heldResponse = response;
-          return;
-        }
-        response.writeHead(requests.length === 2 ? 503 : 202).end();
-      });
-      return;
-    }
-
-    if (url.pathname === '/apdl.iife.js') {
-      response.writeHead(200, { 'Content-Type': 'text/javascript' }).end(bundle);
-      return;
-    }
-    if (url.pathname === '/next') {
-      response.writeHead(200, { 'Content-Type': 'text/html' }).end(
-        `<!doctype html>
-        <title>APDL lifecycle recovery</title>
-        <script src="/apdl.iife.js"></script>
-        <script>
-          window.__apdlLifecycleError = null;
-          try {
-            window.__apdlRecoveryClient = new APDL.APDLClient({
-              endpoint: location.origin,
-              auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
-              autoCapture: false,
-              batchSize: 100,
-              flushInterval: 600000,
-              persistence: 'localStorage',
-              consent: {
-                analytics: true,
-                personalization: false,
-                experiments: false
-              }
-            });
-          } catch (error) {
-            window.__apdlLifecycleError = String(error?.stack ?? error);
-          }
-        </script>`
-      );
-      return;
-    }
-
-    response.writeHead(200, { 'Content-Type': 'text/html' }).end(
-      `<!doctype html>
-      <title>APDL lifecycle test</title>
-      <script src="/apdl.iife.js"></script>
-      <script>
-        window.__apdlLifecycleError = null;
-        try {
-          const client = new APDL.APDLClient({
-            endpoint: location.origin,
-            auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
-            autoCapture: false,
-            batchSize: 100,
-            flushInterval: 600000,
-            persistence: 'localStorage',
-            consent: {
-              analytics: true,
-              personalization: false,
-              experiments: false
-            }
-          });
-          for (let index = 0; index < 3; index += 1) {
-            client.track('browser_navigation_takeover_' + index, {
-              lifecycle: 'pagehide',
-              value: { payload: 'x'.repeat(20000) }
-            });
-          }
-          window.__apdlNormalDrain = client.debug.flush();
-        } catch (error) {
-          window.__apdlLifecycleError = String(error?.stack ?? error);
-        }
-      </script>`
-    );
-  });
-  const origin = await listen(server);
-
   profileDirectory = await mkdtemp(join(tmpdir(), 'apdl-chrome-'));
   const chromePath = await findChrome();
   const stderr = [];
@@ -197,107 +100,278 @@ try {
 
   cdp = new CdpClient(chrome.stdio[3], chrome.stdio[4]);
   try {
+    // Browser startup is environmental, not a property under test. This runs
+    // immediately after test-built-browser.mjs has torn down its own Chrome,
+    // and a loaded runner has needed more than ten seconds to expose the
+    // DevTools pipe. Match the request budget rather than fail the release
+    // gate on process startup.
     await withTimeout(
       cdp.send('Browser.getVersion'),
-      10_000,
+      30_000,
       'timed out waiting for Chrome DevTools'
     );
   } catch (error) {
     throw new Error(`${error.message}\n${stderr.join('')}`);
   }
-  const { targetId } = await cdp.send('Target.createTarget', {
-    url: `${origin}/`,
+
+  // Each case runs on its own loopback port, so it gets its own origin and
+  // therefore its own IndexedDB and localStorage namespace inside the one
+  // browser profile.
+  await runNavigationRecoveryCase({
+    recoveryGraceMs: 100,
+    recoveryFlushInterval: 600_000,
+    summary:
+      '✓ H-04 failed keepalive is issued once and fully recovered after navigation',
   });
-  const { sessionId } = await cdp.send('Target.attachToTarget', {
-    targetId,
-    flatten: true,
+
+  // The grace period above is a bound, not a fact about the SDK. Repeat the
+  // whole scenario with the recovery client constructed synchronously in the
+  // reopened document — the case a fast same-origin navigation on a slow
+  // device produces — so the durable batch has to survive being claimed while
+  // the terminating document's IndexedDB transaction may not have committed.
+  // The client runs on the SDK's default flush interval here, which is the
+  // real upper bound on recovery when the first claim observes an empty store.
+  await runNavigationRecoveryCase({
+    recoveryGraceMs: 0,
+    recoveryFlushInterval: 3_000,
+    summary:
+      '✓ H-02 durable batch survives a zero-delay claim by the reopened document',
   });
-  page = cdp.session(sessionId);
-  await page.send('Page.enable');
-  await page.send('Runtime.enable');
-
-  await waitForRequestCount(requestWaiter, requests, 1);
-  assert.equal(
-    await pageError(page),
-    null,
-    'the SDK test page must initialize without an exception'
-  );
-
-  await page.send('Page.navigate', { url: `${origin}/next` });
-  await waitForRequestCount(requestWaiter, requests, 2);
-
-  assert.equal(
-    requests[1].headers['x-api-key'],
-    CLIENT_KEY,
-    'the unload-safe request must preserve header authentication'
-  );
-  assert.ok(
-    requests[1].body.byteLength <= KEEPALIVE_BUDGET_BYTES,
-    `keepalive body exceeded ${KEEPALIVE_BUDGET_BYTES} bytes`
-  );
-  assert.equal(requests[0].payload.events.length, 3);
-  assert.equal(requests[1].payload.events.length, 2);
-  assert.deepEqual(
-    requests[1].payload.events.map((event) => event.message_id),
-    requests[0].payload.events.slice(0, 2).map((event) => event.message_id),
-    'navigation takeover must retain the original event identities'
-  );
-  assert.equal(
-    requests[1].payload.events[0].event,
-    'browser_navigation_takeover_0'
-  );
-
-  await waitForPagePath(page, '/next');
-  assert.equal(
-    await pageError(page),
-    null,
-    'the reopened SDK page must initialize without an exception'
-  );
-  await waitForRequestCount(requestWaiter, requests, 3);
-  assert.deepEqual(
-    requests[2].payload.events.map((event) => event.message_id),
-    requests[0].payload.events.map((event) => event.message_id),
-    'the reopened client must recover the failed keepalive batch and overflow'
-  );
-  assert.equal(
-    requests[2].headers.referer,
-    `${origin}/next`,
-    'the recovery request must originate from the reopened document'
-  );
-  await waitForOfflineEventCount(page, 0);
-
-  // Let beforeunload/pagehide/visibilitychange and all response microtasks
-  // quiesce, then prove they emitted one lifecycle request in total.
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  assert.equal(requests.length, 3);
-  const originalDocumentRequests = requests.filter(
-    (request) => request.headers.referer === `${origin}/`
-  );
-  assert.equal(
-    originalDocumentRequests.length,
-    2,
-    'the original normal request must be followed by exactly one lifecycle request'
-  );
-  const offlineEvents = await readOfflineEvents(page);
-  assert.deepEqual(
-    offlineEvents,
-    [],
-    'accepted recovery must acknowledge every durable lifecycle record'
-  );
-
-  console.log(
-    '✓ H-04 failed keepalive is issued once and fully recovered after navigation'
-  );
 } finally {
-  if (heldResponse && !heldResponse.destroyed) {
-    heldResponse.writeHead(503).end();
-  }
   cdp?.close();
   await stopProcess(chrome);
-  await closeServer(server);
   if (profileDirectory) {
-    await rm(profileDirectory, { recursive: true, force: true });
+    try {
+      // Chrome can still be flushing its profile when the parent process has
+      // already exited, so removal races it (observed: ENOTEMPTY on
+      // Default/). Retry, and never let temp-directory cleanup throw — a
+      // failure here replaces the real harness error in the finally block.
+      await rm(profileDirectory, {
+        recursive: true,
+        force: true,
+        maxRetries: 20,
+        retryDelay: 100,
+      });
+    } catch (error) {
+      console.warn(
+        `warning: could not remove ${profileDirectory}: ${error.message}`
+      );
+    }
   }
+}
+
+async function runNavigationRecoveryCase({
+  recoveryGraceMs,
+  recoveryFlushInterval,
+  summary,
+}) {
+  const requests = [];
+  const requestWaiter = deferred();
+  let heldResponse;
+  let server;
+  let targetId;
+  let page;
+
+  try {
+    server = createServer((request, response) => {
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+      if (request.method === 'POST' && url.pathname === '/v1/events') {
+        const chunks = [];
+        request.on('data', (chunk) => chunks.push(chunk));
+        request.on('end', () => {
+          const body = Buffer.concat(chunks);
+          const recorded = {
+            body,
+            headers: request.headers,
+            payload: JSON.parse(body.toString('utf8')),
+          };
+          requests.push(recorded);
+          requestWaiter.resolve(requests.length);
+
+          if (requests.length === 1) {
+            heldResponse = response;
+            return;
+          }
+          response.writeHead(requests.length === 2 ? 503 : 202).end();
+        });
+        return;
+      }
+
+      if (url.pathname === '/apdl.iife.js') {
+        response.writeHead(200, { 'Content-Type': 'text/javascript' })
+          .end(bundle);
+        return;
+      }
+      if (url.pathname === '/next') {
+        response.writeHead(200, { 'Content-Type': 'text/html' }).end(
+          recoveryDocument(recoveryGraceMs, recoveryFlushInterval)
+        );
+        return;
+      }
+
+      response.writeHead(200, { 'Content-Type': 'text/html' }).end(
+        `<!doctype html>
+        <title>APDL lifecycle test</title>
+        <script src="/apdl.iife.js"></script>
+        <script>
+          window.__apdlLifecycleError = null;
+          try {
+            const client = new APDL.APDLClient({
+              endpoint: location.origin,
+              auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
+              autoCapture: false,
+              batchSize: 100,
+              flushInterval: 600000,
+              persistence: 'localStorage',
+              consent: {
+                analytics: true,
+                personalization: false,
+                experiments: false
+              }
+            });
+            for (let index = 0; index < 3; index += 1) {
+              client.track('browser_navigation_takeover_' + index, {
+                lifecycle: 'pagehide',
+                value: { payload: 'x'.repeat(20000) }
+              });
+            }
+            window.__apdlNormalDrain = client.debug.flush();
+          } catch (error) {
+            window.__apdlLifecycleError = String(error?.stack ?? error);
+          }
+        </script>`
+      );
+    });
+    const origin = await listen(server);
+
+    ({ targetId } = await cdp.send('Target.createTarget', {
+      url: `${origin}/`,
+    }));
+    const { sessionId } = await cdp.send('Target.attachToTarget', {
+      targetId,
+      flatten: true,
+    });
+    page = cdp.session(sessionId);
+    await page.send('Page.enable');
+    await page.send('Runtime.enable');
+
+    await waitForRequestCount(requestWaiter, requests, 1);
+    assert.equal(
+      await pageError(page),
+      null,
+      'the SDK test page must initialize without an exception'
+    );
+
+    await page.send('Page.navigate', { url: `${origin}/next` });
+    await waitForRequestCount(requestWaiter, requests, 2);
+
+    assert.equal(
+      requests[1].headers['x-api-key'],
+      CLIENT_KEY,
+      'the unload-safe request must preserve header authentication'
+    );
+    assert.ok(
+      requests[1].body.byteLength <= KEEPALIVE_BUDGET_BYTES,
+      `keepalive body exceeded ${KEEPALIVE_BUDGET_BYTES} bytes`
+    );
+    assert.equal(requests[0].payload.events.length, 3);
+    assert.equal(requests[1].payload.events.length, 2);
+    assert.deepEqual(
+      requests[1].payload.events.map((event) => event.message_id),
+      requests[0].payload.events.slice(0, 2).map((event) => event.message_id),
+      'navigation takeover must retain the original event identities'
+    );
+    assert.equal(
+      requests[1].payload.events[0].event,
+      'browser_navigation_takeover_0'
+    );
+
+    await waitForPagePath(page, '/next');
+    assert.equal(
+      await pageError(page),
+      null,
+      'the reopened SDK page must initialize without an exception'
+    );
+    await waitForRequestCount(requestWaiter, requests, 3);
+    assert.deepEqual(
+      requests[2].payload.events.map((event) => event.message_id),
+      requests[0].payload.events.map((event) => event.message_id),
+      'the reopened client must recover the failed keepalive batch and overflow'
+    );
+    assert.equal(
+      requests[2].headers.referer,
+      `${origin}/next`,
+      'the recovery request must originate from the reopened document'
+    );
+    await waitForOfflineEventCount(page, 0);
+
+    // Let beforeunload/pagehide/visibilitychange and all response microtasks
+    // quiesce, then prove they emitted one lifecycle request in total.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(requests.length, 3);
+    const originalDocumentRequests = requests.filter(
+      (request) => request.headers.referer === `${origin}/`
+    );
+    assert.equal(
+      originalDocumentRequests.length,
+      2,
+      'the original normal request must be followed by exactly one lifecycle request'
+    );
+    const offlineEvents = await readOfflineEvents(page);
+    assert.deepEqual(
+      offlineEvents,
+      [],
+      'accepted recovery must acknowledge every durable lifecycle record'
+    );
+
+    console.log(summary);
+  } finally {
+    if (heldResponse && !heldResponse.destroyed) {
+      heldResponse.writeHead(503).end();
+    }
+    if (targetId) {
+      await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
+    }
+    await closeServer(server);
+  }
+}
+
+function recoveryDocument(graceMs, flushInterval) {
+  const construct = `
+            try {
+              window.__apdlRecoveryClient = new APDL.APDLClient({
+                endpoint: location.origin,
+                auth: { clientKey: ${JSON.stringify(CLIENT_KEY)} },
+                autoCapture: false,
+                batchSize: 100,
+                flushInterval: ${flushInterval},
+                persistence: 'localStorage',
+                consent: {
+                  analytics: true,
+                  personalization: false,
+                  experiments: false
+                }
+              });
+            } catch (error) {
+              window.__apdlLifecycleError = String(error?.stack ?? error);
+            }`;
+
+  // graceMs > 0 gives the terminating document's already-started IndexedDB
+  // transaction that many milliseconds to commit before this client claims
+  // the store. graceMs === 0 constructs the client in the parser task, with
+  // no such guarantee.
+  const body = graceMs > 0
+    ? `          setTimeout(() => {${construct}
+          }, ${graceMs});`
+    : construct;
+
+  return `<!doctype html>
+        <title>APDL lifecycle recovery</title>
+        <script src="/apdl.iife.js"></script>
+        <script>
+          window.__apdlLifecycleError = null;
+${body}
+        </script>`;
 }
 
 function deferred() {
@@ -322,7 +396,7 @@ async function waitForRequestCount(waiter, recorded, count) {
   while (recorded.length < count) {
     await withTimeout(
       waiter.promise,
-      10_000,
+      30_000,
       `timed out waiting for browser request ${count}`
     );
     if (recorded.length < count) {
@@ -433,6 +507,9 @@ async function withTimeout(promise, milliseconds, message) {
 
 async function closeServer(httpServer) {
   if (!httpServer?.listening) return;
+  // The browser outlives an individual case and holds keep-alive sockets, so
+  // close() alone would never settle between cases.
+  httpServer.closeAllConnections();
   await new Promise((resolve) => httpServer.close(resolve));
 }
 

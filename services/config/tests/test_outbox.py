@@ -15,6 +15,21 @@ def clear_alert_log_state():
     outbox._last_alert_log.clear()
 
 
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "+inf", "-inf"])
+def test_environment_float_rejects_non_finite_values(monkeypatch, raw):
+    monkeypatch.setenv("APDL_TEST_OUTBOX_FLOAT", raw)
+
+    with pytest.raises(
+        RuntimeError,
+        match="APDL_TEST_OUTBOX_FLOAT must be a finite number",
+    ):
+        outbox._environment_float(
+            "APDL_TEST_OUTBOX_FLOAT",
+            1.0,
+            minimum=0.0,
+        )
+
+
 class _Context:
     def __init__(self, value):
         self.value = value
@@ -61,6 +76,31 @@ class RecordingCleanupConn:
 class RecordingCleanupPool:
     def __init__(self):
         self.conn = RecordingCleanupConn()
+
+    def acquire(self):
+        return _Context(self.conn)
+
+
+class RecordingResolutionConn:
+    def __init__(self, row):
+        self.row = row
+        self.calls: list[tuple[str, tuple]] = []
+
+    def transaction(self):
+        return _Context(None)
+
+    async def fetchrow(self, sql: str, *args):
+        self.calls.append((sql, args))
+        return self.row
+
+    async def execute(self, sql: str, *args):
+        self.calls.append((sql, args))
+        return "UPDATE 1"
+
+
+class RecordingResolutionPool:
+    def __init__(self, row):
+        self.conn = RecordingResolutionConn(row)
 
     def acquire(self):
         return _Context(self.conn)
@@ -283,10 +323,14 @@ async def test_config_change_with_invalid_project_version_fails_closed(monkeypat
 
 @pytest.mark.asyncio
 async def test_no_due_outbox_row_is_idle(monkeypatch):
-    monkeypatch.setattr(outbox, "claim_next", AsyncMock(return_value=None))
-    monkeypatch.setattr(outbox, "quarantine_exhausted", AsyncMock(return_value=0))
+    claim = AsyncMock(return_value=None)
+    sweep = AsyncMock(return_value=0)
+    monkeypatch.setattr(outbox, "claim_next", claim)
+    monkeypatch.setattr(outbox, "quarantine_exhausted", sweep)
 
     assert await outbox.drain_once(object(), object(), object()) is False
+    claim.assert_awaited_once()
+    sweep.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -368,6 +412,123 @@ async def test_abandoned_final_attempt_is_terminalized_after_claim_timeout():
 
 
 @pytest.mark.asyncio
+async def test_quarantine_inspection_uses_project_keyset_page():
+    pool = AsyncMock()
+    pool.fetch.return_value = [
+        {
+            "id": row_id,
+            "project_id": "apdl",
+            "kind": "exposure",
+            "payload": '{"event":{}}',
+            "attempts": 8,
+            "last_error": "timeout",
+            "failure_class": "attempts_exhausted",
+            "failure_code": "delivery_attempts_exhausted",
+            "created_at": "2026-07-20T00:00:00+00:00",
+            "quarantined_at": "2026-07-21T00:00:00+00:00",
+        }
+        for row_id in (43, 42, 41)
+    ]
+
+    entries, cursor = await outbox.list_quarantined(
+        pool,
+        "apdl",
+        limit=2,
+        before_id=50,
+    )
+
+    assert [entry["id"] for entry in entries] == [43, 42]
+    assert entries[0]["payload"] == {"event": {}}
+    assert cursor == 42
+    sql, project_id, before_id, query_limit = pool.fetch.await_args.args
+    assert "project_id = $1" in sql
+    assert "id < $2" in sql
+    assert "ORDER BY id DESC" in sql
+    assert (project_id, before_id, query_limit) == ("apdl", 50, 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "mutation"),
+    [
+        ("replay", "UPDATE config_outbox"),
+        ("discard", "DELETE FROM config_outbox"),
+    ],
+)
+async def test_quarantine_resolution_is_atomic_and_audited(action, mutation):
+    row = {
+        "id": 41,
+        "project_id": "apdl",
+        "kind": "exposure",
+        "payload": {"event": {"message_id": "eval-1"}},
+        "attempts": 8,
+        "last_error": "timeout",
+        "failure_class": "attempts_exhausted",
+        "failure_code": "delivery_attempts_exhausted",
+        "created_at": "2026-07-20T00:00:00+00:00",
+        "quarantined_at": "2026-07-21T00:00:00+00:00",
+    }
+    pool = RecordingResolutionPool(row)
+
+    entry = await outbox.resolve_quarantined(
+        pool,
+        "apdl",
+        41,
+        action=action,
+        actor="credential:operator",
+        reason="dependency repaired",
+    )
+
+    assert entry is not None
+    assert entry["id"] == 41
+    assert len(pool.conn.calls) == 3
+    locked, audit, resolved = pool.conn.calls
+    assert "FOR UPDATE" in locked[0]
+    assert "project_id = $2" in locked[0]
+    assert "INSERT INTO config_outbox_operator_log" in audit[0]
+    assert audit[1][2:5] == (
+        action,
+        "credential:operator",
+        "dependency repaired",
+    )
+    assert len(audit[1][-1]) == 64
+    assert mutation in resolved[0]
+    assert resolved[1] == (41, "apdl")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["flag_change", "experiment_change"])
+async def test_config_change_replay_is_rejected_before_audit_or_mutation(kind):
+    row = {
+        "id": 41,
+        "project_id": "apdl",
+        "kind": kind,
+        "payload": {"event_type": "flag_update", "project_version": 2, "data": {}},
+        "attempts": 8,
+        "last_error": "invalid",
+        "failure_class": "permanent",
+        "failure_code": "invalid_payload",
+        "created_at": "2026-07-20T00:00:00+00:00",
+        "quarantined_at": "2026-07-21T00:00:00+00:00",
+    }
+    pool = RecordingResolutionPool(row)
+
+    with pytest.raises(outbox.UnsafeQuarantineReplay) as exc_info:
+        await outbox.resolve_quarantined(
+            pool,
+            "apdl",
+            41,
+            action="replay",
+            actor="credential:operator",
+            reason="dependency repaired",
+        )
+
+    assert exc_info.value.kind == kind
+    assert len(pool.conn.calls) == 1
+    assert "FOR UPDATE" in pool.conn.calls[0][0]
+
+
+@pytest.mark.asyncio
 async def test_cleanup_uses_separate_bounded_skip_locked_horizons():
     pool = RecordingCleanupPool()
 
@@ -400,13 +561,16 @@ async def test_worker_invokes_cleanup_before_delivery(monkeypatch):
         return_value={"processed": 0, "quarantined": 0, "receipts": 0}
     )
     drain = AsyncMock(side_effect=asyncio.CancelledError)
+    sweep = AsyncMock(return_value=0)
     monkeypatch.setattr(outbox, "cleanup_once", cleanup)
     monkeypatch.setattr(outbox, "drain_once", drain)
+    monkeypatch.setattr(outbox, "quarantine_exhausted", sweep)
 
     with pytest.raises(asyncio.CancelledError):
         await outbox.run_worker(object(), object(), object())
 
     cleanup.assert_awaited_once()
+    sweep.assert_awaited_once()
     drain.assert_awaited_once()
 
 
@@ -423,28 +587,31 @@ async def test_worker_continues_full_cleanup_batches_without_waiting(monkeypatch
         ]
     )
     drain = AsyncMock(return_value=False)
+    sweep = AsyncMock(return_value=0)
     sleep = AsyncMock()
     monkeypatch.setattr(outbox, "cleanup_once", cleanup)
     monkeypatch.setattr(outbox, "drain_once", drain)
+    monkeypatch.setattr(outbox, "quarantine_exhausted", sweep)
     monkeypatch.setattr(outbox.asyncio, "sleep", sleep)
 
     with pytest.raises(asyncio.CancelledError):
         await outbox.run_worker(object(), object(), object())
 
     assert cleanup.await_count == 2
+    sweep.assert_awaited_once()
     drain.assert_awaited_once()
     sleep.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_outbox_metrics_expose_lag_attempts_and_quarantine():
+async def test_outbox_metrics_use_estimates_and_bounded_threshold_probe():
     conn = AsyncMock()
     conn.fetchrow.return_value = {
-        "pending_count": 4,
-        "processed_count": 12,
-        "quarantined_count": 1,
+        "estimated_pending_count": 4,
+        "estimated_processed_count": 12,
+        "estimated_quarantined_count": 1,
         "estimated_receipt_count": 350,
-        "max_pending_attempts": 3,
+        "quarantined_threshold_exceeded": True,
         "oldest_pending_age_seconds": 45.5,
         "oldest_processed_age_seconds": 3600.0,
         "oldest_quarantined_age_seconds": 12.25,
@@ -454,11 +621,11 @@ async def test_outbox_metrics_expose_lag_attempts_and_quarantine():
     metrics = await outbox.metrics_snapshot(conn)
 
     assert metrics == {
-        "pending_count": 4,
-        "processed_count": 12,
-        "quarantined_count": 1,
+        "estimated_pending_count": 4,
+        "estimated_processed_count": 12,
+        "estimated_quarantined_count": 1,
         "estimated_receipt_count": 350,
-        "max_pending_attempts": 3,
+        "quarantined_threshold_exceeded": True,
         "oldest_pending_age_seconds": 45.5,
         "oldest_processed_age_seconds": 3600.0,
         "oldest_quarantined_age_seconds": 12.25,
@@ -469,6 +636,13 @@ async def test_outbox_metrics_expose_lag_attempts_and_quarantine():
     assert "FROM config_exposure_receipts" in sql
     assert "pg_stat_user_tables" in sql
     assert "quarantined_at IS NULL" in sql
+    assert "count(*) FILTER" not in sql
+    assert "count(*) AS pending_count" not in sql
+    assert "count(*) AS quarantined_count" not in sql
+    assert "OFFSET $1" in sql
+    assert "ORDER BY created_at, id" in sql
+    assert "idx_config_outbox_cleanup_processed" in sql
+    assert conn.fetchrow.await_args.args[1] == outbox.READINESS_MAX_QUARANTINED_ROWS
 
 
 @pytest.mark.parametrize(
@@ -483,7 +657,7 @@ async def test_outbox_metrics_expose_lag_attempts_and_quarantine():
             "oldest_pending_age_exceeded",
         ),
         (
-            {"quarantined_count": outbox.READINESS_MAX_QUARANTINED_ROWS + 1},
+            {"quarantined_threshold_exceeded": True},
             "quarantined_rows_exceeded",
         ),
         (

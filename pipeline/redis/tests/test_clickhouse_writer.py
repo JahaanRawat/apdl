@@ -44,6 +44,41 @@ def test_each_maintenance_session_acquires_and_verifies_both_lock_ids() -> None:
     asyncio.run(scenario())
 
 
+def test_startup_authority_checks_do_not_overlap_queries_per_connection() -> None:
+    class GuardConnection:
+        def __init__(self) -> None:
+            self.busy = False
+            self.calls: list[str] = []
+
+        async def fetchval(self, query: str, _lock_ids) -> int:
+            assert self.busy is False, "asyncpg connections reject concurrent queries"
+            self.busy = True
+            try:
+                await asyncio.sleep(0)
+                if "mode = 'ShareLock'" in query:
+                    self.calls.append("inhibitor")
+                    return 2
+                assert "mode = 'ExclusiveLock'" in query
+                self.calls.append("singleton")
+                return 1
+            finally:
+                self.busy = False
+
+    async def scenario() -> None:
+        primary = GuardConnection()
+        redundant = GuardConnection()
+
+        await writer_module._verify_writer_authority(
+            [primary, redundant],
+            heartbeat_seconds=0.1,
+        )
+
+        assert primary.calls == ["inhibitor", "singleton"]
+        assert redundant.calls == ["inhibitor"]
+
+    asyncio.run(scenario())
+
+
 def test_boundary_marker_schema_gate_requires_exact_ledger_columns_and_state(
     monkeypatch,
 ):
@@ -346,6 +381,11 @@ def test_boundary_marker_schema_gate_rejects_wrong_ledger_checksum():
 def test_writer_schema_gate_failure_precedes_and_unwinds_runtime_locks(
     monkeypatch,
 ):
+    monkeypatch.setenv(
+        "POSTGRES_URL",
+        "postgresql://apdl:apdl_dev@postgres.test:5432/apdl",
+    )
+
     class Pool:
         def __init__(self):
             self.connection = object()
@@ -404,6 +444,16 @@ def test_writer_schema_gate_failure_precedes_and_unwinds_runtime_locks(
         assert pool.closed is True
 
     asyncio.run(scenario())
+
+
+def test_writer_requires_postgres_authority_url(monkeypatch):
+    monkeypatch.delenv("POSTGRES_URL", raising=False)
+
+    with pytest.raises(
+        RuntimeError,
+        match="POSTGRES_URL is required for the ClickHouse writer",
+    ):
+        asyncio.run(writer_module.main())
 
 
 def test_maintenance_inhibitor_loss_stops_writer() -> None:
@@ -1719,6 +1769,39 @@ def test_existing_consumer_group_avoids_group_creation_write(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_known_consumer_group_skips_inflight_frontier_revalidation(monkeypatch):
+    async def scenario():
+        writer, redis_client, _ = make_writer(monkeypatch)
+        redis_client.stream_groups["events:raw:demo"] = [
+            {
+                "name": "clickhouse-writer",
+                "pending": 1,
+                "lag": 0,
+                "last-delivered-id": "2-0",
+                "entries-read": 2,
+            }
+        ]
+
+        async def reject_revalidation(*_args, **_kwargs):
+            raise AssertionError("known in-flight streams must not be revalidated")
+
+        monkeypatch.setattr(
+            writer,
+            "_initialize_pipeline_authority",
+            reject_revalidation,
+        )
+
+        await writer._ensure_consumer_groups_for_streams(
+            ["events:raw:demo"],
+            validate_existing_authority=False,
+        )
+
+        assert redis_client.group_creates == []
+        assert redis_client.xinfo_group_calls == ["events:raw:demo"]
+
+    asyncio.run(scenario())
+
+
 def test_dynamic_start_forces_discovery_before_group_creation(monkeypatch):
     async def scenario():
         writer, _, _ = make_writer(monkeypatch)
@@ -1823,8 +1906,14 @@ def test_successful_discovery_refresh_atomically_publishes_new_snapshot(
         async def reconcile(stream_keys, *, require_group=True):
             calls.append(("reconcile", tuple(stream_keys), require_group))
 
-        async def ensure(stream_keys):
-            calls.append(("ensure", tuple(stream_keys)))
+        async def ensure(stream_keys, *, validate_existing_authority=True):
+            calls.append(
+                (
+                    "ensure",
+                    tuple(stream_keys),
+                    validate_existing_authority,
+                )
+            )
 
         monkeypatch.setattr(writer, "_discover_streams", discover)
         monkeypatch.setattr(writer, "_reconcile_acknowledged_history", reconcile)
@@ -1841,7 +1930,46 @@ def test_successful_discovery_refresh_atomically_publishes_new_snapshot(
                 ("events:raw:new", "events:raw:old"),
                 False,
             ),
-            ("ensure", ("events:raw:new", "events:raw:old")),
+            ("ensure", ("events:raw:new",), True),
+            ("ensure", ("events:raw:old",), False),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_discovery_refresh_does_not_revalidate_known_inflight_stream(
+    monkeypatch,
+):
+    async def scenario():
+        writer, _, _ = make_writer(monkeypatch)
+        writer._replace_stream_registry(["events:raw:inflight"])
+        calls = []
+
+        async def discover():
+            return ["events:raw:inflight"]
+
+        async def reconcile(stream_keys, *, require_group=True):
+            calls.append(("reconcile", tuple(stream_keys), require_group))
+
+        async def ensure(stream_keys, *, validate_existing_authority=True):
+            calls.append(
+                (
+                    "ensure",
+                    tuple(stream_keys),
+                    validate_existing_authority,
+                )
+            )
+
+        monkeypatch.setattr(writer, "_discover_streams", discover)
+        monkeypatch.setattr(writer, "_reconcile_acknowledged_history", reconcile)
+        monkeypatch.setattr(writer, "_ensure_consumer_groups_for_streams", ensure)
+
+        assert await writer._refresh_discovered_stream_registry() == [
+            "events:raw:inflight"
+        ]
+        assert calls == [
+            ("reconcile", ("events:raw:inflight",), False),
+            ("ensure", ("events:raw:inflight",), False),
         ]
 
     asyncio.run(scenario())

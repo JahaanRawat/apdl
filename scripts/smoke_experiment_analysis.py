@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Black-box smoke test for authoritative experiment analysis.
 
-The script deliberately uses only public HTTP boundaries for the functional
-test: Config creates and projects the experiment, Ingestion accepts canonical
-events, the Redis/ClickHouse pipeline materializes them, and Query delegates
-the caller credential back to Config before executing its production SQL.
+The functional analysis uses public HTTP boundaries: Config creates and
+projects the experiment, Ingestion accepts canonical events, the
+Redis/ClickHouse pipeline materializes them, and Query delegates the caller
+credential back to Config before executing its production SQL.  The smoke also
+makes direct, rejected PostgreSQL mutations to prove that the database retains
+launched-experiment enrollment authority when the API is bypassed.
 
 The supported runner uses an isolated Compose project with disposable volumes,
 so immutable ClickHouse rows are removed by project teardown after every run.
@@ -16,6 +18,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -33,6 +36,7 @@ DEFAULT_FIXTURE = ROOT / "fixtures" / "experiments" / "three-arm-analysis.json"
 CONFIDENTIAL_KEY = re.compile(
     r"^proj_(?P<project_id>[A-Za-z0-9]{1,64})_[A-Za-z0-9]{16,128}$"
 )
+ANALYSIS_CASES = ("contaminated", "clean")
 
 
 class SmokeFailure(RuntimeError):
@@ -48,8 +52,6 @@ class Identity:
         return {self.field: self.value}
 
 
-
-
 def _iso_milliseconds(value: datetime) -> str:
     return (
         value.astimezone(timezone.utc)
@@ -59,9 +61,7 @@ def _iso_milliseconds(value: datetime) -> str:
 
 
 def _parse_instant(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(
-        timezone.utc
-    )
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def _assert_equal(actual: Any, expected: Any, label: str) -> None:
@@ -74,9 +74,7 @@ def _assert_keys(value: dict[str, Any], expected: set[str], label: str) -> None:
     if actual != expected:
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
-        raise SmokeFailure(
-            f"{label} fields differ (missing={missing}, extra={extra})"
-        )
+        raise SmokeFailure(f"{label} fields differ (missing={missing}, extra={extra})")
 
 
 def _join_url(base: str, path: str) -> str:
@@ -125,6 +123,192 @@ def _request_json(
     return status, decoded
 
 
+def _postgres_command(
+    container_id: str,
+    *,
+    project_id: str,
+    experiment_key: str,
+) -> list[str]:
+    return [
+        "docker",
+        "exec",
+        "-i",
+        container_id,
+        "psql",
+        "-X",
+        "-q",
+        "-A",
+        "-t",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-v",
+        f"project_id={project_id}",
+        "-v",
+        f"experiment_key={experiment_key}",
+        "-U",
+        "apdl",
+        "-d",
+        "apdl",
+    ]
+
+
+def _run_postgres_sql(
+    container_id: str,
+    *,
+    project_id: str,
+    experiment_key: str,
+    sql: str,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            _postgres_command(
+                container_id,
+                project_id=project_id,
+                experiment_key=experiment_key,
+            ),
+            input=sql,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SmokeFailure(f"Direct PostgreSQL integrity check failed: {exc}") from exc
+
+
+def _assert_postgres_enrollment_authority(
+    container_id: str,
+    *,
+    project_id: str,
+    experiment_key: str,
+    expected_bucket_by: str,
+    expected_traffic_percentage: float,
+    expected_targeting_rules: list[dict[str, Any]],
+    expected_minimum_exposure_config_version: int,
+) -> None:
+    attempts = (
+        (
+            "traffic percentage",
+            """
+            UPDATE experiments
+            SET traffic_percentage = 50.0
+            WHERE project_id = :'project_id' AND key = :'experiment_key';
+            """,
+            "experiment enrollment is immutable after draft",
+        ),
+        (
+            "targeting rules",
+            """
+            UPDATE experiments
+            SET targeting_rules_json =
+                '[{"id":"direct-db-mutation","name":"","conditions":[]}]'
+            WHERE project_id = :'project_id' AND key = :'experiment_key';
+            """,
+            "experiment enrollment is immutable after draft",
+        ),
+        (
+            "bucketing identity",
+            """
+            UPDATE experiments
+            SET bucket_by = 'anonymous_id'
+            WHERE project_id = :'project_id' AND key = :'experiment_key';
+            """,
+            "experiment enrollment is immutable after draft",
+        ),
+        (
+            "status-only draft downgrade",
+            """
+            UPDATE experiments
+            SET status = 'draft'
+            WHERE project_id = :'project_id' AND key = :'experiment_key';
+            """,
+            "experiments_minimum_exposure_version_check",
+        ),
+        (
+            "draft downgrade with cleared exposure version",
+            """
+            UPDATE experiments
+            SET status = 'draft', minimum_exposure_config_version = NULL
+            WHERE project_id = :'project_id' AND key = :'experiment_key';
+            """,
+            "experiment enrollment is immutable after draft",
+        ),
+    )
+    for label, sql, expected_error in attempts:
+        result = _run_postgres_sql(
+            container_id,
+            project_id=project_id,
+            experiment_key=experiment_key,
+            sql=sql,
+        )
+        if result.returncode == 0:
+            raise SmokeFailure(
+                f"Direct PostgreSQL {label} mutation unexpectedly succeeded"
+            )
+        error = f"{result.stdout}\n{result.stderr}"
+        if expected_error not in error:
+            raise SmokeFailure(
+                f"Direct PostgreSQL {label} mutation failed for the wrong reason: "
+                f"{error.strip()[:500]!r}"
+            )
+
+    result = _run_postgres_sql(
+        container_id,
+        project_id=project_id,
+        experiment_key=experiment_key,
+        sql="""
+        SELECT json_build_object(
+            'status', status,
+            'bucket_by', bucket_by,
+            'traffic_percentage', traffic_percentage,
+            'targeting_rules', targeting_rules_json::JSONB,
+            'minimum_exposure_config_version',
+                minimum_exposure_config_version
+        )::TEXT
+        FROM experiments
+        WHERE project_id = :'project_id' AND key = :'experiment_key';
+        """,
+    )
+    if result.returncode != 0:
+        raise SmokeFailure(
+            "Could not read launched experiment after rejected direct mutations: "
+            f"{result.stderr.strip()[:500]!r}"
+        )
+    rows = [line for line in result.stdout.splitlines() if line]
+    if len(rows) != 1:
+        raise SmokeFailure(
+            "Direct PostgreSQL integrity check did not find exactly one experiment"
+        )
+    try:
+        persisted = json.loads(rows[0])
+    except json.JSONDecodeError as exc:
+        raise SmokeFailure(
+            f"Direct PostgreSQL integrity check returned invalid JSON: {rows[0]!r}"
+        ) from exc
+    _assert_equal(persisted["status"], "running", "persisted experiment status")
+    _assert_equal(
+        persisted["bucket_by"],
+        expected_bucket_by,
+        "persisted experiment bucketing identity",
+    )
+    _assert_equal(
+        persisted["traffic_percentage"],
+        expected_traffic_percentage,
+        "persisted experiment traffic percentage",
+    )
+    _assert_equal(
+        persisted["targeting_rules"],
+        expected_targeting_rules,
+        "persisted experiment targeting rules",
+    )
+    _assert_equal(
+        persisted["minimum_exposure_config_version"],
+        expected_minimum_exposure_config_version,
+        "persisted minimum exposure config version",
+    )
+
+
 def _load_fixture(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
         fixture = json.loads(path.read_text(encoding="utf-8"))
@@ -136,7 +320,9 @@ def _load_fixture(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         raise SmokeFailure(f"Invalid runtime fixture {path}: {exc}") from exc
 
     if not isinstance(variants, list) or len(variants) < 2:
-        raise SmokeFailure("Fixture config_contract.variants must list at least two arms")
+        raise SmokeFailure(
+            "Fixture config_contract.variants must list at least two arms"
+        )
     if contract["control_variant"] not in variants:
         raise SmokeFailure("Fixture control_variant must be a declared variant")
     if runtime["unknown_variant"] in variants:
@@ -145,9 +331,7 @@ def _load_fixture(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         raise SmokeFailure(
             "Fixture enrollment_mode must be all for fallthrough exposure events"
         )
-    minimum_exposure_config_version = contract.get(
-        "minimum_exposure_config_version"
-    )
+    minimum_exposure_config_version = contract.get("minimum_exposure_config_version")
     if (
         type(minimum_exposure_config_version) is not int
         or minimum_exposure_config_version < 1
@@ -168,6 +352,31 @@ def _load_fixture(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return contract, runtime
 
 
+def _analysis_expectations(
+    contract: dict[str, Any],
+    runtime: dict[str, Any],
+    analysis_case: str,
+) -> dict[str, Any]:
+    if analysis_case == "contaminated":
+        return runtime["expected"]
+    if analysis_case != "clean":
+        raise SmokeFailure(f"Unsupported analysis case: {analysis_case}")
+
+    variants = list(contract["variants"])
+    actors_per_arm = int(runtime["actors_per_declared_arm"])
+    return {
+        "analysis_status": "decision_snapshot",
+        "accepted_events": len(variants) * actors_per_arm + 5,
+        "arm_sample_sizes": {variant: actors_per_arm for variant in variants},
+        "arm_conversions": {variant: 0 for variant in variants},
+        "crossover_actors": 0,
+        "identity_conflict_actors": 0,
+        "unknown_variant_actors": 0,
+        "raw_p_value": 1.0,
+        "adjusted_p_value": 1.0,
+    }
+
+
 def _build_events(
     *,
     contract: dict[str, Any],
@@ -177,6 +386,8 @@ def _build_events(
     config_version: int,
     start: datetime,
     end: datetime,
+    analysis_case: str,
+    expected: dict[str, Any],
 ) -> list[dict[str, Any]]:
     variants = list(contract["variants"])
     metric_event = str(contract["metric_event"])
@@ -244,9 +455,7 @@ def _build_events(
                     "anonymous_id", f"{run_id}-{same_identity['raw_id']}"
                 )
             else:
-                identity = Identity(
-                    "user_id", f"{run_id}-{variant}-{actor_index:02d}"
-                )
+                identity = Identity("user_id", f"{run_id}-{variant}-{actor_index:02d}")
             assigned_at = start + timedelta(
                 milliseconds=(variant_index * actors_per_arm) + actor_index
             )
@@ -260,31 +469,32 @@ def _build_events(
             )
         identities[variant] = arm
 
-    unknown_identities = [
-        Identity("user_id", f"{run_id}-{unknown_variant}-{index:02d}")
-        for index in range(int(runtime["unknown_actor_count"]))
-    ]
-    for index, identity in enumerate(unknown_identities):
-        exposure(
-            identity,
-            unknown_variant,
-            start + timedelta(milliseconds=500 + index),
-            f"assigned_{unknown_variant}_{index:02d}",
-        )
+    if analysis_case == "contaminated":
+        unknown_identities = [
+            Identity("user_id", f"{run_id}-{unknown_variant}-{index:02d}")
+            for index in range(int(runtime["unknown_actor_count"]))
+        ]
+        for index, identity in enumerate(unknown_identities):
+            exposure(
+                identity,
+                unknown_variant,
+                start + timedelta(milliseconds=500 + index),
+                f"assigned_{unknown_variant}_{index:02d}",
+            )
 
-    for index, crossover in enumerate(runtime["crossovers"]):
-        first_variant = str(crossover["first_variant"])
-        actor_index = int(crossover["actor_index"])
-        if first_variant == unknown_variant:
-            identity = unknown_identities[actor_index]
-        else:
-            identity = identities[first_variant][actor_index]
-        exposure(
-            identity,
-            str(crossover["later_variant"]),
-            start + timedelta(seconds=2, milliseconds=index),
-            f"crossover_{index:02d}",
-        )
+        for index, crossover in enumerate(runtime["crossovers"]):
+            first_variant = str(crossover["first_variant"])
+            actor_index = int(crossover["actor_index"])
+            if first_variant == unknown_variant:
+                identity = unknown_identities[actor_index]
+            else:
+                identity = identities[first_variant][actor_index]
+            exposure(
+                identity,
+                str(crossover["later_variant"]),
+                start + timedelta(seconds=2, milliseconds=index),
+                f"crossover_{index:02d}",
+            )
 
     pre_metric = runtime["pre_exposure_metric"]
     pre_variant = str(pre_metric["variant"])
@@ -306,15 +516,16 @@ def _build_events(
     )
     metric(before_identity, before_start, "metric_before_start")
 
-    last_identity = Identity("user_id", f"{run_id}-last-before-end")
-    last_before_end = end - timedelta(milliseconds=1)
-    exposure(
-        last_identity,
-        str(boundaries["last_before_end_variant"]),
-        last_before_end,
-        "exposure_last_before_end",
-    )
-    metric(last_identity, last_before_end, "metric_last_before_end")
+    if analysis_case == "contaminated":
+        last_identity = Identity("user_id", f"{run_id}-last-before-end")
+        last_before_end = end - timedelta(milliseconds=1)
+        exposure(
+            last_identity,
+            str(boundaries["last_before_end_variant"]),
+            last_before_end,
+            "exposure_last_before_end",
+        )
+        metric(last_identity, last_before_end, "metric_last_before_end")
 
     at_end_identity = Identity("user_id", f"{run_id}-at-end")
     exposure(
@@ -327,9 +538,7 @@ def _build_events(
     # would visibly violate the fixture's all-zero conversion assertion.
     metric(identities[variants[-1]][0], end, "metric_at_end")
 
-    _assert_equal(
-        len(events), runtime["expected"]["accepted_events"], "generated event count"
-    )
+    _assert_equal(len(events), expected["accepted_events"], "generated event count")
     return events
 
 
@@ -402,56 +611,66 @@ def _assert_analysis(
     experiment_key: str,
     flag_key: str,
     contract: dict[str, Any],
-    runtime: dict[str, Any],
+    expected: dict[str, Any],
     start: datetime,
     end: datetime,
     version: int,
 ) -> None:
-    expected = runtime["expected"]
-    _assert_keys(
-        result,
-        {
-            "experiment_key",
-            "flag_key",
-            "experiment_status",
-            "control_variant",
-            "metric_event",
-            "metric_direction",
-            "statistical_plan",
-            "start_date",
-            "end_date",
-            "config_version",
-            "arms",
-            "crossover_actors",
-            "unknown_variant_actors",
-            "identity_conflict_actors",
-            "identity_quality",
-            "analysis_status",
-            "data_completeness",
-            "deployment_readiness",
-            "reason",
-            "underpowered_variants",
-        },
-        "Query experiment analysis",
-    )
+    common_fields = {
+        "experiment_key",
+        "flag_key",
+        "experiment_status",
+        "control_variant",
+        "metric_event",
+        "metric_direction",
+        "statistical_plan",
+        "start_date",
+        "end_date",
+        "config_version",
+        "arms",
+        "crossover_actors",
+        "unknown_variant_actors",
+        "identity_conflict_actors",
+        "identity_quality",
+        "analysis_status",
+        "data_completeness",
+        "deployment_readiness",
+    }
+    if expected["analysis_status"] == "decision_snapshot":
+        expected_fields = common_fields | {
+            "inference_method",
+            "interval_method",
+            "correction",
+            "comparisons",
+        }
+    else:
+        expected_fields = common_fields | {"reason", "underpowered_variants"}
+    _assert_keys(result, expected_fields, "Query experiment analysis")
     _assert_equal(
         result["analysis_status"], expected["analysis_status"], "analysis status"
     )
-    _assert_equal(result["reason"], expected["reason"], "non-final reason")
-    _assert_equal(
-        result["underpowered_variants"],
-        expected["underpowered_variants"],
-        "underpowered variants",
-    )
+    if expected["analysis_status"] == "non_final":
+        _assert_equal(result["reason"], expected["reason"], "non-final reason")
+        _assert_equal(
+            result["underpowered_variants"],
+            expected["underpowered_variants"],
+            "underpowered variants",
+        )
     _assert_equal(result["experiment_key"], experiment_key, "analysis experiment key")
     _assert_equal(result["flag_key"], flag_key, "analysis flag key")
-    _assert_equal(result["experiment_status"], "completed", "analysis experiment status")
+    _assert_equal(
+        result["experiment_status"], "completed", "analysis experiment status"
+    )
     _assert_equal(
         result["control_variant"], contract["control_variant"], "analysis control"
     )
     _assert_equal(result["metric_event"], contract["metric_event"], "analysis metric")
-    _assert_equal(result["metric_direction"], contract["metric_direction"], "metric direction")
-    _assert_equal(result["statistical_plan"], contract["statistical_plan"], "statistical plan")
+    _assert_equal(
+        result["metric_direction"], contract["metric_direction"], "metric direction"
+    )
+    _assert_equal(
+        result["statistical_plan"], contract["statistical_plan"], "statistical plan"
+    )
     _assert_equal(_parse_instant(result["start_date"]), start, "analysis start")
     _assert_equal(_parse_instant(result["end_date"]), end, "analysis end")
     _assert_equal(result["config_version"], version, "analysis config version")
@@ -468,10 +687,14 @@ def _assert_analysis(
         )
         variant = arm["variant"]
         _assert_equal(
-            arm["sample_size"], expected["arm_sample_sizes"][variant], f"{variant} sample size"
+            arm["sample_size"],
+            expected["arm_sample_sizes"][variant],
+            f"{variant} sample size",
         )
         _assert_equal(
-            arm["conversions"], expected["arm_conversions"][variant], f"{variant} conversions"
+            arm["conversions"],
+            expected["arm_conversions"][variant],
+            f"{variant} conversions",
         )
         _assert_equal(arm["conversion_rate"], 0.0, f"{variant} conversion rate")
 
@@ -489,11 +712,85 @@ def _assert_analysis(
         "identity-conflict actors",
     )
     _assert_equal(result["identity_quality"], "unambiguous", "identity quality")
-    _assert_equal(result["data_completeness"], "not_verified", "data completeness")
-    _assert_equal(result["deployment_readiness"], "not_assessed", "deployment readiness")
+    _assert_equal(
+        result["deployment_readiness"], "not_assessed", "deployment readiness"
+    )
+    if expected["analysis_status"] == "non_final":
+        _assert_equal(
+            result["data_completeness"],
+            "not_verified",
+            "non-final data completeness",
+        )
+        return
+
+    _assert_equal(result["data_completeness"], "verified", "decision data completeness")
+    _assert_equal(
+        result["inference_method"],
+        "fisher_exact_two_sided",
+        "inference method",
+    )
+    _assert_equal(result["interval_method"], "newcombe_wilson", "interval method")
+    _assert_equal(result["correction"], "bonferroni", "multiple-test correction")
+
+    comparisons = result["comparisons"]
+    treatment_order = [
+        variant
+        for variant in contract["variants"]
+        if variant != contract["control_variant"]
+    ]
+    _assert_equal(
+        [comparison["treatment_variant"] for comparison in comparisons],
+        treatment_order,
+        "comparison order",
+    )
+    for comparison in comparisons:
+        _assert_keys(
+            comparison,
+            {
+                "control_variant",
+                "treatment_variant",
+                "control_rate",
+                "treatment_rate",
+                "rate_difference",
+                "confidence_interval",
+                "raw_p_value",
+                "adjusted_p_value",
+                "is_statistically_significant",
+            },
+            f"comparison {comparison.get('treatment_variant')}",
+        )
+        _assert_equal(
+            comparison["control_variant"],
+            contract["control_variant"],
+            "comparison control",
+        )
+        _assert_equal(comparison["control_rate"], 0.0, "comparison control rate")
+        _assert_equal(comparison["treatment_rate"], 0.0, "comparison treatment rate")
+        _assert_equal(comparison["rate_difference"], 0.0, "comparison rate difference")
+        lower, upper = comparison["confidence_interval"]
+        if not lower < 0.0 < upper:
+            raise SmokeFailure(
+                "all-zero Newcombe/Wilson interval must be finite and span zero: "
+                f"{comparison['confidence_interval']!r}"
+            )
+        _assert_equal(
+            comparison["raw_p_value"],
+            expected["raw_p_value"],
+            "raw p-value",
+        )
+        _assert_equal(
+            comparison["adjusted_p_value"],
+            expected["adjusted_p_value"],
+            "adjusted p-value",
+        )
+        _assert_equal(
+            comparison["is_statistically_significant"],
+            False,
+            "significance verdict",
+        )
 
 
-def _run(args: argparse.Namespace) -> None:
+def _run(args: argparse.Namespace, analysis_case: str) -> None:
     match = CONFIDENTIAL_KEY.fullmatch(args.api_key or "")
     if match is None:
         raise SmokeFailure(
@@ -502,9 +799,10 @@ def _run(args: argparse.Namespace) -> None:
         )
     project_id = match.group("project_id")
     contract, runtime = _load_fixture(args.fixture)
+    expected = _analysis_expectations(contract, runtime, analysis_case)
     run_id = uuid.uuid4().hex[:12]
-    experiment_key = f"smoke_analysis_{run_id}"
-    flag_key = f"smoke_flag_{run_id}"
+    experiment_key = f"smoke_analysis_{analysis_case}_{run_id}"
+    flag_key = f"smoke_flag_{analysis_case}_{run_id}"
     now = datetime.now(timezone.utc).replace(microsecond=0)
     start = now - timedelta(minutes=10)
     end = now + timedelta(seconds=10)
@@ -515,14 +813,19 @@ def _run(args: argparse.Namespace) -> None:
     primary_failure: Exception | None = None
     cleanup_failures: list[str] = []
 
-    print(f"Experiment-analysis smoke run {run_id} for project {project_id}")
+    print(
+        f"Experiment-analysis {analysis_case} smoke run {run_id} "
+        f"for project {project_id}"
+    )
     try:
         for name, url in (
             ("Ingestion", _join_url(args.ingestion_url, "/health")),
             ("Config", _join_url(args.config_url, "/ready")),
             ("Query", _join_url(args.query_url, "/health")),
         ):
-            _request_json(url, args.api_key, expected_status={200}, timeout=args.request_timeout)
+            _request_json(
+                url, args.api_key, expected_status={200}, timeout=args.request_timeout
+            )
             print(f"  ok  {name} health")
 
         create_payload = {
@@ -533,7 +836,9 @@ def _run(args: argparse.Namespace) -> None:
             # experiment identity rather than relying on a service default.
             "bucket_by": "user_id",
             "status": "running",
-            "description": "Cross-service authoritative analysis smoke fixture",
+            "description": (
+                f"Cross-service authoritative {analysis_case} analysis smoke fixture"
+            ),
             "traffic_percentage": 100.0,
             "start_date": _iso_milliseconds(start),
             "end_date": _iso_milliseconds(end),
@@ -586,8 +891,26 @@ def _run(args: argparse.Namespace) -> None:
         )
         print("  ok  Config returned the strict authoritative projection")
 
+        _assert_postgres_enrollment_authority(
+            args.postgres_container_id,
+            project_id=project_id,
+            experiment_key=experiment_key,
+            expected_bucket_by=create_payload["bucket_by"],
+            expected_traffic_percentage=create_payload["traffic_percentage"],
+            expected_targeting_rules=create_payload["targeting_rules"],
+            expected_minimum_exposure_config_version=int(
+                contract["minimum_exposure_config_version"]
+            ),
+        )
+        print(
+            "  ok  PostgreSQL rejected direct enrollment mutations and "
+            "draft downgrade attempts"
+        )
+
         _request_json(
-            _join_url(args.config_url, f"{experiment_path}?metric_event=caller_override"),
+            _join_url(
+                args.config_url, f"{experiment_path}?metric_event=caller_override"
+            ),
             args.api_key,
             expected_status={422},
             timeout=args.request_timeout,
@@ -608,6 +931,8 @@ def _run(args: argparse.Namespace) -> None:
             config_version=int(contract["minimum_exposure_config_version"]),
             start=start,
             end=end,
+            analysis_case=analysis_case,
+            expected=expected,
         )
         _, accepted = _request_json(
             _join_url(args.ingestion_url, "/v1/events"),
@@ -619,7 +944,7 @@ def _run(args: argparse.Namespace) -> None:
         )
         _assert_equal(
             accepted,
-            {"accepted": runtime["expected"]["accepted_events"]},
+            {"accepted": expected["accepted_events"]},
             "Ingestion acknowledgement",
         )
         print(f"  ok  Ingestion atomically accepted {len(events)} canonical events")
@@ -630,11 +955,19 @@ def _run(args: argparse.Namespace) -> None:
             expected_status={200},
             timeout=args.request_timeout,
         )
-        _assert_equal(provisional["analysis_status"], "non_final", "running analysis state")
-        _assert_equal(provisional["reason"], "experiment_running", "running analysis reason")
+        _assert_equal(
+            provisional["analysis_status"], "non_final", "running analysis state"
+        )
+        _assert_equal(
+            provisional["reason"], "experiment_running", "running analysis reason"
+        )
         if "comparisons" in provisional:
-            raise SmokeFailure("running experiment unexpectedly exposed snapshot comparisons")
-        print("  ok  Query withheld fixed-horizon comparisons while the experiment was running")
+            raise SmokeFailure(
+                "running experiment unexpectedly exposed snapshot comparisons"
+            )
+        print(
+            "  ok  Query withheld fixed-horizon comparisons while the experiment was running"
+        )
 
         wait_seconds = (end - datetime.now(timezone.utc)).total_seconds()
         if wait_seconds > 0:
@@ -648,7 +981,9 @@ def _run(args: argparse.Namespace) -> None:
             timeout=args.request_timeout,
         )
         if transition_status == 200:
-            _assert_equal(transitioned["updated"], True, "Config completion acknowledgement")
+            _assert_equal(
+                transitioned["updated"], True, "Config completion acknowledgement"
+            )
             created_version = int(transitioned["version"])
 
         _, projection = _request_json(
@@ -657,7 +992,9 @@ def _run(args: argparse.Namespace) -> None:
             timeout=args.request_timeout,
         )
         if transition_status == 409:
-            _assert_equal(projection["status"], "completed", "scheduler completion race")
+            _assert_equal(
+                projection["status"], "completed", "scheduler completion race"
+            )
             created_version = int(projection["version"])
         _assert_projection(
             projection,
@@ -686,7 +1023,7 @@ def _run(args: argparse.Namespace) -> None:
                     experiment_key=experiment_key,
                     flag_key=flag_key,
                     contract=contract,
-                    runtime=runtime,
+                    expected=expected,
                     start=start,
                     end=end,
                     version=created_version,
@@ -705,9 +1042,15 @@ def _run(args: argparse.Namespace) -> None:
         )
         print(
             "  ok  first assignment, namespaced identities, non-first control, "
-            "multi-treatment, unknown arms fail closed, and millisecond half-open "
-            "boundaries"
+            "multi-treatment, and millisecond half-open boundaries"
         )
+        if analysis_case == "contaminated":
+            print("  ok  Unknown variants fail closed before statistical inference")
+        else:
+            print(
+                "  ok  Clean exact-engine data produced Fisher/Newcombe "
+                "comparisons and a persisted decision snapshot"
+            )
     except Exception as exc:  # preserve the primary failure through cleanup
         primary_failure = exc
     finally:
@@ -756,21 +1099,34 @@ def _run(args: argparse.Namespace) -> None:
                         version=archive_version,
                         expected_status="completed",
                     )
-                    _, archived_analysis = _request_json(
-                        _join_url(args.query_url, query_path),
-                        args.api_key,
-                        timeout=args.request_timeout,
-                    )
-                    _assert_analysis(
-                        archived_analysis,
-                        experiment_key=experiment_key,
-                        flag_key=flag_key,
-                        contract=contract,
-                        runtime=runtime,
-                        start=start,
-                        end=end,
-                        version=archive_version,
-                    )
+                    archive_deadline = time.monotonic() + args.pipeline_timeout
+                    last_archived_analysis: Any = None
+                    while time.monotonic() < archive_deadline:
+                        _, last_archived_analysis = _request_json(
+                            _join_url(args.query_url, query_path),
+                            args.api_key,
+                            timeout=args.request_timeout,
+                        )
+                        try:
+                            _assert_analysis(
+                                last_archived_analysis,
+                                experiment_key=experiment_key,
+                                flag_key=flag_key,
+                                contract=contract,
+                                expected=expected,
+                                start=start,
+                                end=end,
+                                version=archive_version,
+                            )
+                            break
+                        except SmokeFailure:
+                            time.sleep(args.poll_interval)
+                    else:
+                        raise SmokeFailure(
+                            "Archived analysis did not reach its new pipeline "
+                            "boundary before the deadline; "
+                            f"last response={last_archived_analysis!r}"
+                        )
                 print(
                     "  ok  Config archived the launched experiment and preserved "
                     "its analysis authority"
@@ -788,7 +1144,7 @@ def _run(args: argparse.Namespace) -> None:
         if isinstance(primary_failure, SmokeFailure):
             raise primary_failure
         raise SmokeFailure(str(primary_failure)) from primary_failure
-    print("Experiment-analysis smoke passed")
+    print(f"Experiment-analysis {analysis_case} smoke passed")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -806,6 +1162,17 @@ def _parser() -> argparse.ArgumentParser:
         "--query-url",
         default=os.environ.get("APDL_QUERY_URL", "http://localhost:8082"),
     )
+    parser.add_argument(
+        "--postgres-container-id",
+        default=os.environ.get("APDL_POSTGRES_CONTAINER_ID"),
+        help="Disposable migrated PostgreSQL container used for integrity probes",
+    )
+    parser.add_argument(
+        "--analysis-case",
+        choices=("both", *ANALYSIS_CASES),
+        default="both",
+        help="Run both finality cases by default, or select one for diagnosis",
+    )
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--request-timeout", type=float, default=10.0)
     parser.add_argument("--pipeline-timeout", type=float, default=45.0)
@@ -815,6 +1182,13 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
+    if not args.postgres_container_id:
+        print(
+            "Smoke failed: --postgres-container-id/APDL_POSTGRES_CONTAINER_ID "
+            "is required",
+            file=sys.stderr,
+        )
+        return 2
     if (
         args.request_timeout <= 0
         or args.pipeline_timeout <= 0
@@ -826,7 +1200,11 @@ def main() -> int:
         )
         return 2
     try:
-        _run(args)
+        analysis_cases = (
+            ANALYSIS_CASES if args.analysis_case == "both" else (args.analysis_case,)
+        )
+        for analysis_case in analysis_cases:
+            _run(args, analysis_case)
     except SmokeFailure as exc:
         print(f"Smoke failed: {exc}", file=sys.stderr)
         return 1

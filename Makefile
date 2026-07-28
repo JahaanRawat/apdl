@@ -6,12 +6,14 @@ all: build
 
 CLICKHOUSE_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 POSTGRES_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
+DEPS_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 
 # Full-stack Compose command. `-f infra/docker/docker-compose.yml` makes Compose
 # use that folder as its project dir (and its default `.env` lookup), so the
 # repo-root `.env` is otherwise ignored — load it explicitly when it exists.
 COMPOSE_FILE ?= infra/docker/docker-compose.yml
 COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(COMPOSE_FILE)
+DEPS_COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(DEPS_COMPOSE_FILE)
 SERVICE_ENV_FILE := $(if $(wildcard .env),--env-file ../../.env,)
 
 # One immutable identity binds the evaluation controller, production candidate,
@@ -400,9 +402,9 @@ migrate-postgres:
 # ─── Docker ──────────────────────────────────────────────────
 
 dev:
-	docker compose -f infra/docker/docker-compose.deps.yml up -d
-	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
-	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=infra/docker/docker-compose.deps.yml
+	$(DEPS_COMPOSE) up -d
+	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(DEPS_COMPOSE_FILE)
+	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=$(DEPS_COMPOSE_FILE)
 	@echo "==> Dependencies running (Redis, ClickHouse, PostgreSQL)"
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-agents, make run-codegen, make run-pipeline"
 
@@ -426,7 +428,7 @@ dev-all: dev-core
 
 dev-down:
 	$(COMPOSE) --profile agents --profile codegen down
-	docker compose -f infra/docker/docker-compose.deps.yml down
+	$(DEPS_COMPOSE) down
 	@docker network rm "$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" >/dev/null 2>&1 || true
 
 smoke-fresh:

@@ -1302,7 +1302,8 @@ async def enqueue_exposure(
                 existing_payload = json.loads(existing_payload)
             if existing_payload != canonical_payload:
                 raise IntegrityError(
-                    f"Exposure message_id '{message_id}' was reused"
+                    f"Exposure message_id '{message_id}' is unique per exposure "
+                    "and was reused for a different canonical payload"
                 )
 
 

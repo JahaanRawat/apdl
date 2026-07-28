@@ -38,6 +38,9 @@ ALTER TABLE experiments
 ALTER TABLE experiments
     VALIDATE CONSTRAINT experiments_bucket_by_check;
 
+-- Keep paired with experiments_minimum_exposure_version_check: the check
+-- rejects status-only draft downgrades, while this trigger rejects clearing
+-- the exposure-version floor in the same update.
 CREATE OR REPLACE FUNCTION public.apdl_enforce_experiment_enrollment_immutability()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -69,4 +72,4 @@ FOR EACH ROW EXECUTE FUNCTION
 COMMENT ON COLUMN experiments.bucket_by IS
     'Explicit immutable-after-draft experiment actor identity: anonymous_id or user_id';
 COMMENT ON FUNCTION public.apdl_enforce_experiment_enrollment_immutability() IS
-    'Rejects bucketing identity, traffic, targeting, or exposure-version changes after draft';
+    'Rejects enrollment-field changes after draft; paired with experiments_minimum_exposure_version_check, which blocks status-only draft downgrades';

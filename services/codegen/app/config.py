@@ -35,7 +35,10 @@ MAX_CODEGEN_JOB_BUDGET_SECONDS = _MAX_CODEGEN_JOB_BUDGET_SECONDS
 
 def postgres_url() -> str:
     """DSN for the shared APDL PostgreSQL database."""
-    return os.getenv("POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl")
+    return os.getenv(
+        "POSTGRES_URL",
+        "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
+    )
 
 
 # Local dev admin-console origins (Vite). Override in prod via CODEGEN_CORS_ORIGINS.

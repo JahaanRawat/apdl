@@ -1,5 +1,5 @@
 import type { ComponentDefinition, RenderContext } from './types';
-import { requireSafeUiUrl } from '../url-policy';
+import { optionalSafeUiUrl } from '../url-policy';
 
 /**
  * Content card component.
@@ -25,16 +25,10 @@ export const CardComponent: ComponentDefinition = {
   render(props: Record<string, unknown>, context: RenderContext): HTMLElement {
     const title = (props.title as string) || '';
     const description = props.description as string | undefined;
-    const imageUrl = props.imageUrl as string | undefined;
-    const safeImageUrl = imageUrl === undefined
-      ? null
-      : requireSafeUiUrl(imageUrl, 'card.imageUrl');
+    const safeImageUrl = optionalSafeUiUrl(props.imageUrl, 'card.imageUrl');
     const imageAlt = (props.imageAlt as string) || title;
     const ctaText = props.ctaText as string | undefined;
-    const ctaHref = props.ctaHref as string | undefined;
-    const safeCtaHref = ctaHref === undefined
-      ? null
-      : requireSafeUiUrl(ctaHref, 'card.ctaHref');
+    const safeCtaHref = optionalSafeUiUrl(props.ctaHref, 'card.ctaHref');
     const width = (props.width as string) || '320px';
 
     const card = document.createElement('div');

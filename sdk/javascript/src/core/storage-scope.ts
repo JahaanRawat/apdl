@@ -1,5 +1,3 @@
-import type { PersistenceMode } from './config';
-
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9]{1,64}$/;
 const STORAGE_KEY_VERSION = 2;
 
@@ -30,14 +28,12 @@ export function scopedBrowserStorageKey(
 }
 
 /**
- * Removes browser keys from the former project-only namespace. Those values
- * cannot be attributed to a deployment and must never be restored.
+ * Removes browser keys from the former unscoped and project-only namespaces.
+ * Those values cannot be attributed to a deployment and must never be
+ * restored, including after a deployment switches to memory persistence.
  */
-export function rejectLegacyProjectStorage(
-  projectId: string,
-  persistence: PersistenceMode
-): void {
-  if (persistence !== 'localStorage' || !PROJECT_ID_PATTERN.test(projectId)) {
+export function rejectLegacyProjectStorage(projectId: string): void {
+  if (!PROJECT_ID_PATTERN.test(projectId)) {
     return;
   }
 
@@ -49,6 +45,7 @@ export function rejectLegacyProjectStorage(
       'flags',
       'session',
     ] satisfies BrowserStorageKind[]) {
+      localStorage.removeItem(`apdl_${kind}`);
       localStorage.removeItem(`apdl_${kind}_${projectId}`);
     }
   } catch {

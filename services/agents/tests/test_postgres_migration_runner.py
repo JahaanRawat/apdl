@@ -270,6 +270,39 @@ def test_launcher_is_reaped_before_server_cancellation() -> None:
     assert order == ["terminate-launcher", "prove-server-absence"]
 
 
+def test_launcher_exception_warns_and_sleeps_before_retry(
+    monkeypatch,
+    capsys,
+) -> None:
+    completed = threading.Event()
+    sleeps: list[float] = []
+    cancelled: list[bool] = []
+
+    class Process:
+        poll_count = 0
+
+        def poll(self):
+            self.poll_count += 1
+            if self.poll_count == 1:
+                raise RuntimeError("launcher state unavailable")
+            return 0
+
+    monkeypatch.setattr(migrate.time, "sleep", sleeps.append)
+
+    migrate._stop_operation(
+        Process(),
+        completed,
+        lambda: cancelled.append(True),
+    )
+
+    assert sleeps == [migrate.MAINTENANCE_CANCELLATION_RETRY_SECONDS]
+    assert cancelled == [True]
+    assert (
+        "local migration client termination is unproven"
+        in capsys.readouterr().err
+    )
+
+
 def test_keyboard_interrupt_still_cancels_and_proves_server_absence(monkeypatch):
     real_event = threading.Event
 

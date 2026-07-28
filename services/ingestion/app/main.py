@@ -175,7 +175,8 @@ async def lifespan(application: FastAPI):
     """Manage startup/shutdown of shared resources."""
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
     postgres_url = os.environ.get(
-        "POSTGRES_URL", "postgresql://apdl:apdl_dev@localhost:5432/apdl"
+        "POSTGRES_URL",
+        "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
     )
     application.state.trusted_proxy_networks = parse_trusted_proxy_cidrs(
         os.environ.get("INGESTION_TRUSTED_PROXY_CIDRS", "")

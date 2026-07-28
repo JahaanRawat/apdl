@@ -554,3 +554,36 @@ def test_owner_loss_mid_clickhouse_command_cancels_and_terminates_operation():
 
     assert cancelled == [True]
     assert fence.checks >= 2
+
+
+def test_launcher_exception_warns_and_sleeps_before_retry(
+    monkeypatch,
+    capsys,
+) -> None:
+    completed = migrate.threading.Event()
+    sleeps: list[float] = []
+    cancelled: list[bool] = []
+
+    class Process:
+        poll_count = 0
+
+        def poll(self):
+            self.poll_count += 1
+            if self.poll_count == 1:
+                raise RuntimeError("launcher state unavailable")
+            return 0
+
+    monkeypatch.setattr(migrate.time, "sleep", sleeps.append)
+
+    migrate._stop_operation(
+        Process(),
+        completed,
+        lambda: cancelled.append(True),
+    )
+
+    assert sleeps == [migrate.MAINTENANCE_CANCELLATION_RETRY_SECONDS]
+    assert cancelled == [True]
+    assert (
+        "local migration client termination is unproven"
+        in capsys.readouterr().err
+    )

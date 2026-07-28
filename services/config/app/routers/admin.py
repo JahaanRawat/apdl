@@ -8,12 +8,15 @@ import secrets
 from datetime import date, datetime, timezone
 
 import asyncpg
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import JSONResponse
 
+from app import outbox
 from app.auth import authorized_project
 from app.flags import experiment_flag
 from app.models.schemas import (
+    MAX_BIGSERIAL_ID,
+    ExperimentAuditPage,
     ExperimentCreate,
     ExperimentMetric,
     ExperimentStatisticalPlan,
@@ -23,6 +26,9 @@ from app.models.schemas import (
     FlagDisable,
     FlagTransition,
     FlagUpdate,
+    OutboxQuarantineAction,
+    OutboxQuarantinePage,
+    OutboxQuarantineResolution,
     VariantConfig,
     validate_experiment_lifecycle,
     validate_statistical_plan,
@@ -211,6 +217,126 @@ def _days_since_update(flag: dict) -> int:
 
 
 # ---------- Flags ----------
+
+
+@router.get(
+    "/outbox/quarantine",
+    response_model=OutboxQuarantinePage,
+)
+async def list_outbox_quarantine(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    before_id: int | None = Query(
+        default=None,
+        ge=1,
+        le=MAX_BIGSERIAL_ID,
+    ),
+):
+    """Inspect one project's quarantined delivery rows using keyset pagination."""
+    project_id = authorized_project(request, "config:write")
+    entries, next_before_id = await outbox.list_quarantined(
+        request.app.state.pg_pool,
+        project_id,
+        limit=limit,
+        before_id=before_id,
+    )
+    return OutboxQuarantinePage(
+        history_scope="project_quarantine",
+        quarantine=entries,
+        count=len(entries),
+        next_before_id=next_before_id,
+    )
+
+
+async def _resolve_outbox_quarantine(
+    *,
+    request: Request,
+    row_id: int,
+    body: OutboxQuarantineAction,
+    action: str,
+):
+    project_id = authorized_project(request, "config:write")
+    try:
+        entry = await outbox.resolve_quarantined(
+            request.app.state.pg_pool,
+            project_id,
+            row_id,
+            action=action,
+            actor=_actor(request),
+            reason=body.reason.strip(),
+        )
+    except outbox.UnsafeQuarantineReplay as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "unsafe_outbox_replay",
+                "message": str(exc),
+                "kind": exc.kind,
+            },
+        )
+    if entry is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": "not_found",
+                "message": f"Quarantined outbox row '{row_id}' not found",
+            },
+        )
+    logger.warning(
+        "Config outbox row %s %sed for project %s by %s",
+        row_id,
+        action,
+        project_id,
+        _actor(request),
+        extra={
+            "event": "config_outbox_operator_action",
+            "outbox_id": row_id,
+            "project_id": project_id,
+            "action": action,
+        },
+    )
+    return OutboxQuarantineResolution(
+        resolved=True,
+        action=action,
+        outbox_id=row_id,
+        entry=entry,
+    )
+
+
+@router.post(
+    "/outbox/quarantine/{row_id}/replay",
+    response_model=OutboxQuarantineResolution,
+)
+async def replay_outbox_quarantine(
+    body: OutboxQuarantineAction,
+    request: Request,
+    row_id: int = Path(..., ge=1, le=MAX_BIGSERIAL_ID),
+):
+    """Reset one quarantined exposure delivery for a deliberate retry."""
+    return await _resolve_outbox_quarantine(
+        request=request,
+        row_id=row_id,
+        body=body,
+        action="replay",
+    )
+
+
+@router.post(
+    "/outbox/quarantine/{row_id}/discard",
+    response_model=OutboxQuarantineResolution,
+)
+async def discard_outbox_quarantine(
+    body: OutboxQuarantineAction,
+    request: Request,
+    row_id: int = Path(..., ge=1, le=MAX_BIGSERIAL_ID),
+):
+    """Discard one quarantined delivery while retaining operator evidence."""
+    return await _resolve_outbox_quarantine(
+        request=request,
+        row_id=row_id,
+        body=body,
+        action="discard",
+    )
 
 
 @router.get("/flags")
@@ -876,24 +1002,33 @@ async def delete_experiment(
     )
 
 
-@router.get("/experiments/{key}/audit")
+@router.get(
+    "/experiments/{key}/audit",
+    response_model=ExperimentAuditPage,
+)
 async def get_experiment_audit(
     key: str,
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
+    before_id: int | None = Query(
+        default=None,
+        ge=1,
+        le=MAX_BIGSERIAL_ID,
+    ),
 ):
-    """Return lifecycle evidence retained across deletion and archival."""
+    """Return key-scoped lifecycle evidence retained across removal."""
     project_id = authorized_project(request, "config:write")
-    entries = await pg_store.get_experiment_audit_entries(
+    entries, next_before_id = await pg_store.get_experiment_audit_entries(
         request.app.state.pg_pool,
         project_id,
         key,
         limit=limit,
+        before_id=before_id,
     )
-    return JSONResponse(
-        content={
-            "experiment_key": key,
-            "audit": entries,
-            "count": len(entries),
-        }
+    return ExperimentAuditPage(
+        experiment_key=key,
+        history_scope="experiment_key",
+        audit=entries,
+        count=len(entries),
+        next_before_id=next_before_id,
     )

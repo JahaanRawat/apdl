@@ -412,6 +412,27 @@ async def _heartbeat_maintenance_inhibitor(connection) -> None:
         )
 
 
+async def _verify_writer_authority(
+    maintenance_connections,
+    *,
+    heartbeat_seconds: float = MAINTENANCE_HEARTBEAT_SECONDS,
+) -> None:
+    """Verify every session without overlapping queries on one connection."""
+    await asyncio.gather(
+        *(
+            asyncio.wait_for(
+                _heartbeat_maintenance_inhibitor(maintenance_connection),
+                timeout=heartbeat_seconds,
+            )
+            for maintenance_connection in maintenance_connections
+        )
+    )
+    await asyncio.wait_for(
+        _heartbeat_writer_singleton(maintenance_connections[0]),
+        timeout=heartbeat_seconds,
+    )
+
+
 async def _monitor_maintenance_inhibitor(
     connection,
     writer,
@@ -980,12 +1001,25 @@ class ClickHouseWriter:
 
         await self._ensure_consumer_groups_for_streams(stream_keys)
 
-    async def _ensure_consumer_groups_for_streams(self, stream_keys: list[str]) -> None:
+    async def _ensure_consumer_groups_for_streams(
+        self,
+        stream_keys: list[str],
+        *,
+        validate_existing_authority: bool = True,
+    ) -> None:
         """Ensure groups for one already-resolved registry snapshot."""
         for stream_key in stream_keys:
-            await self._ensure_consumer_group(stream_key)
+            await self._ensure_consumer_group(
+                stream_key,
+                validate_existing_authority=validate_existing_authority,
+            )
 
-    async def _ensure_consumer_group(self, stream_key: str) -> None:
+    async def _ensure_consumer_group(
+        self,
+        stream_key: str,
+        *,
+        validate_existing_authority: bool = True,
+    ) -> None:
         """Create the required group without an unnecessary DENYOOM write."""
         try:
             groups = await self.redis_client.xinfo_groups(stream_key)
@@ -1016,13 +1050,14 @@ class ClickHouseWriter:
                 CONSUMER_GROUP,
                 stream_key,
             )
-            await self._initialize_pipeline_authority(
-                stream_key,
-                group_was_created=False,
-                observed_group_frontier=existing_group_frontier,
-                observed_group_entries_read=existing_group_entries_read,
-                safe_genesis=(existing_group_frontier == "0-0"),
-            )
+            if validate_existing_authority:
+                await self._initialize_pipeline_authority(
+                    stream_key,
+                    group_was_created=False,
+                    observed_group_frontier=existing_group_frontier,
+                    observed_group_entries_read=existing_group_entries_read,
+                    safe_genesis=(existing_group_frontier == "0-0"),
+                )
             return
 
         created = False
@@ -2009,17 +2044,38 @@ class ClickHouseWriter:
     async def _refresh_discovered_stream_registry(self) -> list[str]:
         """Atomically replace the registry after a complete valid refresh.
 
-        Discovery, legacy-history reconciliation, and consumer-group creation
-        must all succeed before readers can observe the new snapshot. Any
-        failure therefore leaves the last usable snapshot intact.
+        Discovery, legacy-history reconciliation, and consumer-group checks
+        must all succeed before readers can observe the new snapshot. Existing
+        groups were already validated at startup, so periodic refresh only
+        confirms that they still exist; revalidating their moving frontier
+        would mistake the normal Redis-to-PostgreSQL finalization gap for
+        restart drift. A deleted group is still recreated and permanently
+        degrades its existing authority. Any failure leaves the last usable
+        snapshot intact.
         """
         async with self._stream_registry_lock:
             stream_keys = self._normalized_stream_keys(await self._discover_streams())
+            new_stream_keys = [
+                stream_key
+                for stream_key in stream_keys
+                if stream_key not in self._known_stream_keys
+            ]
             await self._reconcile_acknowledged_history(
                 stream_keys,
                 require_group=False,
             )
-            await self._ensure_consumer_groups_for_streams(stream_keys)
+            if new_stream_keys:
+                await self._ensure_consumer_groups_for_streams(new_stream_keys)
+            known_stream_keys = [
+                stream_key
+                for stream_key in stream_keys
+                if stream_key in self._known_stream_keys
+            ]
+            if known_stream_keys:
+                await self._ensure_consumer_groups_for_streams(
+                    known_stream_keys,
+                    validate_existing_authority=False,
+                )
             self._replace_stream_registry(stream_keys)
             return sorted(self._known_stream_keys)
 
@@ -3658,10 +3714,12 @@ class ClickHouseWriter:
 
 async def main():
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    postgres_url = os.environ.get(
-        "POSTGRES_URL",
-        "postgresql://apdl:apdl_dev@localhost:5432/apdl",
-    )
+    postgres_url = os.environ.get("POSTGRES_URL", "").strip()
+    if not postgres_url:
+        raise RuntimeError(
+            "POSTGRES_URL is required for the ClickHouse writer maintenance "
+            "and completeness authorities"
+        )
     clickhouse_url = os.environ.get(
         "CLICKHOUSE_NATIVE_URL",
         "clickhouse://apdl:apdl_dev@localhost:9000/apdl",
@@ -3776,19 +3834,7 @@ async def main():
         try:
             # Close the acquire-to-monitor gap: no Redis consumption begins until
             # both backends positively prove both lock IDs are still held.
-            await asyncio.gather(
-                *(
-                    asyncio.wait_for(
-                        _heartbeat_maintenance_inhibitor(maintenance_connection),
-                        timeout=MAINTENANCE_HEARTBEAT_SECONDS,
-                    )
-                    for maintenance_connection in maintenance_connections
-                ),
-                asyncio.wait_for(
-                    _heartbeat_writer_singleton(maintenance_connections[0]),
-                    timeout=MAINTENANCE_HEARTBEAT_SECONDS,
-                ),
-            )
+            await _verify_writer_authority(maintenance_connections)
             for inhibitor_index, (
                 maintenance_connection,
                 connection_lost,

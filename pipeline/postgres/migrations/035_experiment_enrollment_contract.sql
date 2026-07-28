@@ -520,6 +520,13 @@ ALTER TABLE experiments
         )
     );
 
+COMMENT ON CONSTRAINT experiments_minimum_exposure_version_check
+    ON experiments IS
+    'Load-bearing with apdl_enforce_experiment_enrollment_immutability: blocks status-only draft downgrades while the trigger blocks clearing the exposure-version floor';
+
+-- Keep paired with experiments_minimum_exposure_version_check: the check
+-- rejects status-only draft downgrades, while this trigger rejects clearing
+-- the exposure-version floor in the same update.
 CREATE OR REPLACE FUNCTION public.apdl_enforce_experiment_enrollment_immutability()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -538,6 +545,9 @@ BEGIN
     RETURN NEW;
 END
 $apdl_enforce_experiment_enrollment_immutability$;
+
+COMMENT ON FUNCTION public.apdl_enforce_experiment_enrollment_immutability() IS
+    'Rejects enrollment-field changes after draft; paired with experiments_minimum_exposure_version_check, which blocks status-only draft downgrades';
 
 CREATE TRIGGER experiments_enforce_enrollment_immutability
 BEFORE UPDATE OF status, traffic_percentage, targeting_rules_json,

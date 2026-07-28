@@ -166,7 +166,7 @@ Example degraded response:
 
 | Variable | Purpose |
 |---|---|
-| `POSTGRES_URL` | Admin users, memberships, and sessions |
+| `POSTGRES_URL` | Admin users, memberships, and sessions through the non-owner runtime role |
 | `APDL_SERVICE_API_KEYS` | JSON object of project-scoped service keys; server-only |
 | `APDL_DEV_API_KEY` | Explicit local-only credential provisioned by `make migrate-postgres` |
 | `INGESTION_SERVICE_URL` | Private ingestion URL |

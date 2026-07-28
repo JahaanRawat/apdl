@@ -5,7 +5,7 @@
 aiohttp==3.14.2
 click==8.3.3
 fastapi==0.139.2
-gitpython==3.1.53
+gitpython==3.1.55
 idna==3.15
 importlib-metadata>=8,<9
 litellm==1.85.0
