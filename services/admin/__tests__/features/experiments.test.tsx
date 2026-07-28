@@ -75,6 +75,10 @@ const ARCHIVED_EXPERIMENT = {
   archived_by: 'credential:operator',
 }
 
+// Same experiment before launch: Config freezes analysis-defining fields on the
+// way out of draft, so the draft form is the one place they stay editable.
+const DRAFT_EXPERIMENT = { ...EXPERIMENT, status: 'draft' }
+
 let deleteRequestUrl = ''
 const updateBodies: Record<string, unknown>[] = []
 const updateKeys: string[] = []
@@ -614,6 +618,23 @@ describe('ExperimentListPage', () => {
   })
 })
 
+function renderDetail() {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  return render(
+    <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={['/experiments/checkout-test?tab=setup']}>
+            <Routes>
+              <Route path="/experiments/:key" element={<ExperimentDetailPage />} />
+            </Routes>
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>
+    </WorkspaceProvider>,
+  )
+}
+
 describe('ExperimentDetailPage', () => {
   test('remounts form state and mutation identity when navigating between experiments', async () => {
     const secondExperiment = {
@@ -666,20 +687,7 @@ describe('ExperimentDetailPage', () => {
   })
 
   test('running to stopped omits every Config-frozen field from the update request', async () => {
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    render(
-      <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
-        <QueryClientProvider client={queryClient}>
-          <TooltipProvider>
-            <MemoryRouter initialEntries={['/experiments/checkout-test?tab=setup']}>
-              <Routes>
-                <Route path="/experiments/:key" element={<ExperimentDetailPage />} />
-              </Routes>
-            </MemoryRouter>
-          </TooltipProvider>
-        </QueryClientProvider>
-      </WorkspaceProvider>,
-    )
+    renderDetail()
 
     await screen.findByDisplayValue('CTA experiment')
     expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeDisabled()
@@ -804,5 +812,92 @@ describe('ExperimentDetailPage', () => {
     expect(screen.queryByRole('button', { name: /^(save changes|archive|delete)/i }))
       .not.toBeInTheDocument()
     expect(updateBodies).toEqual([])
+  })
+
+  test('a draft leaves every analysis-defining field editable and submits the edits', async () => {
+    server.use(
+      http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
+        HttpResponse.json({ experiments: [DRAFT_EXPERIMENT], count: 1 }),
+      ),
+    )
+    renderDetail()
+
+    await screen.findByDisplayValue('CTA experiment')
+
+    // The complement of the running case above: nothing is frozen while the
+    // persisted status is still draft.
+    const traffic = screen.getByRole('spinbutton', { name: 'Traffic percentage' })
+    const targeting = screen.getByRole('textbox', { name: 'Targeting rules JSON' })
+    expect(traffic).toBeEnabled()
+    expect(targeting).toBeEnabled()
+    expect(screen.getByRole('textbox', { name: 'Metric event' })).toBeEnabled()
+    expect(screen.getByRole('combobox', { name: 'Metric direction' })).toBeEnabled()
+    expect(screen.getByRole('spinbutton', { name: 'Baseline conversion rate' })).toBeEnabled()
+
+    await userEvent.clear(traffic)
+    await userEvent.type(traffic, '55')
+    await userEvent.clear(targeting)
+    // Pasted rather than typed: user-event reads `{` as a key descriptor.
+    await userEvent.click(targeting)
+    await userEvent.paste(
+      JSON.stringify([
+        {
+          id: 'eu',
+          name: 'EU',
+          conditions: [{ attribute: 'country', operator: 'equals', value: 'DE' }],
+        },
+      ]),
+    )
+    await userEvent.clear(screen.getByPlaceholderText('What this experiment tests'))
+    await userEvent.type(screen.getByPlaceholderText('What this experiment tests'), 'Draft copy')
+    await userEvent.clear(screen.getByRole('textbox', { name: 'Metric event' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'Metric event' }), 'signup')
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Metric direction' }),
+      'decrease',
+    )
+    const baseline = screen.getByRole('spinbutton', { name: 'Baseline conversion rate' })
+    await userEvent.clear(baseline)
+    await userEvent.type(baseline, '0.4')
+    const mde = screen.getByRole('spinbutton', { name: 'Minimum detectable effect' })
+    await userEvent.clear(mde)
+    await userEvent.type(mde, '0.3')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(updateBodies).toHaveLength(1))
+    expect(updateBodies[0]).toMatchObject({
+      version: 2,
+      description: 'Draft copy',
+      traffic_percentage: 55,
+    })
+    expect(updateBodies[0]).toHaveProperty('targeting_rules')
+    expect(updateBodies[0]).toHaveProperty('primary_metric')
+    expect(updateBodies[0]).toHaveProperty('statistical_plan')
+  })
+
+  test('choosing a launch status does not freeze the fields before the draft is saved', async () => {
+    server.use(
+      http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
+        HttpResponse.json({ experiments: [DRAFT_EXPERIMENT], count: 1 }),
+      ),
+    )
+    renderDetail()
+
+    await screen.findByDisplayValue('CTA experiment')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Status' }), 'running')
+
+    // The lock keys off the persisted status, not the pending selection, so the
+    // launch form can still set final traffic and targeting in the same save.
+    expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeEnabled()
+    expect(screen.getByRole('textbox', { name: 'Targeting rules JSON' })).toBeEnabled()
+
+    const traffic = screen.getByRole('spinbutton', { name: 'Traffic percentage' })
+    await userEvent.clear(traffic)
+    await userEvent.type(traffic, '25')
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(updateBodies).toHaveLength(1))
+    expect(updateBodies[0]).toMatchObject({ status: 'running', traffic_percentage: 25 })
   })
 })

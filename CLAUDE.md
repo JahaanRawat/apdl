@@ -149,7 +149,7 @@ Admin Console (browser) ──same-origin /api──→ Admin API (Python/FastAP
 ## Tooling & Conventions
 
 - **Python package management:** `uv` (not pip directly). Each Python service has its own `.venv/` directory
-- **Python linting:** `ruff check app/` (default config, no pyproject.toml overrides)
+- **Python linting:** `ruff check app/`, with the rule set declared in the repo-root `ruff.toml` (`E4`, `E7`, `E9`, `F`) rather than inherited from Ruff's built-in defaults. Every package resolves to that one file by ancestor lookup. Ruff is pinned to an exact version in each package's dev dependencies — bump the pin and the config together, never rely on a `>=` floor
 - **JS SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params)
 - **JS SDK test pattern:** `__tests__/**/*.test.ts`
 - **Python test pattern:** `tests/` directory in each service and in `sdk/python/`
