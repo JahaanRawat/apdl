@@ -264,6 +264,66 @@ async def test_runtime_probe_cache_key_binds_stage_editor_and_revision(
 
 
 @pytest.mark.asyncio
+async def test_runtime_probe_never_shares_a_result_between_two_editors(
+    executable_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two editors never share a probe result, even on an identity collision.
+
+    The cache keys on id(editor), which CPython reuses after collection. The
+    strong editor reference on every stored entry is what makes that safe, and
+    the identity re-check is the second line of defence. Forcing both editors
+    onto one key proves neither can answer for the other.
+    """
+    del executable_runtime
+    pool = FakePool()
+    pool.add_connection("demo")
+    ready_editor = object()
+    unavailable_editor = object()
+    probed: list[object] = []
+
+    def selective_runtime(editor: object, *_args: object) -> None:
+        probed.append(editor)
+        if editor is unavailable_editor:
+            raise RuntimeError("worker image is not runnable")
+
+    monkeypatch.setattr(capabilities, "_assert_runtime_ready", selective_runtime)
+    monkeypatch.setattr(capabilities, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        capabilities,
+        "codegen_revision",
+        lambda: "revision-identity-collision",
+    )
+    # Collapse both editors onto one cache key. Without the strong reference
+    # and the identity re-check, the second editor would read the first's
+    # cached answer.
+    monkeypatch.setattr(
+        capabilities,
+        "id",
+        lambda _editor: 4_158_044_085,
+        raising=False,
+    )
+
+    app.state.job_deps["editor"] = ready_editor
+    first = await capabilities.evaluate_changeset_creation(app, pool, "demo")
+
+    app.state.job_deps["editor"] = unavailable_editor
+    second = await capabilities.evaluate_changeset_creation(app, pool, "demo")
+
+    app.state.job_deps["editor"] = ready_editor
+    third = await capabilities.evaluate_changeset_creation(app, pool, "demo")
+
+    assert probed == [ready_editor, unavailable_editor, ready_editor]
+    assert first.report.changeset_creation == "available"
+    assert first.report.checks.runtime == "ready"
+    assert second.report.changeset_creation == "disabled"
+    assert second.report.checks.runtime == "blocked"
+    assert second.report.reasons == ["runtime_unavailable"]
+    assert third.report.changeset_creation == "available"
+    assert third.report.checks.runtime == "ready"
+
+
+@pytest.mark.asyncio
 async def test_capability_rejects_cross_project_credentials(
     executable_runtime,
     authorized_codegen_request: Callable,

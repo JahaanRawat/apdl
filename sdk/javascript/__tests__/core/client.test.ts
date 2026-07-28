@@ -1010,7 +1010,10 @@ describe('APDLClient', () => {
         flaggedClient as unknown as { featureFlagExposureKeys: Set<string> }
       ).featureFlagExposureKeys;
       expect(exposureKeys.size).toBe(10_000);
-    });
+      // 10,000 evaluations are CPU-bound, not time-bound: this case has been
+      // measured at 4.6s of the 5s default on a shared runner. The explicit
+      // budget keeps the bound assertion without racing the default timeout.
+    }, 60_000);
 
     it('should return the fallback without exposing rollout-excluded actors', async () => {
       fetchMock.mockResolvedValueOnce({

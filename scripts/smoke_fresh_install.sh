@@ -218,6 +218,36 @@ assert_optional_created() {
     echo "==> Optional Agents and Codegen services are healthy"
 }
 
+# The writer is the only path from Redis into ClickHouse, and it is the one
+# service whose startup authority work can fail after Compose reports the rest
+# of the stack healthy. Name that failure directly instead of leaving it to a
+# downstream count assertion or a bare Compose exit code.
+assert_writer_running() {
+    local container_id
+    container_id="$(compose ps --status running -q clickhouse-writer || true)"
+    if [ -z "$container_id" ]; then
+        echo "ClickHouse writer is not running after startup" >&2
+        compose ps -a clickhouse-writer >&2 || true
+        compose logs --no-color --tail 80 clickhouse-writer >&2 || true
+        return 1
+    fi
+    echo "==> ClickHouse writer is running ($container_id)"
+}
+
+assert_writer_consumed() {
+    local writer_logs flushed
+    assert_writer_running
+    writer_logs="$(compose logs --no-color clickhouse-writer || true)"
+    flushed="$(grep -cE 'Flushed [1-9][0-9]* events to ClickHouse' \
+        <<<"$writer_logs" || true)"
+    if [ "${flushed:-0}" -lt 1 ]; then
+        echo "ClickHouse writer never flushed a consumed event batch" >&2
+        printf '%s\n' "$writer_logs" >&2
+        return 1
+    fi
+    echo "==> ClickHouse writer consumed and flushed $flushed batch(es)"
+}
+
 echo "==> Validating core Compose contract"
 compose config --quiet
 
@@ -300,6 +330,7 @@ echo "==> Starting the supported fresh-smoke service set"
 compose_all_profiles up -d "${startup_build_args[@]}" --wait \
     --wait-timeout "${APDL_SMOKE_STARTUP_TIMEOUT:-180}" \
     "${startup_services[@]}"
+assert_writer_running
 if [ "$smoke_all_images" = true ]; then
     assert_optional_created
     [ -n "${APDL_SMOKE_IMAGE_INDEX:-}" ] || {
@@ -337,5 +368,7 @@ else
         --query-url "$APDL_QUERY_URL" \
         --postgres-container-id "$(compose ps -q postgres)"
 fi
+
+assert_writer_consumed
 
 echo "==> Fresh-install $SMOKE_SUITE smoke passed"

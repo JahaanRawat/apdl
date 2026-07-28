@@ -81,6 +81,13 @@ class CapabilityEvaluation:
 
 @dataclass(frozen=True)
 class _RuntimeProbeKey:
+    # editor_identity is id(editor), a memory address CPython reuses after
+    # collection. It is only unique because every entry stored under a key
+    # holds a strong reference to that exact editor (see the two classes
+    # below), so the address cannot be handed to another object while the
+    # entry lives. Both readers additionally re-check identity with `is`
+    # before trusting an entry, so an unexpected collision re-probes instead
+    # of answering for the wrong runtime.
     editor_identity: int
     stage: RolloutStage
     revision: str
@@ -88,6 +95,10 @@ class _RuntimeProbeKey:
 
 @dataclass(frozen=True)
 class _RuntimeProbeResult:
+    # Load-bearing: this strong reference is what keeps id(editor) unique for
+    # the cached key. Weakening it silently reintroduces address reuse, and a
+    # capability probe that answers "ready" for a different runtime is exactly
+    # the fail-open this cache exists to avoid.
     editor: Any
     ready: bool
     expires_at: float
@@ -95,6 +106,7 @@ class _RuntimeProbeResult:
 
 @dataclass(frozen=True)
 class _RuntimeProbeInFlight:
+    # Strong by the same contract as _RuntimeProbeResult.editor.
     editor: Any
     task: asyncio.Task[bool]
 

@@ -529,6 +529,38 @@ The Python authority and JSON policy must land together. Any one-sided date,
 owner, advisory, version, evidence, or lock change fails closed; neither file is
 an override for the other.
 
+### A new advisory on a pinned transitive dependency
+
+This is the most common way the gate turns red, and it answers to no calendar:
+the advisory feed publishes a finding against a version this lock already pins.
+It has already happened once here — `gitpython==3.1.53` / `GHSA-fjr4-x663-mwxc`
+turned the gate red four weeks before the first suppression date. Treat it as
+routine maintenance, not as a suppression argument.
+
+The gate reports such a finding as `unexpected fixable vulnerability`.
+`fixable` means `pip-audit` returned at least one fix version, so a fixed
+release exists upstream and the remedy is an upgrade — never a new suppression.
+A finding with no fix version is reported as `unsuppressed` and is the only case
+the renewal workflow above applies to.
+
+Aider pins several transitive versions exactly, so the upgrade goes in the
+override input rather than the two intentional pins:
+
+1. raise the package in `requirements-agent.overrides.txt` to the lowest
+   non-vulnerable release named by the advisory;
+2. regenerate the hashed lock with the exact command documented at the top of
+   `requirements-agent.constraints.txt`, from `services/codegen`;
+3. update the package's entry in `EXPECTED_LOCKED_VERSIONS` and in the security
+   input assertion in `tests/test_worker_dependency_audit.py`, which pin the
+   lock's contents independently of the lock file itself;
+4. run `make test-codegen` and
+   `services/codegen/scripts/audit_worker_dependencies.sh`; the gate
+   regenerates the lock and fails if the committed file differs.
+
+Do not add the advisory to `dependency-audit-suppressions.json`. A suppression
+for a fixable finding is rejected by the gate, and the three approved
+suppressions are the complete no-fix set.
+
 ## Editor execution model (release-gated worker; publication remains preview)
 
 The editor sits behind the `Editor` interface; *how/where* it runs is config:
