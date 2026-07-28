@@ -100,9 +100,14 @@ try {
 
   cdp = new CdpClient(chrome.stdio[3], chrome.stdio[4]);
   try {
+    // Browser startup is environmental, not a property under test. This runs
+    // immediately after test-built-browser.mjs has torn down its own Chrome,
+    // and a loaded runner has needed more than ten seconds to expose the
+    // DevTools pipe. Match the request budget rather than fail the release
+    // gate on process startup.
     await withTimeout(
       cdp.send('Browser.getVersion'),
-      10_000,
+      30_000,
       'timed out waiting for Chrome DevTools'
     );
   } catch (error) {
