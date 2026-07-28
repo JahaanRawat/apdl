@@ -1036,8 +1036,13 @@ export class EventQueue {
     ) {
       results.push(
         this.catchLifecyclePersistenceFailure(
+          // Unload path: keep this transaction to the adds alone. Sharing it
+          // with the eviction scan means a document destroyed mid-scan aborts
+          // the durable hand-off entirely. Bounds are re-enforced by the next
+          // normal store.
           this.storage.store(
-            uncoveredVolatileCandidates.map((pending) => pending.event)
+            uncoveredVolatileCandidates.map((pending) => pending.event),
+            { deferBounds: true }
           )
         )
       );

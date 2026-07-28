@@ -381,6 +381,43 @@ describe('OfflineStorage', () => {
     expect(await claimAndAcknowledge(projectB)).toEqual([projectBEvent]);
   });
 
+  it('defers the count bound so an unload write carries only its adds', async () => {
+    const storage = storageForKey(PROJECT_A_KEY);
+    const events = Array.from(
+      { length: MAX_OFFLINE_EVENTS_PER_PROJECT + 2 },
+      (_, index) => createEvent(`unload_${index}`)
+    );
+
+    // The unload path shares its transaction with nothing else. Enforcing the
+    // bound here would mean a full-store cursor walk in that transaction, and
+    // a document destroyed mid-walk aborts the adds along with it.
+    const result = await storage.store(events, { deferBounds: true });
+
+    expect(result.stored).toHaveLength(events.length);
+    expect(result.evicted).toEqual([]);
+    expect(result.rejected).toEqual([]);
+    expect(await storage.count()).toBe(events.length);
+  });
+
+  it('re-enforces the deferred bound on the next normal store', async () => {
+    const storage = storageForKey(PROJECT_A_KEY);
+    const unloadEvents = Array.from(
+      { length: MAX_OFFLINE_EVENTS_PER_PROJECT + 2 },
+      (_, index) => createEvent(`unload_${index}`)
+    );
+
+    await storage.store(unloadEvents, { deferBounds: true });
+    const result = await storage.store([createEvent('after_recovery')]);
+
+    // Deferring is a one-write reprieve, not an escape: the recovering
+    // document's first ordinary write brings the store back under its cap.
+    expect(result.evicted).toHaveLength(3);
+    expect(
+      result.evicted.every(({ reason }) => reason === 'offline_count_limit')
+    ).toBe(true);
+    expect(await storage.count()).toBe(MAX_OFFLINE_EVENTS_PER_PROJECT);
+  });
+
   it('enforces the per-project serialized-byte bound in IndexedDB', async () => {
     const storage = storageForKey(PROJECT_A_KEY);
     const events = Array.from(
