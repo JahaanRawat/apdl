@@ -68,3 +68,6 @@ redis-data/
 postgres-data/
 
 local-files/
+
+# graphify (generated knowledge graph — rebuild with: graphify update .)
+graphify-out/

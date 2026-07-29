@@ -172,3 +172,72 @@ The PostgreSQL `apdl` owner is migration-only; long-running services use the
 non-owner `apdl_runtime` role.
 
 Agents service requires at least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, or `LOCAL_LLM_URL` for LLM access.
+
+## graphify (knowledge graph skill)
+
+This repo ships the **graphify** skill at `.claude/skills/graphify/SKILL.md`. It
+builds a queryable knowledge graph of the monorepo — every service, both SDKs,
+the pipeline, and the scripts — so you can ask structural questions instead of
+grepping across ten packages. Invoke it with `/graphify`.
+
+### One-time setup (per machine)
+
+The graph is generated, not committed — `graphify-out/` is gitignored. After
+cloning, install the CLI and build the graph once:
+
+```bash
+uv tool install "graphifyy[sql]"              # or: pipx install "graphifyy[sql]"
+graphify extract . --code-only                # local AST parse, no API key, ~1min
+graphify cluster-only . --backend=claude-cli  # community names + GRAPH_REPORT.md
+```
+
+`cluster-only` needs an LLM only to *name* communities; pass `--no-label`
+instead if you have no backend configured. Everything else is fully local.
+
+If the CLI is not on your PATH the PreToolUse hooks in `.claude/settings.json`
+degrade to no-ops — the repo still works normally, you just lose graph lookups.
+
+### Query the graph before grepping
+
+For any question about how the system is wired, prefer these over `Grep`,
+`Glob`, or opening files one at a time:
+
+| Question | Command |
+|---|---|
+| "How does X work / what touches Y?" | `graphify query "<question>"` |
+| "How do A and B connect?" | `graphify path "<A>" "<B>"` |
+| "What is this symbol?" | `graphify explain "<symbol>"` |
+| "What breaks if I change X?" | `graphify affected "<X>"` |
+| "What are the core abstractions?" | `graphify god-nodes` |
+| Broad architecture review | read `graphify-out/GRAPH_REPORT.md` |
+
+Each returns a scoped subgraph with file paths and line numbers, usually far
+smaller than the equivalent grep output. Cap the size with `--budget <tokens>`;
+if a result says it was truncated, narrow the query — name the service or the
+symbol — rather than raising the budget indefinitely. The graph spans the whole
+monorepo, so an unscoped query like "how does auth work" pulls hits from
+Ingestion, Config, and Admin API at once.
+
+### Keep it fresh
+
+The graph is a snapshot of one commit (see "Graph Freshness" in the report).
+After changing code:
+
+```bash
+graphify update .    # incremental re-extract, AST-only, no API cost
+```
+
+If a query returns a symbol that no longer exists, the graph is stale — run
+`graphify update .` and retry before concluding the code is wrong.
+
+### Known limits — read before trusting a result
+
+- **Code only.** The graph is built with `--code-only`, so the Markdown under
+  `docs/` (including `docs/agent-workflows/`) and the SQL migrations are **not**
+  indexed. Read those directly.
+- **`INFERRED` edges can be wrong.** Every edge is tagged `EXTRACTED` (explicit
+  in the source) or `INFERRED` (resolved heuristically). Open the file to
+  confirm before relying on an `INFERRED` edge — this matters most for the
+  cross-service call paths, which are HTTP hops the AST cannot see.
+- **Not a substitute for reading code you are about to change.** Use the graph
+  to locate and orient; read the actual file before editing it.

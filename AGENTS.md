@@ -230,3 +230,34 @@ non-owner `apdl_runtime` role.
 
 Agents service requires at least one of `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `GOOGLE_API_KEY`, or `LOCAL_LLM_URL` for LLM access.
+
+## graphify (knowledge graph)
+
+This repo carries a [graphify](https://github.com/Graphify-Labs/graphify) skill
+at `.claude/skills/graphify/SKILL.md` that builds a queryable knowledge graph of
+the whole monorepo. The graph is generated, not committed — `graphify-out/` is
+gitignored. Build it once per clone:
+
+```bash
+uv tool install "graphifyy[sql]"              # or: pipx install "graphifyy[sql]"
+graphify extract . --code-only                # local AST parse, no API key
+graphify cluster-only . --backend=claude-cli  # community names + GRAPH_REPORT.md
+                                              # (--no-label if you have no backend)
+```
+
+Then prefer the graph over grepping across ten packages:
+
+| Question | Command |
+|---|---|
+| "How does X work / what touches Y?" | `graphify query "<question>"` |
+| "How do A and B connect?" | `graphify path "<A>" "<B>"` |
+| "What is this symbol?" | `graphify explain "<symbol>"` |
+| "What breaks if I change X?" | `graphify affected "<X>"` |
+| "What are the core abstractions?" | `graphify god-nodes` |
+| Broad architecture review | read `graphify-out/GRAPH_REPORT.md` |
+
+Run `graphify update .` after changing code to keep the graph current (AST-only,
+no API cost). Caveats: the graph is code-only, so `docs/` and the SQL migrations
+are not indexed; `INFERRED` edges are heuristic and need confirming in the file;
+and cross-service calls are HTTP hops the AST cannot see. See the `## graphify`
+section of `CLAUDE.md` for the full rules.
