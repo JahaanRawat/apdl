@@ -226,6 +226,12 @@ class MigrationQuiescenceTests(unittest.TestCase):
         self.assertIn("clickhouse-writer", dev_core[stop:clickhouse_migration])
         self.assertIn("stop_grace_period: 30s", COMPOSE)
 
+    def test_dev_all_does_not_restart_migration_dependencies(self) -> None:
+        dev_all = MAKEFILE[MAKEFILE.index("dev-all:") : MAKEFILE.index("dev-down:")]
+        self.assertIn("build agents codegen", dev_all)
+        self.assertIn("up -d --no-build --no-deps --wait", dev_all)
+        self.assertNotIn("up -d --build", dev_all)
+
     def test_dependency_stack_loads_the_repo_root_environment(self) -> None:
         self.assertIn(
             "DEPS_COMPOSE := docker compose "

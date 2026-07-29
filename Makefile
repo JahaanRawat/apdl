@@ -421,7 +421,8 @@ dev-core:
 	@echo "    Agents and Codegen are stopped; run make dev-all to opt into their offline services."
 
 dev-all: dev-core
-	$(COMPOSE) --profile agents --profile codegen up -d --build --wait --wait-timeout 120 \
+	$(COMPOSE) --profile agents --profile codegen build agents codegen
+	$(COMPOSE) --profile agents --profile codegen up -d --no-build --no-deps --wait --wait-timeout 120 \
 		agents codegen
 	@echo "==> Full development stack is ready"
 	@echo "    Agents is enabled; Codegen publication remains offline (no Docker socket mounted)."

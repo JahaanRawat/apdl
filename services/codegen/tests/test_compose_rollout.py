@@ -136,7 +136,11 @@ def test_dev_all_starts_codegen_offline_without_publication_overlay() -> None:
     assert "CODEGEN_DEVELOPMENT_DOCKER_SOCKET=" not in rendered
     assert "docker-compose.codegen-development.yml" not in rendered
     assert "apdl-codegen-sandbox:local-development" not in rendered
-    assert "--profile agents --profile codegen up -d --build --wait" in rendered
+    assert "--profile agents --profile codegen build agents codegen" in rendered
+    assert (
+        "--profile agents --profile codegen up -d --no-build --no-deps --wait"
+        in rendered
+    )
     assert "agents codegen" in rendered
 
 
