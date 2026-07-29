@@ -34,7 +34,7 @@ class ReleaseManifestTests(unittest.TestCase):
     def test_checked_out_release_contract_is_consistent(self) -> None:
         version = verify_release.verify_release(ROOT, None, {})
 
-        self.assertEqual(version, "0.3.0")
+        self.assertEqual(version, "0.3.3")
 
     def test_canonical_runtime_image_repositories_are_stable(self) -> None:
         repositories = {
