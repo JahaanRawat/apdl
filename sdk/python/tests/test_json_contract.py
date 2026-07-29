@@ -155,7 +155,7 @@ def test_serialized_event_size_is_bounded():
 
 def test_complete_canonical_context_is_preserved():
     context = {
-        "library": {"name": "apdl-python", "version": "0.3.0"},
+        "library": {"name": "apdl-python", "version": "0.3.3"},
         "browser": {"name": "Firefox", "version": "128"},
         "os": {"name": "Linux", "version": "6.8"},
         "device": {"type": "desktop"},
@@ -220,7 +220,7 @@ def test_context_rejects_missing_nested_fields(context):
     "context",
     [
         [],
-        {"library": {"name": "", "version": "0.3.0"}},
+        {"library": {"name": "", "version": "0.3.3"}},
         {"device": {"type": "x" * 65}},
         {"screen": {"width": True, "height": 1_080}},
         {"viewport": {"width": 100_001, "height": 720}},
