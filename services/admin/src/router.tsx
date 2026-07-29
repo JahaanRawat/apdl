@@ -213,6 +213,24 @@ export function createRouter() {
               ),
             },
             {
+              path: '/blog',
+              lazy: lazyRoute(() => import('@/features/blog/BlogPage'), 'BlogPage'),
+            },
+            {
+              path: '/blog/javascript-sdk',
+              lazy: lazyRoute(
+                () => import('@/features/blog/JavaScriptSdkArticlePage'),
+                'JavaScriptSdkArticlePage',
+              ),
+            },
+            {
+              path: '/blog/python-sdk',
+              lazy: lazyRoute(
+                () => import('@/features/blog/PythonSdkArticlePage'),
+                'PythonSdkArticlePage',
+              ),
+            },
+            {
               path: '/settings/workspace',
               lazy: lazyRoute(
                 () => import('@/features/settings/WorkspaceSettingsPage'),
