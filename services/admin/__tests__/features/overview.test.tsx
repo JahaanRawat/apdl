@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
@@ -13,6 +14,7 @@ import { seedWorkspace } from '../helpers/fixtures'
 
 const healthRequests: string[] = []
 const readyRequests: string[] = []
+const analyticsRequests: { path: string; body: unknown }[] = []
 
 const server = setupServer(
   http.get('*/api/projects/demo/config/v1/admin/flags', () =>
@@ -24,12 +26,14 @@ const server = setupServer(
   http.get('*/api/projects/demo/agents/v1/agents/runs', () =>
     HttpResponse.json({ runs: [], count: 0 }),
   ),
-  http.post('*/api/projects/demo/query/v1/query/events/count', () =>
-    HttpResponse.json({ results: [], total_events: 0, total_users: 0 }),
-  ),
-  http.post('*/api/projects/demo/query/v1/query/events/timeseries', () =>
-    HttpResponse.json({ selector: 'page', buckets: [] }),
-  ),
+  http.post('*/api/projects/demo/query/v1/query/events/count', async ({ request }) => {
+    analyticsRequests.push({ path: 'count', body: await request.json() })
+    return HttpResponse.json({ results: [], total_events: 0, total_users: 0 })
+  }),
+  http.post('*/api/projects/demo/query/v1/query/events/timeseries', async ({ request }) => {
+    analyticsRequests.push({ path: 'timeseries', body: await request.json() })
+    return HttpResponse.json({ selector: 'page', buckets: [] })
+  }),
   http.post('*/api/projects/demo/query/v1/query/events/names', () =>
     HttpResponse.json({ events: [] }),
   ),
@@ -52,6 +56,7 @@ beforeEach(() => {
   seedWorkspace()
   healthRequests.length = 0
   readyRequests.length = 0
+  analyticsRequests.length = 0
 })
 
 function renderPage(page: React.ReactElement) {
@@ -91,6 +96,39 @@ describe('OverviewPage', () => {
     expect(readyRequests).toEqual([])
     for (const service of ['Ingestion', 'Config', 'Query']) {
       expect(screen.queryByText(service)).not.toBeInTheDocument()
+    }
+  })
+
+  test('uses UTC calendar ranges for week and month throughput', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-30T03:00:00Z'))
+    try {
+      renderPage(<OverviewPage />)
+      await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Time period' }), 'week')
+
+      await waitFor(() =>
+        expect(analyticsRequests).toContainEqual({
+          path: 'timeseries',
+          body: expect.objectContaining({
+            start_date: '2026-07-24',
+            end_date: '2026-07-30',
+            interval: '1 DAY',
+          }),
+        }),
+      )
+
+      await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Time period' }), 'month')
+      await waitFor(() =>
+        expect(analyticsRequests).toContainEqual({
+          path: 'count',
+          body: expect.objectContaining({
+            start_date: '2026-07-01',
+            end_date: '2026-07-30',
+          }),
+        }),
+      )
+    } finally {
+      vi.useRealTimers()
     }
   })
 })
