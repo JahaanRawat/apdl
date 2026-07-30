@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
+import { useState } from 'react'
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom'
 import { toast } from 'sonner'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -648,6 +649,50 @@ describe('experiment form model', () => {
 })
 
 describe('ExperimentForm layout', () => {
+  test('labels variant columns and keeps row-specific field names while adding and removing rows', async () => {
+    function FormHarness() {
+      const [values, setValues] = useState({
+        ...emptyExperimentValues(),
+        key: 'checkout-test',
+      })
+
+      return (
+        <ExperimentForm
+          values={values}
+          onChange={setValues}
+          isCreate
+          onSubmit={vi.fn()}
+          submitting={false}
+        />
+      )
+    }
+
+    render(<FormHarness />)
+
+    const headings = within(screen.getByTestId('variant-column-headings'))
+    expect(headings.getByText('Key')).toBeInTheDocument()
+    expect(headings.getByText('User proportion')).toBeInTheDocument()
+    expect(headings.getByText('Comment')).toBeInTheDocument()
+
+    expect(screen.getByRole('textbox', { name: 'Key for variant 1' })).toHaveValue('control')
+    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 1' })).toHaveValue(1)
+    expect(screen.getByRole('textbox', { name: 'Comment for variant 1' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 1' })).toBeDisabled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add variant' }))
+
+    expect(screen.getByRole('textbox', { name: 'Key for variant 3' })).toBeVisible()
+    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 3' })).toHaveValue(1)
+    expect(screen.getByRole('textbox', { name: 'Comment for variant 3' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 3' })).toBeEnabled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove variant 2' }))
+
+    expect(screen.queryByRole('textbox', { name: 'Key for variant 3' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Key for variant 2' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 2' })).toBeDisabled()
+  })
+
   test('keeps essential create inputs visible and starts Advanced Settings collapsed', async () => {
     render(
       <ExperimentForm

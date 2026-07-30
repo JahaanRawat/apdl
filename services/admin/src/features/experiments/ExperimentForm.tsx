@@ -2,7 +2,7 @@
 // An experiment owns a backing flag, so variants/default_variant/traffic map to
 // the flag and status drives flag serving through lifecycle-aware transitions.
 import { Plus, Trash2 } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { z } from 'zod'
 
 import {
@@ -373,6 +373,7 @@ export function ExperimentForm({
 }: ExperimentFormProps) {
   const [errors, setErrors] = useState<ExperimentFormErrors>({})
   const advancedSettingsRef = useRef<HTMLDivElement>(null)
+  const variantFieldsId = useId()
   const set = (patch: Partial<ExperimentFormValues>) => onChange({ ...values, ...patch })
 
   const setVariant = (index: number, patch: Partial<ExperimentVariantRow>) =>
@@ -435,43 +436,74 @@ export function ExperimentForm({
       <div className="space-y-2">
         <Label>Variants</Label>
         <div className="space-y-2">
+          <div
+            className="hidden gap-2 sm:grid sm:grid-cols-[10rem_9rem_minmax(11rem,1fr)_2.25rem]"
+            data-testid="variant-column-headings"
+          >
+            <span className="text-sm font-medium leading-none">Key</span>
+            <span className="text-sm font-medium leading-none">User proportion</span>
+            <span className="text-sm font-medium leading-none">Comment</span>
+            <span aria-hidden="true" />
+          </div>
           {values.variants.map((variant, index) => (
-            <div key={index} className="flex flex-wrap items-start gap-2">
-              <Input
-                value={variant.key}
-                onChange={(event) => setVariant(index, { key: event.target.value })}
-                placeholder="key"
-                aria-label={`Variant ${index + 1} key`}
-                className="w-40 font-mono text-xs"
-              />
-              <Input
-                type="number"
-                min={1}
-                step={1}
-                value={variant.weight}
-                onChange={(event) =>
-                  setVariant(index, { weight: Math.max(1, Math.floor(Number(event.target.value) || 1)) })
-                }
-                aria-label={`Variant ${index + 1} weight`}
-                className="w-24 tabular-nums"
-              />
-              <Input
-                value={variant.description}
-                onChange={(event) => setVariant(index, { description: event.target.value })}
-                placeholder="description (optional)"
-                aria-label={`Variant ${index + 1} description`}
-                className="min-w-44 flex-1"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => removeVariant(index)}
-                aria-label={`Remove variant ${index + 1}`}
-                disabled={values.variants.length <= 2}
-              >
-                <Trash2 />
-              </Button>
+            <div
+              key={index}
+              className="grid gap-2 sm:grid-cols-[10rem_9rem_minmax(11rem,1fr)_2.25rem] sm:items-end"
+            >
+              <div className="space-y-1.5">
+                <Label htmlFor={`${variantFieldsId}-${index}-key`} className="sm:sr-only">
+                  <span aria-hidden="true">Key</span>
+                  <span className="sr-only">Key for variant {index + 1}</span>
+                </Label>
+                <Input
+                  id={`${variantFieldsId}-${index}-key`}
+                  value={variant.key}
+                  onChange={(event) => setVariant(index, { key: event.target.value })}
+                  placeholder="key"
+                  className="font-mono text-xs"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor={`${variantFieldsId}-${index}-weight`} className="sm:sr-only">
+                  <span aria-hidden="true">User proportion</span>
+                  <span className="sr-only">User proportion for variant {index + 1}</span>
+                </Label>
+                <Input
+                  id={`${variantFieldsId}-${index}-weight`}
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={variant.weight}
+                  onChange={(event) =>
+                    setVariant(index, { weight: Math.max(1, Math.floor(Number(event.target.value) || 1)) })
+                  }
+                  className="tabular-nums"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor={`${variantFieldsId}-${index}-description`} className="sm:sr-only">
+                  <span aria-hidden="true">Comment</span>
+                  <span className="sr-only">Comment for variant {index + 1}</span>
+                </Label>
+                <Input
+                  id={`${variantFieldsId}-${index}-description`}
+                  value={variant.description}
+                  onChange={(event) => setVariant(index, { description: event.target.value })}
+                  placeholder="description (optional)"
+                />
+              </div>
+              <div className="sm:self-end">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => removeVariant(index)}
+                  aria-label={`Remove variant ${index + 1}`}
+                  disabled={values.variants.length <= 2}
+                >
+                  <Trash2 />
+                </Button>
+              </div>
             </div>
           ))}
         </div>
