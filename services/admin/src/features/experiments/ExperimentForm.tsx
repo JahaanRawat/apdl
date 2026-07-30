@@ -394,6 +394,8 @@ export function ExperimentForm({
     if (Object.keys(nextErrors).length > 0) {
       if (
         nextErrors.flagKey ||
+        nextErrors.bucket_by ||
+        nextErrors.default_variant ||
         nextErrors.targeting ||
         nextErrors.dates ||
         nextErrors.metric ||
@@ -430,6 +432,53 @@ export function ExperimentForm({
             onChange={(event) => set({ description: event.target.value })}
             placeholder="What this experiment tests"
           />
+        </div>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label>Status</Label>
+          <Select
+            value={values.status}
+            onChange={(event) => set({ status: event.target.value as ExperimentStatus })}
+            disabled={terminal}
+            aria-label="Status"
+          >
+            {statusOptions.map((status) => (
+              <option key={status} value={status}>
+                {status}
+              </option>
+            ))}
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {terminal
+              ? 'This experiment has ended — status is terminal.'
+              : 'Defaults to draft. Running enables the backing flag.'}
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          <Label>Traffic %</Label>
+          <Input
+            type="number"
+            min={0}
+            max={100}
+            step="any"
+            value={values.traffic_percentage}
+            onChange={(event) =>
+              set({
+                traffic_percentage: Math.min(
+                  100,
+                  Math.max(0, Number(event.target.value) || 0),
+                ),
+              })
+            }
+            disabled={analysisFieldsLocked}
+            aria-label="Traffic percentage"
+            className="tabular-nums"
+          />
+          <p className="text-xs text-muted-foreground">
+            Defaults to all eligible actors.
+          </p>
         </div>
       </div>
 
@@ -519,53 +568,8 @@ export function ExperimentForm({
         </Button>
         {errors.variants ? <p className="text-xs text-destructive">{errors.variants}</p> : null}
         <p className="text-xs text-muted-foreground">
-          Weights set the split. Traffic defaults to 100% and can be changed in Advanced Settings.
+          Weights set the relative split among variants.
         </p>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-1.5">
-          <Label>Control variant</Label>
-          <Select
-            value={values.default_variant}
-            onChange={(event) => set({ default_variant: event.target.value })}
-            aria-label="Control variant"
-          >
-            {variantKeys.length === 0 ? <option value="">—</option> : null}
-            {variantKeys.map((key) => (
-              <option key={key} value={key}>
-                {key}
-              </option>
-            ))}
-          </Select>
-          {errors.default_variant ? (
-            <p className="text-xs text-destructive">{errors.default_variant}</p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Statistical control for every comparison and the backing flag&apos;s fallback variant.
-            </p>
-          )}
-        </div>
-        <div className="space-y-1.5">
-          <Label>Bucketing identity</Label>
-          <Select
-            value={values.bucket_by}
-            onChange={(event) => set({ bucket_by: event.target.value as ExperimentBucketBy })}
-            disabled={analysisFieldsLocked}
-            aria-label="Bucketing identity"
-          >
-            <option value="anonymous_id">Anonymous visitor</option>
-            <option value="user_id">Authenticated user</option>
-          </Select>
-          {errors.bucket_by ? (
-            <p className="text-xs text-destructive">{errors.bucket_by}</p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Immutable after draft. Use anonymous visitors for browser experiments that start
-              before sign-in.
-            </p>
-          )}
-        </div>
       </div>
 
       <div ref={advancedSettingsRef}>
@@ -574,7 +578,7 @@ export function ExperimentForm({
             <span>
               <span className="block font-medium">Advanced Settings</span>
               <span className="block text-xs text-muted-foreground">
-                Optional launch, allocation, analysis, and targeting controls.
+                Enrollment, flag, scheduling, analysis, and targeting controls.
               </span>
             </span>
           }
@@ -583,48 +587,47 @@ export function ExperimentForm({
           <div className="space-y-5">
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
-                <Label>Status</Label>
+                <Label>Control variant</Label>
                 <Select
-                  value={values.status}
-                  onChange={(event) => set({ status: event.target.value as ExperimentStatus })}
-                  disabled={terminal}
-                  aria-label="Status"
+                  value={values.default_variant}
+                  onChange={(event) => set({ default_variant: event.target.value })}
+                  disabled={analysisFieldsLocked}
+                  aria-label="Control variant"
                 >
-                  {statusOptions.map((status) => (
-                    <option key={status} value={status}>
-                      {status}
+                  {variantKeys.length === 0 ? <option value="">—</option> : null}
+                  {variantKeys.map((key) => (
+                    <option key={key} value={key}>
+                      {key}
                     </option>
                   ))}
                 </Select>
-                <p className="text-xs text-muted-foreground">
-                  {terminal
-                    ? 'This experiment has ended — status is terminal.'
-                    : 'Defaults to draft. Running enables the backing flag.'}
-                </p>
+                {errors.default_variant ? (
+                  <p className="text-xs text-destructive">{errors.default_variant}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Statistical control for every comparison and the backing flag&apos;s fallback variant.
+                  </p>
+                )}
               </div>
               <div className="space-y-1.5">
-                <Label>Traffic %</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step="any"
-                  value={values.traffic_percentage}
-                  onChange={(event) =>
-                    set({
-                      traffic_percentage: Math.min(
-                        100,
-                        Math.max(0, Number(event.target.value) || 0),
-                      ),
-                    })
-                  }
+                <Label>Bucketing identity</Label>
+                <Select
+                  value={values.bucket_by}
+                  onChange={(event) => set({ bucket_by: event.target.value as ExperimentBucketBy })}
                   disabled={analysisFieldsLocked}
-                  aria-label="Traffic percentage"
-                  className="tabular-nums"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Defaults to all eligible actors.
-                </p>
+                  aria-label="Bucketing identity"
+                >
+                  <option value="anonymous_id">Anonymous visitor</option>
+                  <option value="user_id">Authenticated user</option>
+                </Select>
+                {errors.bucket_by ? (
+                  <p className="text-xs text-destructive">{errors.bucket_by}</p>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Immutable after draft. Use anonymous visitors for browser experiments that start
+                    before sign-in.
+                  </p>
+                )}
               </div>
             </div>
 
