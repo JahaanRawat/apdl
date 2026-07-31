@@ -218,16 +218,13 @@ class ProjectLlmVaultStore:
                 """,
                 project_id,
             )
-            connections = tuple(
-                cast(
-                    ConnectionSummary,
-                    await self._connection_response(
-                        conn, UUID(str(row["connection_id"])), detail=False
-                    ),
+            connections: list[ConnectionSummary] = []
+            for row in ids:
+                connection = await self._connection_response(
+                    conn, UUID(str(row["connection_id"])), detail=False
                 )
-                for row in ids
-            )
-        return ConnectionList(project_id=project_id, connections=connections)
+                connections.append(cast(ConnectionSummary, connection))
+        return ConnectionList(project_id=project_id, connections=tuple(connections))
 
     async def get(
         self, connection_id: UUID, project_id: str, actor_user_id: UUID
