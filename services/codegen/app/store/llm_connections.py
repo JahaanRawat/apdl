@@ -154,6 +154,39 @@ class ProjectConnectionStore:
         )
 
     @staticmethod
+    async def _assert_assignments_remain_available(
+        conn: Any,
+        project_id: str,
+        provider: Provider,
+        models: tuple[ProviderModel, ...],
+    ) -> None:
+        assignments = await conn.fetch(
+            """
+            SELECT role, model_id
+            FROM codegen_project_model_assignments
+            WHERE project_id = $1 AND provider = $2
+            FOR SHARE
+            """,
+            project_id,
+            provider,
+        )
+        eligible = {
+            (role, model.model_id)
+            for model in models
+            for role in model.supported_roles
+        }
+        missing = [
+            f"{row['role']}:{row['model_id']}"
+            for row in assignments
+            if (str(row["role"]), str(row["model_id"])) not in eligible
+        ]
+        if missing:
+            raise LlmConnectionAssignmentConflictError(
+                "Discovered inventory omits assigned role/model(s): "
+                + ", ".join(sorted(missing))
+            )
+
+    @staticmethod
     async def _insert_inventory(
         conn: Any,
         *,
@@ -198,6 +231,34 @@ class ProjectConnectionStore:
                 model.output_cost_per_million_tokens_usd_micros,
                 model.pricing_status,
             )
+
+    @staticmethod
+    async def _advance_assignments(
+        conn: Any,
+        *,
+        project_id: str,
+        provider: Provider,
+        connection_version: int,
+        inventory_version: int,
+        actor: str,
+    ) -> None:
+        await conn.execute(
+            """
+            UPDATE codegen_project_model_assignments
+            SET connection_version = $3, inventory_version = $4,
+                catalog_version = $5,
+                assignment_version = assignment_version + 1,
+                assigned_by_actor = $6,
+                assigned_at = NOW()
+            WHERE project_id = $1 AND provider = $2
+            """,
+            project_id,
+            provider,
+            connection_version,
+            inventory_version,
+            CATALOG_VERSION,
+            actor,
+        )
 
     @staticmethod
     async def _append_audit(
@@ -256,6 +317,9 @@ class ProjectConnectionStore:
                     raise LlmConnectionConflictError(
                         "The provider connection version changed"
                     )
+                await self._assert_assignments_remain_available(
+                    conn, project_id, canonical, models
+                )
                 if current is not None and str(current["state"]) == "active":
                     credential = await self._credentials.replace_in_transaction(
                         conn,
@@ -330,6 +394,14 @@ class ProjectConnectionStore:
                     connection_version=next_version,
                     inventory_version=inventory_version,
                     models=models,
+                )
+                await self._advance_assignments(
+                    conn,
+                    project_id=project_id,
+                    provider=canonical,
+                    connection_version=next_version,
+                    inventory_version=inventory_version,
+                    actor=actor,
                 )
                 await self._append_audit(
                     conn,
@@ -430,6 +502,9 @@ class ProjectConnectionStore:
                     raise LlmConnectionConflictError(
                         "The provider credential changed"
                     )
+                await self._assert_assignments_remain_available(
+                    conn, project_id, canonical, models
+                )
                 next_version = expected_version + 1
                 inventory_version = int(current["inventory_version"]) + 1
                 await conn.execute(
@@ -462,6 +537,14 @@ class ProjectConnectionStore:
                     connection_version=next_version,
                     inventory_version=inventory_version,
                     models=models,
+                )
+                await self._advance_assignments(
+                    conn,
+                    project_id=project_id,
+                    provider=canonical,
+                    connection_version=next_version,
+                    inventory_version=inventory_version,
+                    actor=actor,
                 )
                 await self._append_audit(
                     conn,
@@ -503,6 +586,21 @@ class ProjectConnectionStore:
                 ):
                     raise LlmConnectionConflictError(
                         "The provider connection version changed"
+                    )
+                assigned = await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM codegen_project_model_assignments
+                        WHERE project_id = $1 AND provider = $2
+                    )
+                    """,
+                    project_id,
+                    canonical,
+                )
+                if assigned:
+                    raise LlmConnectionAssignmentConflictError(
+                        "Provider connection is referenced by a model assignment"
                     )
                 credential_id = UUID(str(current["credential_id"]))
                 await self._credentials.revoke_in_transaction(

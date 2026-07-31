@@ -12,6 +12,7 @@ from app.contracts.models import ContractBundle
 from app.editor.base import EditRequest, EditResult
 from app.editor.fake import FakeEditor
 from app.evaluations.models import RiskLevel, RolloutStage
+from app.evaluations.publication import PublicationAuthorization
 from app.github.app_auth import AuthorizedRepositoryTarget, InstallationToken
 from app.github.pulls import PullRequest, PullRequestIdentityError
 from app.github.token_broker import GitHubTokenBroker
@@ -65,10 +66,7 @@ from app.store import pr_publication as publication_store
 from app.verification import build_verification_plan, evaluate_verification_coverage
 from tests.fakes import FakePool
 from tests.publisher_fakes import FakeBranchPublisher
-from tests.publication_fakes import (
-    allowing_publication_gate,
-    denying_publication_gate,
-)
+from tests.publication_fakes import FakePublicationGate
 
 _TASK = {
     "title": "Add dark mode",
@@ -76,6 +74,36 @@ _TASK = {
     "context": {},
     "constraints": ["keeps existing tests green"],
 }
+
+
+class _ModelBoundPublicationGate(FakePublicationGate):
+    """Build fake evidence for the exact editor model frozen on the changeset."""
+
+    def authorize(
+        self,
+        *,
+        risk: RiskLevel,
+        model: str,
+        helper_model: str,
+        canary_identity: str,
+    ) -> PublicationAuthorization:
+        authorization = super().authorize(
+            risk=risk,
+            model=model,
+            helper_model=helper_model,
+            canary_identity=canary_identity,
+        )
+        return authorization
+
+
+def allowing_publication_gate(
+    stage: RolloutStage = RolloutStage.low_risk_canary,
+) -> _ModelBoundPublicationGate:
+    return _ModelBoundPublicationGate(stage=stage)
+
+
+def denying_publication_gate() -> _ModelBoundPublicationGate:
+    return _ModelBoundPublicationGate(allowed=False)
 
 
 async def run_changeset_job(*args, publication_gate=None, **kwargs):
@@ -775,7 +803,8 @@ async def test_offline_stage_has_no_github_write_capability():
     final = await store.get_changeset(pool, "cs_offline")
     assert final is not None
     assert final.status is ChangesetStatus.error
-    assert "offline rollout stage cannot publish" in (final.error or "")
+    assert final.error == "Changeset execution failed with PublicationGateError"
+    assert "offline rollout stage" not in final.error
     assert final.publication_authorization is None
     assert minted == []
     assert editor.last_request is None
@@ -830,7 +859,8 @@ async def test_job_errors_on_unexpected_editor_fault():
 
     final = await store.get_changeset(pool, "cs_boom0001")
     assert final.status == ChangesetStatus.error
-    assert "kaboom" in (final.error or "")
+    assert final.error == "Changeset execution failed with RuntimeError"
+    assert "kaboom" not in final.error
 
 
 @pytest.mark.asyncio
@@ -1200,7 +1230,8 @@ async def test_malformed_stored_tenant_policy_fails_before_token_minting():
 
     final = pool.store["changesets"]["cs_badpolicy"]
     assert final["status"] == ChangesetStatus.error.value
-    assert "protected_paths" in (final["error"] or "")
+    assert final["error"] == "Changeset execution failed with ValidationError"
+    assert "protected_paths" not in final["error"]
     assert minted == []
     assert editor.last_request is None
 

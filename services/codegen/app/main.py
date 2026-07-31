@@ -35,8 +35,10 @@ from app.config import (
     codegen_egress_proxy_image_id,
     codegen_egress_socket_volume,
     codegen_job_budget,
+    codegen_llm_broker_dir,
     codegen_max_concurrent_jobs,
-    codegen_model,
+    codegen_evaluation_model,
+    codegen_evaluation_helper_model,
     codegen_revision,
     codegen_rollout_authorization_path,
     codegen_rollout_stage,
@@ -51,6 +53,7 @@ from app.db import assert_schema_ready
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
+from app.editor.routed import ProjectRoutedEditor
 from app.editor.environment import codegen_behavior_configuration_sha256
 from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
 from app.evaluations.publication import load_publication_authorizer
@@ -67,6 +70,7 @@ from app.jobs.ci_poller import run_github_poller
 from app.jobs.pr_publication import resume_pull_request_publication
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
+from app.llm.broker_directory import prepare_broker_root
 from app.models.observations import CIVerificationObservation
 from app.publication import ConfiguredPublicationGate
 from app.request_body_limit import RequestBodyLimitMiddleware
@@ -261,13 +265,20 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
 def _make_publication_gate() -> ConfiguredPublicationGate:
     """Build the explicit development gate or load evaluated rollout evidence."""
     stage = codegen_rollout_stage()
-    model = codegen_model()
+    evaluation_model = codegen_evaluation_model()
+    model = evaluation_model or "project-assigned"
     revision = codegen_revision()
     development_mode = codegen_development_mode()
+    evaluation_helper_model = None
     provider = None
     candidate_identity = None
     egress_policy_sha256 = None
     if stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}:
+        if not evaluation_model:
+            raise RuntimeError(
+                "CODEGEN_EVALUATION_MODEL is required for evaluated PR rollout "
+                "evidence"
+            )
         raw_path = codegen_rollout_authorization_path()
         if not raw_path:
             raise RuntimeError(
@@ -297,11 +308,21 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
             raise RuntimeError(
                 "evaluated PR rollout stages require CODEGEN_MAX_CONCURRENT_JOBS=1"
             )
+        evaluation_behavior_environment = dict(os.environ)
+        evaluation_behavior_environment["CODEGEN_MODEL"] = evaluation_model
+        evaluation_helper_model = codegen_evaluation_helper_model()
+        evaluation_behavior_environment["CODEGEN_HELPER_MODEL"] = (
+            evaluation_helper_model
+        )
         candidate_identity = CodegenCandidateIdentity.build(
             controller_image_id=codegen_controller_image_id(),
             candidate_image_id=codegen_sandbox_image(),
             codegen_revision=revision,
-            behavior_configuration_sha256=(codegen_behavior_configuration_sha256()),
+            behavior_configuration_sha256=(
+                codegen_behavior_configuration_sha256(
+                    evaluation_behavior_environment
+                )
+            ),
             egress_policy_sha256=egress_policy_sha256,
             egress_proxy_image_id=egress_proxy_image_id,
             reviewed_max_concurrent_jobs=reviewed_max_concurrent_jobs,
@@ -328,6 +349,7 @@ def _make_publication_gate() -> ConfiguredPublicationGate:
         stage=stage,
         model=model,
         codegen_revision=revision,
+        helper_model=evaluation_helper_model,
         candidate_identity_sha256=(
             candidate_identity.identity_sha256
             if candidate_identity is not None
@@ -349,6 +371,9 @@ async def lifespan(application: FastAPI):
     # Attest the exact evaluated worker/proxy topology before opening database
     # or GitHub-token lifecycle resources.
     editor = _make_editor(publication_gate.stage)
+    # Every serving entry point (including direct `make run-codegen`) prepares
+    # and validates the controller-owned broker root before accepting work.
+    prepare_broker_root(Path(codegen_llm_broker_dir()))
     # A recovering publication owns one session-level advisory lock connection.
     # Keep independent capacity for token minting, the broker listener, and API
     # traffic even when every configured worker is inside publication recovery.
@@ -378,6 +403,11 @@ async def lifespan(application: FastAPI):
         application.state.llm_credential_store = credential_store
         application.state.llm_connection_store = ProjectConnectionStore(
             pool, credential_store
+        )
+        editor = ProjectRoutedEditor(
+            editor,
+            pool=pool,
+            credential_store=credential_store,
         )
         token_broker = GitHubTokenBroker(pool)
         application.state.github_token_broker = token_broker

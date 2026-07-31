@@ -224,6 +224,7 @@ def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
             "CODEGEN_EGRESS_POLICY_SHA256": egress_policy,
             "CODEGEN_EGRESS_PROXY_IMAGE": proxy_image,
             "CODEGEN_EGRESS_SOCKET_VOLUME": "codegen-egress-socket",
+            "CODEGEN_EVALUATION_MODEL": "openai/gpt-5",
             "CODEGEN_REVISION": "evaluated-revision",
             "CODEGEN_ROLLOUT_BUNDLE_PATH": "/tmp/publication-bundle.json",
             "CODEGEN_SANDBOX_IMAGE": candidate_image,
@@ -241,6 +242,7 @@ def test_reviewed_overlay_injects_evaluated_publication_identity() -> None:
 
     assert codegen["image"] == controller_image
     assert codegen_environment["CODEGEN_ROLLOUT_STAGE"] == "reviewed_pr"
+    assert codegen_environment["CODEGEN_EVALUATION_MODEL"] == "openai/gpt-5"
     assert codegen_environment["CODEGEN_ROLLOUT_AUTHORIZATION_PATH"] == (
         "/run/apdl/codegen/publication-bundle.json"
     )

@@ -160,6 +160,8 @@ class PublicationGate(Protocol):
         self,
         *,
         risk: RiskLevel,
+        model: str,
+        helper_model: str,
         canary_identity: str,
     ) -> PublicationAuthorizationRecord: ...
 
@@ -171,6 +173,7 @@ class ConfiguredPublicationGate:
     stage: RolloutStage
     model: str
     codegen_revision: str
+    helper_model: str | None = None
     candidate_identity_sha256: str | None = None
     egress_policy_sha256: str | None = None
     provider: PublicationAuthorizationProvider | None = None
@@ -185,6 +188,13 @@ class ConfiguredPublicationGate:
             RolloutStage.reviewed_pr,
             RolloutStage.low_risk_canary,
         }
+        if evaluated_publication_stage != (self.helper_model is not None):
+            raise ValueError(
+                "evaluated PR rollout stages require the evaluated helper "
+                "model; other stages must not receive one"
+            )
+        if self.helper_model is not None and not self.helper_model.strip():
+            raise ValueError("publication helper model identity cannot be empty")
         development_publication_stage = self.stage is RolloutStage.development_pr
         if evaluated_publication_stage != (self.provider is not None):
             raise ValueError(
@@ -219,6 +229,8 @@ class ConfiguredPublicationGate:
         self,
         *,
         risk: RiskLevel,
+        model: str,
+        helper_model: str,
         canary_identity: str,
     ) -> PublicationAuthorizationRecord:
         if self.stage in {RolloutStage.offline, RolloutStage.shadow}:
@@ -228,8 +240,13 @@ class ConfiguredPublicationGate:
         if self.stage is RolloutStage.development_pr:
             return build_development_publication_authorization(
                 risk=risk,
-                model=self.model,
+                model=model,
                 codegen_revision=self.codegen_revision,
+            )
+        if model != self.model or helper_model != self.helper_model:
+            raise PublicationGateError(
+                "project LLM model assignments do not match evaluated "
+                "rollout evidence"
             )
         if self.provider is None:  # guarded by __post_init__; fail closed anyway
             raise PublicationGateError("no trusted publication evidence is configured")
@@ -240,7 +257,7 @@ class ConfiguredPublicationGate:
         request = PublicationRequest(
             requested_stage=self.stage,
             risk=risk,
-            model=self.model,
+            model=model,
             codegen_revision=self.codegen_revision,
             candidate_identity_sha256=self.candidate_identity_sha256,
             egress_policy_sha256=self.egress_policy_sha256,

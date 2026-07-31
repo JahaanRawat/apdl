@@ -14,13 +14,14 @@ DEPS_COMPOSE_FILE ?= infra/docker/docker-compose.deps.yml
 COMPOSE_FILE ?= infra/docker/docker-compose.yml
 COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(COMPOSE_FILE)
 DEPS_COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(DEPS_COMPOSE_FILE)
-SERVICE_ENV_FILE := $(if $(wildcard .env),--env-file ../../.env,)
+HOST_SERVICE_RUNNER := python3 scripts/run_host_service.py
+HOST_SERVICE_ENV_FILE := $(if $(wildcard .env),--env-file .env,)
 
 # One immutable identity binds the evaluation controller, production candidate,
 # evidence bundle, and reviewed-PR deployment. Environment values may override
 # these defaults, but the evaluation script rejects development-unversioned.
 CODEGEN_REVISION ?= $(shell git rev-parse HEAD 2>/dev/null)
-CODEGEN_MODEL ?= claude-opus-4-8
+CODEGEN_EVALUATION_MODEL ?= anthropic/claude-opus-5
 CODEGEN_EVALUATION_CONTROLLER_IMAGE ?= apdl-codegen-evaluation-controller:$(CODEGEN_REVISION)
 CODEGEN_SANDBOX_IMAGE ?= apdl-codegen-sandbox:$(CODEGEN_REVISION)
 CODEGEN_EVALUATION_ARTIFACT_DIR ?= $(CURDIR)/local-files/codegen-rollouts/$(CODEGEN_REVISION)
@@ -40,6 +41,7 @@ CODEGEN_DOCKER_SOCKET ?= $(if $(wildcard $(HOME)/.docker/run/docker.sock),$(HOME
 CODEGEN_DOCKER_UID ?= $(shell id -u)
 CODEGEN_DOCKER_GID ?= $(shell id -g)
 CODEGEN_DOCKER_SOCKET_GID ?= $(shell stat -c '%g' "$(CODEGEN_DOCKER_SOCKET)" 2>/dev/null || stat -f '%g' "$(CODEGEN_DOCKER_SOCKET)" 2>/dev/null || echo 0)
+CODEGEN_LLM_BROKER_DIR ?= /tmp/apdl-codegen-llm-broker
 
 # Explicit Codegen development-publication tooling is separate from the normal
 # core and dev-all paths. The supported stacks never mount the Docker socket or
@@ -144,7 +146,8 @@ test-packed-python-sdk:
 # ─── Admin Console (TypeScript) ──────────────────────────────
 
 run-admin:
-	cd services/admin && npm run dev
+	$(HOST_SERVICE_RUNNER) --service admin \
+		--working-directory services/admin -- npm run dev
 
 build-admin:
 	cd services/admin && npm run build
@@ -161,7 +164,10 @@ clean-admin:
 # ─── Admin API (Python) ─────────────────────────────────────
 
 run-admin-api:
-	cd services/admin-api && APDL_ADMIN_COOKIE_SECURE=false .venv/bin/python -m uvicorn app.main:app --reload --port 8085 --no-proxy-headers $(SERVICE_ENV_FILE)
+	APDL_ADMIN_COOKIE_SECURE=false $(HOST_SERVICE_RUNNER) \
+		--service admin-api $(HOST_SERVICE_ENV_FILE) \
+		--working-directory services/admin-api -- \
+		.venv/bin/python -m uvicorn app.main:app --reload --port 8085 --no-proxy-headers
 
 test-admin-api:
 	cd services/admin-api && .venv/bin/python -m pytest -v
@@ -195,7 +201,9 @@ lint-ingestion:
 	cd services/ingestion && .venv/bin/ruff check app/
 
 run-ingestion:
-	cd services/ingestion && .venv/bin/python -m uvicorn app.main:app --reload --port 8080 --no-proxy-headers $(SERVICE_ENV_FILE)
+	$(HOST_SERVICE_RUNNER) --service ingestion $(HOST_SERVICE_ENV_FILE) \
+		--working-directory services/ingestion -- \
+		.venv/bin/python -m uvicorn app.main:app --reload --port 8080 --no-proxy-headers
 
 # ─── Config Service (Python) ────────────────────────────────
 
@@ -206,7 +214,9 @@ lint-config:
 	cd services/config && .venv/bin/ruff check app/
 
 run-config:
-	cd services/config && .venv/bin/python -m uvicorn app.main:app --reload --port 8081 $(SERVICE_ENV_FILE)
+	$(HOST_SERVICE_RUNNER) --service config $(HOST_SERVICE_ENV_FILE) \
+		--working-directory services/config -- \
+		.venv/bin/python -m uvicorn app.main:app --reload --port 8081
 
 # ─── Query Service (Python) ──────────────────────────────────
 
@@ -220,7 +230,9 @@ lint-query:
 	cd services/query && .venv/bin/ruff check app/
 
 run-query:
-	cd services/query && .venv/bin/python -m uvicorn app.main:app --reload --port 8082 $(SERVICE_ENV_FILE)
+	$(HOST_SERVICE_RUNNER) --service query $(HOST_SERVICE_ENV_FILE) \
+		--working-directory services/query -- \
+		.venv/bin/python -m uvicorn app.main:app --reload --port 8082
 
 # ─── Agents Service (Python) ─────────────────────────────────
 
@@ -231,7 +243,9 @@ lint-agents:
 	cd services/agents && .venv/bin/ruff check app/
 
 run-agents:
-	cd services/agents && .venv/bin/python -m uvicorn app.main:app --reload --port 8083 $(SERVICE_ENV_FILE)
+	$(HOST_SERVICE_RUNNER) --service agents $(HOST_SERVICE_ENV_FILE) \
+		--working-directory services/agents -- \
+		.venv/bin/python -m uvicorn app.main:app --reload --port 8083
 
 # ─── Codegen Service (Python) ────────────────────────────────
 
@@ -242,7 +256,9 @@ lint-codegen:
 	cd services/codegen && .venv/bin/ruff check app/ tests/ scripts/
 
 run-codegen:
-	cd services/codegen && .venv/bin/python -m uvicorn app.main:app --reload --port 8084 $(SERVICE_ENV_FILE)
+	$(HOST_SERVICE_RUNNER) --service codegen $(HOST_SERVICE_ENV_FILE) \
+		--working-directory services/codegen -- \
+		.venv/bin/python -m uvicorn app.main:app --reload --port 8084
 
 build-codegen-controller:
 	docker build \
@@ -270,6 +286,7 @@ build-codegen-egress-proxy:
 build-codegen-runtime: build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy
 
 codegen-development-prepare:
+	@cd services/codegen && CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" .venv/bin/python -m scripts.prepare_llm_broker_dir
 	@test -n "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" || (echo "The active Docker context is not a local unix socket; codegen-development-prepare requires local Docker." >&2; exit 1)
 	@case "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" in /*) ;; *) echo "Docker unix socket path must be absolute: $(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" >&2; exit 1;; esac
 	@test -S "$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" || (echo "Docker unix socket not found: $(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" >&2; exit 1)
@@ -293,11 +310,13 @@ codegen-development-prepare:
 	CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID="$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET_GID)" \
 	CODEGEN_DEVELOPMENT_SANDBOX_IMAGE="$(CODEGEN_DEVELOPMENT_SANDBOX_IMAGE)" \
 	CODEGEN_DEVELOPMENT_SANDBOX_NETWORK="$(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK)" \
+	CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" \
 	$(COMPOSE) -f $(CODEGEN_DEVELOPMENT_COMPOSE_FILE) config --quiet
 
 evaluate-codegen:
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
-	CODEGEN_MODEL="$(CODEGEN_MODEL)" \
+	CODEGEN_EVALUATION_MODEL="$(CODEGEN_EVALUATION_MODEL)" \
+	CODEGEN_EVALUATION_HELPER_MODEL="$(CODEGEN_EVALUATION_HELPER_MODEL)" \
 	CODEGEN_EVALUATION_CONTROLLER_IMAGE="$(CODEGEN_EVALUATION_CONTROLLER_IMAGE)" \
 	CODEGEN_SANDBOX_IMAGE="$(CODEGEN_SANDBOX_IMAGE)" \
 	CODEGEN_EVALUATION_ARTIFACT_DIR="$(CODEGEN_EVALUATION_ARTIFACT_DIR)" \
@@ -309,6 +328,7 @@ evaluate-codegen:
 	./scripts/evaluate-codegen.sh
 
 codegen-reviewed-config:
+	@cd services/codegen && CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" .venv/bin/python -m scripts.prepare_llm_broker_dir
 	@test "$(CODEGEN_EGRESS_POLICY_SHA256)" = "$(CODEGEN_SHIPPED_EGRESS_POLICY_SHA256)" || (echo "CODEGEN_EGRESS_POLICY_SHA256 does not match the checked-in egress policy sources" >&2; exit 1)
 	@test -s "$(CODEGEN_ROLLOUT_BUNDLE_PATH)" || (echo "Missing rollout bundle: $(CODEGEN_ROLLOUT_BUNDLE_PATH)" >&2; exit 1)
 	@test -n "$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" || (echo "Missing evaluated controller identity: $(CODEGEN_EVALUATION_ARTIFACT_DIR)/controller-image-id.txt" >&2; exit 1)
@@ -329,7 +349,8 @@ codegen-reviewed-config:
 	@test -n "$(CODEGEN_EGRESS_SOCKET_VOLUME)" || (echo "CODEGEN_EGRESS_SOCKET_VOLUME must name the reviewed proxy socket volume" >&2; exit 1)
 	@case "$(CODEGEN_EGRESS_SOCKET_VOLUME)" in *[!A-Za-z0-9_.-]*|'') echo "CODEGEN_EGRESS_SOCKET_VOLUME is not a canonical Docker volume name" >&2; exit 1;; esac
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
-	CODEGEN_MODEL="$(CODEGEN_MODEL)" \
+	CODEGEN_EVALUATION_MODEL="$(CODEGEN_EVALUATION_MODEL)" \
+	CODEGEN_EVALUATION_HELPER_MODEL="$(CODEGEN_EVALUATION_HELPER_MODEL)" \
 	CODEGEN_ROLLOUT_STAGE=reviewed_pr \
 	CODEGEN_ROLLOUT_BUNDLE_PATH="$(CODEGEN_ROLLOUT_BUNDLE_PATH)" \
 	CODEGEN_CONTROLLER_IMAGE="$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" \
@@ -341,11 +362,13 @@ codegen-reviewed-config:
 	CODEGEN_DOCKER_UID="$(CODEGEN_DOCKER_UID)" \
 	CODEGEN_DOCKER_GID="$(CODEGEN_DOCKER_GID)" \
 	CODEGEN_DOCKER_SOCKET_GID="$(CODEGEN_DOCKER_SOCKET_GID)" \
+	CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" \
 	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_ROLLOUT_COMPOSE_FILE) config --quiet
 
 codegen-reviewed-up: codegen-reviewed-config
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
-	CODEGEN_MODEL="$(CODEGEN_MODEL)" \
+	CODEGEN_EVALUATION_MODEL="$(CODEGEN_EVALUATION_MODEL)" \
+	CODEGEN_EVALUATION_HELPER_MODEL="$(CODEGEN_EVALUATION_HELPER_MODEL)" \
 	CODEGEN_ROLLOUT_STAGE=reviewed_pr \
 	CODEGEN_ROLLOUT_BUNDLE_PATH="$(CODEGEN_ROLLOUT_BUNDLE_PATH)" \
 	CODEGEN_CONTROLLER_IMAGE="$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" \
@@ -357,9 +380,11 @@ codegen-reviewed-up: codegen-reviewed-config
 	CODEGEN_DOCKER_UID="$(CODEGEN_DOCKER_UID)" \
 	CODEGEN_DOCKER_GID="$(CODEGEN_DOCKER_GID)" \
 	CODEGEN_DOCKER_SOCKET_GID="$(CODEGEN_DOCKER_SOCKET_GID)" \
+	CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" \
 	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_ROLLOUT_COMPOSE_FILE) up -d --no-build --no-deps --force-recreate --wait codegen-egress-proxy
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
-	CODEGEN_MODEL="$(CODEGEN_MODEL)" \
+	CODEGEN_EVALUATION_MODEL="$(CODEGEN_EVALUATION_MODEL)" \
+	CODEGEN_EVALUATION_HELPER_MODEL="$(CODEGEN_EVALUATION_HELPER_MODEL)" \
 	CODEGEN_ROLLOUT_STAGE=reviewed_pr \
 	CODEGEN_ROLLOUT_BUNDLE_PATH="$(CODEGEN_ROLLOUT_BUNDLE_PATH)" \
 	CODEGEN_CONTROLLER_IMAGE="$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" \
@@ -371,6 +396,7 @@ codegen-reviewed-up: codegen-reviewed-config
 	CODEGEN_DOCKER_UID="$(CODEGEN_DOCKER_UID)" \
 	CODEGEN_DOCKER_GID="$(CODEGEN_DOCKER_GID)" \
 	CODEGEN_DOCKER_SOCKET_GID="$(CODEGEN_DOCKER_SOCKET_GID)" \
+	CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" \
 	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_ROLLOUT_COMPOSE_FILE) up -d --no-build --no-deps --force-recreate codegen
 
 grant-codegen-repository:
@@ -382,7 +408,9 @@ revoke-codegen-repository:
 # ─── Pipeline ────────────────────────────────────────────────
 
 run-pipeline:
-	cd pipeline/redis && $(if $(SERVICE_ENV_FILE),uv run --no-project $(SERVICE_ENV_FILE) -- .venv/bin/python,.venv/bin/python) clickhouse_writer.py
+	$(HOST_SERVICE_RUNNER) --service pipeline $(HOST_SERVICE_ENV_FILE) \
+		--working-directory pipeline/redis -- \
+		.venv/bin/python clickhouse_writer.py
 
 test-writer:
 	cd pipeline/redis && .venv/bin/python -m pytest -q

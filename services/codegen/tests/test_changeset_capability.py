@@ -15,9 +15,9 @@ from httpx import ASGITransport, AsyncClient
 
 from app import capabilities
 from app.auth import Principal, authenticate_request
-from app.editor.environment import MODEL_PROVIDER_ENV
 from app.evaluations.models import RolloutStage
 from app.main import app
+from app.store.llm_credentials import ENCRYPTION_KEY_ENV
 from tests.fakes import FakePool
 
 
@@ -115,6 +115,20 @@ async def test_capability_is_authenticated_tenant_scoped_and_executable(
             "worker": "ready",
             "runtime": "ready",
         },
+        "llm_assignments": [
+            {
+                "role": "editor",
+                "provider": "anthropic",
+                "model_id": "claude-sonnet-5",
+                "connection_state": "active",
+            },
+            {
+                "role": "helper",
+                "provider": "anthropic",
+                "model_id": "claude-sonnet-5",
+                "connection_state": "active",
+            },
+        ],
     }
 
 
@@ -152,6 +166,41 @@ async def test_capability_reports_every_blocking_prerequisite(
         "worker_unavailable",
         "runtime_unavailable",
     ]
+    assert body["llm_assignments"] == []
+
+
+@pytest.mark.asyncio
+async def test_reviewed_capability_rejects_helper_model_evidence_drift(
+    executable_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del executable_runtime
+    pool = FakePool()
+    pool.add_connection("demo")
+    app.state.pg_pool = pool
+    app.state.codegen_rollout_stage = RolloutStage.reviewed_pr
+    monkeypatch.setenv(
+        "CODEGEN_EVALUATION_MODEL",
+        "anthropic/claude-sonnet-5",
+    )
+    monkeypatch.setenv(
+        "CODEGEN_EVALUATION_HELPER_MODEL",
+        "anthropic/claude-haiku-4-5-20251001",
+    )
+
+    evaluation = await capabilities.evaluate_changeset_creation(
+        app,
+        pool,
+        "demo",
+    )
+
+    assert [item.model_id for item in evaluation.report.llm_assignments] == [
+        "claude-sonnet-5",
+        "claude-sonnet-5",
+    ]
+    assert evaluation.report.changeset_creation == "disabled"
+    assert evaluation.report.checks.provider == "blocked"
+    assert evaluation.report.reasons == ["provider_unconfigured"]
 
 
 @pytest.mark.asyncio
@@ -417,70 +466,44 @@ async def test_capability_rejects_project_without_operator_execution_authority(
     }
 
 
+def test_provider_check_requires_codegen_credential_encryption_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(ENCRYPTION_KEY_ENV, raising=False)
+    assert capabilities._provider_configured() is False
+
+    encoded_key = base64.b64encode(b"k" * 32).decode("ascii")
+    monkeypatch.setenv(ENCRYPTION_KEY_ENV, encoded_key)
+    assert capabilities._provider_configured() is True
+
+
 @pytest.mark.parametrize(
-    ("model", "environment"),
+    "encoded_key",
     [
-        ("claude-opus-4-8", {"ANTHROPIC_API_KEY": "secret"}),
-        ("openai/gpt-5", {"OPENAI_API_KEY": "secret"}),
-        ("gemini/gemini-2.5-pro", {"GEMINI_API_KEY": "secret"}),
+        "",
+        "not-base64",
+        base64.b64encode(b"short").decode("ascii"),
+        base64.urlsafe_b64encode(b"\xfb" * 32).decode("ascii"),
     ],
 )
-def test_provider_check_is_bound_to_the_selected_model(
-    model: str,
-    environment: dict[str, str],
-    monkeypatch,
+def test_provider_check_rejects_invalid_encryption_keys(
+    encoded_key: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in MODEL_PROVIDER_ENV:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("CODEGEN_MODEL", model)
-    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
-    for name, value in environment.items():
-        monkeypatch.setenv(name, value)
-
-    assert capabilities._provider_configured() is True
-
-    for name in environment:
-        monkeypatch.delenv(name)
+    monkeypatch.setenv(ENCRYPTION_KEY_ENV, encoded_key)
     assert capabilities._provider_configured() is False
 
 
-def test_vertex_project_metadata_is_not_an_executable_credential(
+def test_deployment_provider_keys_are_not_tenant_fallbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in MODEL_PROVIDER_ENV:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("CODEGEN_MODEL", "vertex_ai/gemini-2.5-pro")
-    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
-    monkeypatch.setenv("VERTEXAI_PROJECT", "project")
-    monkeypatch.setenv("VERTEXAI_LOCATION", "region")
-
-    assert capabilities._provider_configured() is False
-
-
-def test_provider_check_requires_main_and_helper_provider_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for name in MODEL_PROVIDER_ENV:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("CODEGEN_MODEL", "anthropic/claude-opus-4-8")
-    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "openai/gpt-5-mini")
+    monkeypatch.delenv(ENCRYPTION_KEY_ENV, raising=False)
+    monkeypatch.setenv("CODEGEN_MODEL", "anthropic/claude-opus-5")
+    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "openai/gpt-5.4-mini")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
-
-    assert capabilities._provider_configured() is False
-
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
-    assert capabilities._provider_configured() is True
-
-
-def test_provider_check_rejects_ambiguous_gemini_key_choice(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for name in MODEL_PROVIDER_ENV:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("CODEGEN_MODEL", "gemini/gemini-2.5-pro")
-    monkeypatch.delenv("CODEGEN_HELPER_MODEL", raising=False)
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
     monkeypatch.setenv("GOOGLE_API_KEY", "google-secret")
+    monkeypatch.setenv("XAI_API_KEY", "xai-secret")
 
     assert capabilities._provider_configured() is False
 

@@ -39,9 +39,9 @@ async def test_accepts_complete_migrated_schema():
     await assert_schema_ready(FakeConn())
 
 
-def test_startup_requires_project_llm_connections_migration():
-    assert MIGRATION_VERSION == 53
-    assert MIGRATION_NAME == "053_codegen_llm_connections.sql"
+def test_startup_requires_project_llm_routing_migration():
+    assert MIGRATION_VERSION == 54
+    assert MIGRATION_NAME == "054_codegen_project_llm_routing.sql"
     assert (
         "admin_project_execution_authorizations",
         "authorization_source",
@@ -55,15 +55,10 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_project_llm_connections_migration():
-    with pytest.raises(
-        RuntimeError,
-        match="053_codegen_llm_connections.sql",
-    ):
+async def test_rejects_database_without_project_llm_routing_migration():
+    with pytest.raises(RuntimeError, match="054_codegen_project_llm_routing.sql"):
         await assert_schema_ready(
-            FakeConn(
-                migration_name="052_codegen_project_provider_credentials.sql"
-            )
+            FakeConn(migration_name="053_codegen_llm_connections.sql")
         )
 
 

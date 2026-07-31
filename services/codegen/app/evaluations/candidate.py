@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Protocol
 
 from app.contracts.models import ContractBundle
+from app import config
 from app.editor.aider_editor import AiderEditor
 from app.editor.base import EditRequest, EditResult
 from app.evaluations.json_io import parse_strict_json_object
@@ -279,7 +280,11 @@ async def evaluate_candidate(
     # fake executable for protocol tests. Production changeset workers do not
     # consult CODEGEN_AIDER_BIN and therefore always use the hardened launcher.
     injected_aider = os.getenv("CODEGEN_AIDER_BIN")
-    resolved_editor = editor or AiderEditor(aider_bin=injected_aider or None)
+    resolved_editor = editor or AiderEditor(
+        model=config.codegen_model(),
+        helper_model=config.codegen_helper_model(),
+        aider_bin=injected_aider or None,
+    )
     request = EditRequest(
         repo=_EVALUATION_REPOSITORY,
         project_scope=_EVALUATION_PROJECT_SCOPE,

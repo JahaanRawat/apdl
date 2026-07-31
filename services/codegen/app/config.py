@@ -11,7 +11,9 @@ import base64
 import binascii
 import logging
 import os
+import re
 import tempfile
+from pathlib import Path
 
 from app.editor.deadlines import (
     MAX_CODEGEN_JOB_BUDGET_SECONDS as _MAX_CODEGEN_JOB_BUDGET_SECONDS,
@@ -111,8 +113,13 @@ def github_webhook_secret() -> str:
 
 
 def codegen_model() -> str:
-    """LiteLLM model id the editor drives (any provider key present in env)."""
+    """Operator-only evaluation model; never used for tenant routing."""
     return os.getenv("CODEGEN_MODEL", _DEFAULT_MODEL)
+
+
+def codegen_evaluation_model() -> str:
+    """Model identity bound to operator evaluation/publication evidence."""
+    return os.getenv("CODEGEN_EVALUATION_MODEL", "").strip()
 
 
 def codegen_revision() -> str:
@@ -249,6 +256,31 @@ def codegen_sandbox_network() -> str:
     return os.getenv("CODEGEN_SANDBOX_NETWORK", "").strip()
 
 
+def codegen_llm_broker_dir() -> str:
+    """Shared host path for per-changeset controller/worker Unix sockets."""
+    value = os.getenv(
+        "CODEGEN_LLM_BROKER_DIR",
+        "/tmp/apdl-codegen-llm-broker",
+    )
+    path = Path(value)
+    if (
+        not value
+        or len(value) > 54
+        or value == "/"
+        or value.startswith("//")
+        or value.endswith("/")
+        or not path.is_absolute()
+        or re.fullmatch(r"/[A-Za-z0-9._/-]+", value) is None
+        or any(part in {".", ".."} for part in path.parts)
+        or path.as_posix() != value
+    ):
+        raise ValueError(
+            "CODEGEN_LLM_BROKER_DIR must be a canonical safe absolute path "
+            "of at most 54 characters"
+        )
+    return value
+
+
 def codegen_egress_policy_sha256() -> str:
     """Content identity of the shipped, evaluated worker egress policy."""
     raw = os.getenv("CODEGEN_EGRESS_POLICY_SHA256", "").strip()
@@ -291,13 +323,20 @@ def codegen_trusted_repos_only() -> bool:
 
 
 def codegen_helper_model() -> str:
-    """LiteLLM model id for the auxiliary calls (brief compile + diff review).
+    """Operator-only helper model used by the isolated evaluation process.
 
-    Defaults to the editing model so a single ``CODEGEN_MODEL`` configures the
-    whole pipeline; override with ``CODEGEN_HELPER_MODEL`` to run the auxiliary
-    steps on a cheaper/faster model than the editor.
+    Tenant requests never call this getter; project assignments provide their
+    exact helper model.
     """
     return os.getenv("CODEGEN_HELPER_MODEL") or codegen_model()
+
+
+def codegen_evaluation_helper_model() -> str:
+    """Operator-only helper model for the isolated evaluation process."""
+    return (
+        os.getenv("CODEGEN_EVALUATION_HELPER_MODEL", "").strip()
+        or codegen_evaluation_model()
+    )
 
 
 def _requested_codegen_llm_timeout() -> float:

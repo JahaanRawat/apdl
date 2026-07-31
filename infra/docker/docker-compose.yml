@@ -246,8 +246,7 @@ services:
       # Platform key for Codegen-owned project credentials. It is not a
       # provider credential and has no development default.
       CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64: ${CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:-}
-      # Coding-agent model (Aider via LiteLLM) + the provider key it needs.
-      CODEGEN_MODEL: ${CODEGEN_MODEL:-claude-opus-4-8}
+      CODEGEN_LLM_BROKER_DIR: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
       # Fail-closed rollout gate. Production PR stages require a read-only
       # operator evidence bundle bound to this exact model + revision.
       CODEGEN_REVISION: ${CODEGEN_REVISION:-development-unversioned}
@@ -264,12 +263,10 @@ services:
       # Auxiliary LLM passes around the edit (both default on, fail-open):
       # CODEGEN_BRIEF compiles the spec into a repo-grounded work order before
       # the edit; CODEGEN_REVIEW judges the diff against the spec before the
-      # push. CODEGEN_HELPER_MODEL overrides the model for these passes
-      # (defaults to CODEGEN_MODEL); CODEGEN_EDIT_RETRIES bounds the feedback
-      # rounds after a verify/review failure.
+      # push. Project assignments select the helper/editor models;
+      # CODEGEN_EDIT_RETRIES bounds feedback rounds.
       CODEGEN_BRIEF: ${CODEGEN_BRIEF:-true}
       CODEGEN_REVIEW: ${CODEGEN_REVIEW:-true}
-      CODEGEN_HELPER_MODEL: ${CODEGEN_HELPER_MODEL:-}
       CODEGEN_EDIT_RETRIES: ${CODEGEN_EDIT_RETRIES:-1}
       CODEGEN_REQUIRE_VERIFY: ${CODEGEN_REQUIRE_VERIFY:-false}
       CODEGEN_CONVENTIONS: ${CODEGEN_CONVENTIONS:-true}
@@ -280,25 +277,6 @@ services:
       CODEGEN_LLM_TIMEOUT: ${CODEGEN_LLM_TIMEOUT:-240}
       # May tighten but never exceed the 3000s GitHub write-token safety cap.
       CODEGEN_JOB_BUDGET: ${CODEGEN_JOB_BUDGET:-3000}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      COHERE_API_KEY: ${COHERE_API_KEY:-}
-      TOGETHERAI_API_KEY: ${TOGETHERAI_API_KEY:-}
-      FIREWORKS_API_KEY: ${FIREWORKS_API_KEY:-}
-      XAI_API_KEY: ${XAI_API_KEY:-}
-      OLLAMA_API_BASE: ${OLLAMA_API_BASE:-}
-      AZURE_API_KEY: ${AZURE_API_KEY:-}
-      AZURE_API_BASE: ${AZURE_API_BASE:-}
-      AZURE_API_VERSION: ${AZURE_API_VERSION:-}
       # The isolated worker is the fail-closed default. PR rollout stages also
       # use Docker --network none plus an attested proxy Unix socket in the
       # reviewed rollout overlay.

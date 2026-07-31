@@ -8,6 +8,7 @@ it explicitly and refuses to skip it.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from typing import Any
@@ -15,7 +16,13 @@ from typing import Any
 import asyncpg
 import pytest
 
+from app.editor.environment import codegen_tenant_behavior_configuration_sha256
+from app.evaluations.models import RiskLevel
 from app.llm.provider_catalog import catalog_model
+from app.publication import (
+    DEVELOPMENT_CODEGEN_REVISION,
+    build_development_publication_authorization,
+)
 from app.store.llm_connections import (
     LlmConnectionConflictError,
     ProjectConnectionStore,
@@ -29,6 +36,11 @@ from app.store.llm_credentials import (
     CredentialStoreError,
     ProjectCredentialStore,
     rotate_active_credentials,
+)
+from app.store.llm_routing import (
+    LlmRoutingUnavailableError,
+    assign_project_models,
+    prepare_llm_attempt,
 )
 
 
@@ -437,6 +449,193 @@ async def test_connection_mutations_are_authorized_and_optimistic() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_inventory_and_assignments_keep_exact_database_provenance() -> None:
+    assert POSTGRES_URL is not None
+    pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
+    project_id = _project_id("provenance")
+    credentials = ProjectCredentialStore(pool, CIPHER)
+    connections = ProjectConnectionStore(pool, credentials)
+    model = catalog_model("openai", "gpt-5.4-mini")
+    assert model is not None
+    try:
+        async with pool.acquire() as conn:
+            owner_id = await _create_operator_project(
+                conn,
+                project_id,
+                with_owner=True,
+            )
+        assert owner_id is not None
+        connected = await connections.put(
+            project_id,
+            "openai",
+            f"provenance-{uuid.uuid4().hex}",
+            (model,),
+            expected_version=0,
+            actor_user_id=owner_id,
+        )
+
+        async with pool.acquire() as conn:
+            with pytest.raises(asyncpg.ForeignKeyViolationError):
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        UPDATE codegen_project_provider_models
+                        SET catalog_version = 'codegen-provider-catalog@2'
+                        WHERE project_id = $1 AND provider = 'openai'
+                        """,
+                        project_id,
+                    )
+            with pytest.raises(
+                asyncpg.CheckViolationError,
+                match="must not retain model inventory",
+            ):
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        UPDATE codegen_project_provider_connections
+                        SET state = 'revoked', revoked_at = NOW()
+                        WHERE project_id = $1 AND provider = 'openai'
+                        """,
+                        project_id,
+                    )
+
+        assignments = await assign_project_models(
+            pool,
+            project_id=project_id,
+            editor_provider="openai",
+            editor_model_id=model.model_id,
+            helper_provider="openai",
+            helper_model_id=model.model_id,
+            actor="test:model-provenance",
+        )
+        assert tuple(item.role for item in assignments) == ("editor", "helper")
+        refreshed = await connections.refresh(
+            project_id,
+            "openai",
+            (model,),
+            expected_version=connected.version,
+            expected_credential_id=connected.credential_id,
+            actor_user_id=owner_id,
+        )
+        assert (refreshed.version, refreshed.inventory_version) == (2, 2)
+
+        async with pool.acquire() as conn:
+            refreshed_assignments = await conn.fetch(
+                """
+                SELECT role, assignment_version, connection_version,
+                       inventory_version, catalog_version
+                FROM codegen_project_model_assignments
+                WHERE project_id = $1
+                ORDER BY role
+                """,
+                project_id,
+            )
+            assert [tuple(row.values()) for row in refreshed_assignments] == [
+                ("editor", 2, 2, 2, "codegen-provider-catalog@1"),
+                ("helper", 2, 2, 2, "codegen-provider-catalog@1"),
+            ]
+            with pytest.raises(asyncpg.CheckViolationError):
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        UPDATE codegen_project_model_assignments
+                        SET catalog_version = 'codegen-provider-catalog@2'
+                        WHERE project_id = $1 AND role = 'editor'
+                        """,
+                        project_id,
+                    )
+            with pytest.raises(
+                asyncpg.CheckViolationError,
+                match="stale model assignment",
+            ):
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        UPDATE codegen_project_provider_models
+                        SET supported_roles = ARRAY['helper']::TEXT[]
+                        WHERE project_id = $1 AND provider = 'openai'
+                        """,
+                        project_id,
+                    )
+            with pytest.raises(
+                (
+                    asyncpg.CheckViolationError,
+                    asyncpg.ForeignKeyViolationError,
+                )
+            ):
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        UPDATE codegen_project_provider_connections
+                        SET version = 3,
+                            inventory_version = 3,
+                            catalog_version = 'codegen-provider-catalog@2'
+                        WHERE project_id = $1 AND provider = 'openai'
+                        """,
+                        project_id,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE codegen_project_provider_models
+                        SET connection_version = 3,
+                            inventory_version = 3,
+                            catalog_version = 'codegen-provider-catalog@2'
+                        WHERE project_id = $1 AND provider = 'openai'
+                        """,
+                        project_id,
+                    )
+
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    UPDATE codegen_project_provider_connections
+                    SET version = 3,
+                        inventory_version = 3,
+                        catalog_version = 'codegen-provider-catalog@2'
+                    WHERE project_id = $1 AND provider = 'openai'
+                    """,
+                    project_id,
+                )
+                await conn.execute(
+                    """
+                    UPDATE codegen_project_provider_models
+                    SET connection_version = 3,
+                        inventory_version = 3,
+                        catalog_version = 'codegen-provider-catalog@2'
+                    WHERE project_id = $1 AND provider = 'openai'
+                    """,
+                    project_id,
+                )
+                await conn.execute(
+                    """
+                    UPDATE codegen_project_model_assignments
+                    SET assignment_version = assignment_version + 1,
+                        connection_version = 3,
+                        inventory_version = 3,
+                        catalog_version = 'codegen-provider-catalog@2'
+                    WHERE project_id = $1 AND provider = 'openai'
+                    """,
+                    project_id,
+                )
+            provenance = await conn.fetch(
+                """
+                SELECT role, assignment_version, connection_version,
+                       inventory_version, catalog_version
+                FROM codegen_project_model_assignments
+                WHERE project_id = $1
+                ORDER BY role
+                """,
+                project_id,
+            )
+        assert [tuple(row.values()) for row in provenance] == [
+            ("editor", 3, 3, 3, "codegen-provider-catalog@2"),
+            ("helper", 3, 3, 3, "codegen-provider-catalog@2"),
+        ]
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
 async def test_key_rotation_requires_barriers_and_reencrypts_atomically() -> None:
     assert POSTGRES_URL is not None
     pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=3)
@@ -640,5 +839,512 @@ async def test_key_rotation_rolls_back_after_mid_write_failure() -> None:
             assert (
                 await old_store.load_active(project_id, "xai")
             ).credential_version == 1
+    finally:
+        await pool.close()
+
+
+def _assignment(role: str) -> dict[str, Any]:
+    return {
+        "schema_version": "codegen_llm_assignment_snapshot@1",
+        "role": role,
+        "provider": "openai",
+        "model_id": "gpt-5.4-mini",
+        "assignment_version": 1,
+        "connection_version": 1,
+        "inventory_version": 1,
+        "catalog_version": "codegen-provider-catalog@1",
+        "context_window_tokens": 400_000,
+        "supports_tool_calling": True,
+        "supports_structured_output": True,
+        "input_cost_per_million_tokens_usd_micros": 250_000,
+        "output_cost_per_million_tokens_usd_micros": 2_000_000,
+    }
+
+
+def _snapshot(
+    project_id: str,
+    grant_id: str,
+    repository_id: int,
+    installation_id: int,
+    repository_full_name: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "codegen_llm_execution_snapshot@1",
+        "project_id": project_id,
+        "repository_grant_id": grant_id,
+        "repository_id": repository_id,
+        "repository_installation_id": installation_id,
+        "repository_full_name": repository_full_name,
+        "codegen_revision": "live-postgres-test",
+        "behavior_configuration_sha256": "a" * 64,
+        "rollout_stage": "shadow",
+        "assignments": [_assignment("editor"), _assignment("helper")],
+    }
+
+
+async def _insert_changeset(
+    conn: asyncpg.Connection,
+    *,
+    changeset_id: str,
+    project_id: str,
+    grant_id: str,
+    repository_id: int,
+    installation_id: int,
+    repository_full_name: str,
+    snapshot: dict[str, Any] | str,
+) -> None:
+    encoded_snapshot = (
+        snapshot
+        if isinstance(snapshot, str)
+        else json.dumps(snapshot)
+    )
+    await conn.execute(
+        """
+        INSERT INTO codegen_changesets (
+            changeset_id, project_id, status, task,
+            repository_grant_id, repository_id,
+            repository_installation_id, repository_full_name,
+            idempotency_key, idempotency_request_sha256,
+            llm_execution_snapshot
+        ) VALUES (
+            $1, $2, 'editing', '{"context":{}}'::JSONB,
+            $3, $4, $5, $6, $7, $8, $9::JSONB
+        )
+        """,
+        changeset_id,
+        project_id,
+        grant_id,
+        repository_id,
+        installation_id,
+        repository_full_name,
+        f"live:{changeset_id}",
+        uuid.uuid4().hex + uuid.uuid4().hex,
+        encoded_snapshot,
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_and_attempt_constraints_are_enforced_by_postgres() -> None:
+    assert POSTGRES_URL is not None
+    conn = await asyncpg.connect(POSTGRES_URL)
+    project_id = _project_id("route")
+    grant_id = f"ghg_{uuid.uuid4().hex}"
+    repository_id = uuid.uuid4().int % 1_000_000_000 + 1
+    installation_id = uuid.uuid4().int % 1_000_000_000 + 1
+    repository_full_name = f"apdl/{project_id}"
+    changeset_id = f"changeset-{uuid.uuid4().hex}"
+    try:
+        migrated = await conn.fetchrow(
+            """
+            SELECT
+                to_regclass(
+                    'public.codegen_project_provider_credentials'
+                )::TEXT AS credentials,
+                to_regclass(
+                    'public.codegen_project_provider_connections'
+                )::TEXT AS connections,
+                to_regclass('public.codegen_llm_attempts')::TEXT AS attempts
+            """
+        )
+        assert dict(migrated) == {
+            "credentials": "codegen_project_provider_credentials",
+            "connections": "codegen_project_provider_connections",
+            "attempts": "codegen_llm_attempts",
+        }
+        await _create_operator_project(conn, project_id)
+        await conn.execute(
+            """
+            INSERT INTO github_repository_grants (
+                grant_id, project_id, installation_id, repository_id,
+                repository_full_name, status, authorization_source,
+                authorization_subject, verified_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, 'active', 'operator',
+                'test:codegen-project-llm-postgres', NOW()
+            )
+            """,
+            grant_id,
+            project_id,
+            installation_id,
+            repository_id,
+            repository_full_name,
+        )
+        await conn.execute(
+            """
+            INSERT INTO codegen_connections (project_id, grant_id)
+            VALUES ($1, $2)
+            """,
+            project_id,
+            grant_id,
+        )
+        snapshot = _snapshot(
+            project_id,
+            grant_id,
+            repository_id,
+            installation_id,
+            repository_full_name,
+        )
+        await _insert_changeset(
+            conn,
+            changeset_id=changeset_id,
+            project_id=project_id,
+            grant_id=grant_id,
+            repository_id=repository_id,
+            installation_id=installation_id,
+            repository_full_name=repository_full_name,
+            snapshot=snapshot,
+        )
+
+        malformed = json.loads(json.dumps(snapshot))
+        malformed["assignments"][0]["model_id"] = 42
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_changeset(
+                conn,
+                changeset_id=f"malformed-{uuid.uuid4().hex}",
+                project_id=project_id,
+                grant_id=grant_id,
+                repository_id=repository_id,
+                installation_id=installation_id,
+                repository_full_name=repository_full_name,
+                snapshot=malformed,
+            )
+        malformed_top_level = json.loads(json.dumps(snapshot))
+        malformed_top_level["codegen_revision"] = 54
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_changeset(
+                conn,
+                changeset_id=f"numeric-top-level-{uuid.uuid4().hex}",
+                project_id=project_id,
+                grant_id=grant_id,
+                repository_id=repository_id,
+                installation_id=installation_id,
+                repository_full_name=repository_full_name,
+                snapshot=malformed_top_level,
+            )
+        for number in ("1.2", "1.2e0"):
+            encoded = json.dumps(
+                snapshot,
+                separators=(",", ":"),
+            ).replace(
+                '"assignment_version":1',
+                f'"assignment_version":{number}',
+                1,
+            )
+            with pytest.raises(asyncpg.CheckViolationError):
+                await _insert_changeset(
+                    conn,
+                    changeset_id=f"noninteger-{uuid.uuid4().hex}",
+                    project_id=project_id,
+                    grant_id=grant_id,
+                    repository_id=repository_id,
+                    installation_id=installation_id,
+                    repository_full_name=repository_full_name,
+                    snapshot=encoded,
+                )
+        changed = json.loads(json.dumps(snapshot))
+        changed["codegen_revision"] = "changed-after-admission"
+        with pytest.raises(
+            asyncpg.CheckViolationError,
+            match="execution snapshot is immutable",
+        ):
+            await conn.execute(
+                """
+                UPDATE codegen_changesets
+                SET llm_execution_snapshot = $2::JSONB
+                WHERE changeset_id = $1
+                """,
+                changeset_id,
+                json.dumps(changed),
+            )
+
+        attempt_id = uuid.uuid4()
+        await conn.execute(
+            """
+            INSERT INTO codegen_llm_attempts (
+                attempt_id, project_id, changeset_id, phase, role,
+                attempt_sequence, provider, model_id, assignment_version,
+                status, finished_at, error_classification
+            ) VALUES (
+                $1, $2, $3, 'brief', 'helper', 1, 'openai',
+                'gpt-5.4-mini', 1, 'blocked', NOW(),
+                'changeset_unavailable'
+            )
+            """,
+            attempt_id,
+            project_id,
+            changeset_id,
+        )
+        for provider, model_id, assignment_version in (
+            ("anthropic", "gpt-5.4-mini", 1),
+            ("openai", "gpt-5.4-nano", 1),
+            ("openai", "gpt-5.4-mini", 2),
+        ):
+            with pytest.raises(
+                asyncpg.CheckViolationError,
+                match="must match its immutable execution snapshot",
+            ):
+                await conn.execute(
+                    """
+                    INSERT INTO codegen_llm_attempts (
+                        project_id, changeset_id, phase, role,
+                        attempt_sequence, provider, model_id,
+                        assignment_version, status, finished_at,
+                        error_classification
+                    ) VALUES (
+                        $1, $2, 'brief', 'helper', 2, $3, $4, $5,
+                        'blocked', NOW(), 'changeset_unavailable'
+                    )
+                    """,
+                    project_id,
+                    changeset_id,
+                    provider,
+                    model_id,
+                    assignment_version,
+                )
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                """
+                INSERT INTO codegen_llm_attempts (
+                    project_id, changeset_id, phase, role, attempt_sequence,
+                    provider, model_id, assignment_version, status
+                ) VALUES (
+                    $1, $2, 'edit', 'editor', 1, 'openai',
+                    'gpt-5.4-mini', 1, 'prepared'
+                )
+                """,
+                project_id,
+                changeset_id,
+            )
+
+        executable_credential_id = uuid.uuid4()
+        executable_secret = f"attempt-secret-{uuid.uuid4().hex}"
+        encrypted = CIPHER.encrypt(
+            executable_secret,
+            credential_id=executable_credential_id,
+            project_id=project_id,
+            provider="openai",
+        )
+        await conn.execute(
+            """
+            INSERT INTO codegen_project_provider_credentials (
+                credential_id, project_id, provider, credential_version,
+                state, ciphertext, nonce, algorithm, schema_version,
+                encryption_key_id, created_by_actor
+            ) VALUES (
+                $1, $2, 'openai', 1, 'active', $3, $4, 'AES-256-GCM',
+                'codegen_llm_provider_credential@1', $5,
+                'test:attempt-credential'
+            )
+            """,
+            executable_credential_id,
+            project_id,
+            encrypted.ciphertext,
+            encrypted.nonce,
+            CIPHER.key_id,
+        )
+        executable_attempt_id = uuid.uuid4()
+        await conn.execute(
+            """
+            INSERT INTO codegen_llm_attempts (
+                attempt_id, project_id, changeset_id, phase, role,
+                attempt_sequence, provider, model_id, assignment_version,
+                credential_id, credential_version, status
+            ) VALUES (
+                $1, $2, $3, 'edit', 'editor', 1, 'openai',
+                'gpt-5.4-mini', 1, $4, 1, 'prepared'
+            )
+            """,
+            executable_attempt_id,
+            project_id,
+            changeset_id,
+            executable_credential_id,
+        )
+        await conn.execute(
+            """
+            UPDATE codegen_llm_attempts
+            SET status = 'in_flight', egress_at = NOW()
+            WHERE attempt_id = $1
+            """,
+            executable_attempt_id,
+        )
+        await conn.execute(
+            """
+            UPDATE codegen_llm_attempts
+            SET status = 'cancelled', finished_at = NOW(), latency_ms = 0,
+                error_classification = 'cancelled'
+            WHERE attempt_id = $1
+            """,
+            executable_attempt_id,
+        )
+        assert await conn.fetchval(
+            "SELECT status FROM codegen_llm_attempts WHERE attempt_id = $1",
+            executable_attempt_id,
+        ) == "cancelled"
+        with pytest.raises(
+            asyncpg.CheckViolationError,
+            match="Terminal Codegen LLM attempts are immutable",
+        ):
+            await conn.execute(
+                """
+                UPDATE codegen_llm_attempts
+                SET error_classification = 'unknown'
+                WHERE attempt_id = $1
+                """,
+                attempt_id,
+            )
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(
+                """
+                INSERT INTO codegen_llm_attempts (
+                    project_id, changeset_id, phase, role, attempt_sequence,
+                    provider, model_id, assignment_version, status,
+                    egress_at, finished_at, latency_ms, error_classification
+                ) VALUES (
+                    $1, $2, 'review', 'helper', 1, 'openai',
+                    'gpt-5.4-mini', 1, 'cancelled', NOW(), NOW(), 0,
+                    'cancelled'
+                )
+                """,
+                project_id,
+                changeset_id,
+            )
+
+        unauthorized_project_id = _project_id("noauth")
+        unauthorized_changeset_id = f"unauthorized-{uuid.uuid4().hex}"
+        async with conn.transaction():
+            await conn.execute("SET LOCAL session_replication_role = replica")
+            await conn.execute(
+                "INSERT INTO admin_projects (project_id) VALUES ($1)",
+                unauthorized_project_id,
+            )
+            await conn.execute(
+                """
+                INSERT INTO codegen_changesets (
+                    changeset_id, project_id, task,
+                    repository_target_quarantined, idempotency_key,
+                    idempotency_request_sha256
+                ) VALUES (
+                    $1, $2, '{"context":{}}'::JSONB, TRUE, $3, $4
+                )
+                """,
+                unauthorized_changeset_id,
+                unauthorized_project_id,
+                f"live:{unauthorized_changeset_id}",
+                uuid.uuid4().hex + uuid.uuid4().hex,
+            )
+        with pytest.raises(
+            asyncpg.InsufficientPrivilegeError,
+            match="requires an operator-provisioned or explicitly authorized project",
+        ):
+            await conn.execute(
+                """
+                INSERT INTO codegen_llm_attempts (
+                    project_id, changeset_id, phase, role, attempt_sequence,
+                    provider, model_id, assignment_version, status
+                ) VALUES (
+                    $1, $2, 'brief', 'helper', 1, 'openai',
+                    'gpt-5.4-mini', 1, 'prepared'
+                )
+                """,
+                unauthorized_project_id,
+                unauthorized_changeset_id,
+            )
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_attempt_audits_execution_authority_loss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert POSTGRES_URL is not None
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "development_pr")
+    monkeypatch.setenv("CODEGEN_REVISION", DEVELOPMENT_CODEGEN_REVISION)
+    pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=2)
+    project_id = _project_id("blocked")
+    changeset_id = f"blocked-{uuid.uuid4().hex}"
+    grant_id = f"ghg_{uuid.uuid4().hex}"
+    repository_id = uuid.uuid4().int % 1_000_000_000 + 1
+    installation_id = uuid.uuid4().int % 1_000_000_000 + 1
+    repository_full_name = f"apdl/{project_id}"
+    snapshot = _snapshot(
+        project_id,
+        grant_id,
+        repository_id,
+        installation_id,
+        repository_full_name,
+    )
+    snapshot["codegen_revision"] = DEVELOPMENT_CODEGEN_REVISION
+    snapshot["behavior_configuration_sha256"] = (
+        codegen_tenant_behavior_configuration_sha256()
+    )
+    snapshot["rollout_stage"] = "development_pr"
+    authorization = build_development_publication_authorization(
+        risk=RiskLevel.low,
+        model="openai/gpt-5.4-mini",
+        codegen_revision=DEVELOPMENT_CODEGEN_REVISION,
+    )
+    try:
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SET LOCAL session_replication_role = replica")
+                await conn.execute(
+                    "INSERT INTO admin_projects (project_id) VALUES ($1)",
+                    project_id,
+                )
+                await _insert_changeset(
+                    conn,
+                    changeset_id=changeset_id,
+                    project_id=project_id,
+                    grant_id=grant_id,
+                    repository_id=repository_id,
+                    installation_id=installation_id,
+                    repository_full_name=repository_full_name,
+                    snapshot=snapshot,
+                )
+                await conn.execute(
+                    """
+                    UPDATE codegen_changesets
+                    SET publication_authorization = $2::JSONB
+                    WHERE changeset_id = $1
+                    """,
+                    changeset_id,
+                    authorization.model_dump_json(),
+                )
+
+        with pytest.raises(
+            LlmRoutingUnavailableError,
+            match="Project execution authority is unavailable",
+        ):
+            await prepare_llm_attempt(
+                pool,
+                ProjectCredentialStore(pool, CIPHER),
+                changeset_id=changeset_id,
+                phase="brief",
+            )
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT project_id, changeset_id, phase, role, status,
+                       egress_at, credential_id, credential_version,
+                       error_classification
+                FROM codegen_llm_attempts
+                WHERE changeset_id = $1
+                """,
+                changeset_id,
+            )
+        assert row is not None
+        assert dict(row) == {
+            "project_id": project_id,
+            "changeset_id": changeset_id,
+            "phase": "brief",
+            "role": "helper",
+            "status": "blocked",
+            "egress_at": None,
+            "credential_id": None,
+            "credential_version": None,
+            "error_classification": "execution_authority_unavailable",
+        }
     finally:
         await pool.close()

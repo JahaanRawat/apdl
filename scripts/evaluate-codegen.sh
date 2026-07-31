@@ -16,7 +16,7 @@ if [[ "$revision" == "$git_head" ]] \
   echo "The worktree is dirty, so Git HEAD is not a complete candidate identity. Commit the evaluated source or set a distinct explicit CODEGEN_REVISION." >&2
   exit 2
 fi
-model="${CODEGEN_MODEL:-claude-opus-4-8}"
+model="${CODEGEN_EVALUATION_MODEL:-anthropic/claude-opus-5}"
 policy_path="${CODEGEN_ROLLOUT_POLICY:-$ROOT_DIR/services/codegen/app/evaluations/rollout_policy_v4.json}"
 artifact_dir="${CODEGEN_EVALUATION_ARTIFACT_DIR:-$ROOT_DIR/local-files/codegen-rollouts/$revision}"
 controller_image="${CODEGEN_EVALUATION_CONTROLLER_IMAGE:-apdl-codegen-evaluation-controller:$revision}"
@@ -39,7 +39,7 @@ if [[ ! "$revision" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
   exit 2
 fi
 if [[ -z "$model" ]]; then
-  echo "CODEGEN_MODEL must not be empty." >&2
+  echo "CODEGEN_EVALUATION_MODEL must not be empty." >&2
   exit 2
 fi
 if [[ ! -f "$policy_path" ]]; then
@@ -226,7 +226,7 @@ docker_args=(
 # Explicit allowlist: never forward GitHub App material, installation tokens,
 # PostgreSQL/Redis URLs, APDL credentials, SSH agents, or the caller's full .env.
 forward_env=(
-  CODEGEN_HELPER_MODEL
+  CODEGEN_EVALUATION_HELPER_MODEL
   CODEGEN_AIDER_BIN
   CODEGEN_BRIEF
   CODEGEN_REVIEW
@@ -244,29 +244,24 @@ forward_env=(
   CODEGEN_EVALUATION_MEMORY
   CODEGEN_EVALUATION_CPUS
   CODEGEN_EVALUATION_PIDS
-  OPENAI_API_KEY
-  OPENAI_API_BASE
-  OPENAI_BASE_URL
-  ANTHROPIC_API_KEY
-  ANTHROPIC_BASE_URL
-  GOOGLE_API_KEY
-  GEMINI_API_KEY
-  OPENROUTER_API_KEY
-  MISTRAL_API_KEY
-  GROQ_API_KEY
-  DEEPSEEK_API_KEY
-  COHERE_API_KEY
-  TOGETHERAI_API_KEY
-  FIREWORKS_API_KEY
-  XAI_API_KEY
-  OLLAMA_API_BASE
-  AZURE_API_KEY
-  AZURE_API_BASE
-  AZURE_API_VERSION
 )
 for name in "${forward_env[@]}"; do
   if [[ -n "${!name:-}" ]]; then
-    docker_args+=(--env "$name")
+    target_name="$name"
+    if [[ "$name" == "CODEGEN_EVALUATION_HELPER_MODEL" ]]; then
+      target_name="CODEGEN_HELPER_MODEL"
+    fi
+    docker_args+=(--env "$target_name=${!name}")
+  fi
+done
+
+for provider in ANTHROPIC OPENAI GOOGLE XAI; do
+  source_name="CODEGEN_EVALUATION_${provider}_API_KEY"
+  if [[ -n "${!source_name:-}" ]]; then
+    target_name="${provider}_API_KEY"
+    printf -v "$target_name" '%s' "${!source_name}"
+    export "$target_name"
+    docker_args+=(--env "$target_name")
   fi
 done
 

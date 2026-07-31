@@ -74,7 +74,10 @@ MODEL_PROVIDER_CREDENTIAL_ENV: tuple[str, ...] = (
 MODEL_PROVIDER_ROUTING_ENV: tuple[str, ...] = (
     "OPENAI_API_BASE",
     "OPENAI_BASE_URL",
+    "ANTHROPIC_API_BASE",
     "ANTHROPIC_BASE_URL",
+    "GEMINI_API_BASE",
+    "XAI_API_BASE",
     "OLLAMA_API_BASE",
     "AZURE_API_BASE",
     "AZURE_API_VERSION",
@@ -436,6 +439,39 @@ def codegen_behavior_configuration_sha256(
 ) -> str:
     """Hash the canonical effective behavior configuration as strict JSON."""
     payload = normalized_codegen_behavior_configuration(environment)
+    canonical = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def codegen_tenant_behavior_configuration_sha256(
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Hash tenant-serving behavior without evaluation-only model routing.
+
+    The immutable changeset snapshot records editor/helper assignments
+    separately. Deployment model names and provider-routing variables belong
+    only to the isolated evaluation harness and therefore cannot alter a
+    tenant changeset's behavior identity.
+    """
+    source = dict(os.environ) if environment is None else dict(environment)
+    for name in (
+        "CODEGEN_MODEL",
+        "CODEGEN_HELPER_MODEL",
+        *MODEL_PROVIDER_ENV,
+        *MODEL_PROVIDER_ROUTING_ENV,
+    ):
+        source.pop(name, None)
+    payload = normalized_codegen_behavior_configuration(source)
+    payload["schema_version"] = "codegen_tenant_behavior_configuration@1"
+    payload.pop("model", None)
+    payload.pop("helper_model", None)
+    payload.pop("provider_routing", None)
     canonical = json.dumps(
         payload,
         allow_nan=False,

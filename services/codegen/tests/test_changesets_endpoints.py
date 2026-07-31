@@ -54,7 +54,9 @@ def _client(pool: FakePool) -> AsyncClient:
 
 @pytest.mark.asyncio
 async def test_create_changeset_requires_connection():
-    async with _client(FakePool()) as client:
+    pool = FakePool()
+    pool.add_llm_connection("demo")
+    async with _client(pool) as client:
         resp = await client.post(
             "/v1/changesets",
             json={

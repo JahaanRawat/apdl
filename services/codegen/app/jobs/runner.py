@@ -29,6 +29,7 @@ from app.jobs.pr_publication import (
     resume_pull_request_publication,
 )
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
+from app.llm.provider_catalog import runtime_model
 from app.models.observations import ExternalCIStatus
 from app.models.pr_publication import PublicationIntentRecorded
 from app.publication import (
@@ -290,8 +291,23 @@ async def _execute_changeset_job(
             effective_safety_policy_sha256=(effective_safety_policy.canonical_digest()),
         )
         risk = changeset.controls.risk_level
+        llm_snapshot = changeset.llm_execution_snapshot
+        if llm_snapshot is None:
+            raise RuntimeError(
+                "Changeset is missing immutable LLM execution authority"
+            )
+        editor_assignment = llm_snapshot.assignment("editor")
+        helper_assignment = llm_snapshot.assignment("helper")
         authorization = publication_gate.authorize(
             risk=risk,
+            model=runtime_model(
+                editor_assignment.provider,
+                editor_assignment.model_id,
+            ).litellm_model,
+            helper_model=runtime_model(
+                helper_assignment.provider,
+                helper_assignment.model_id,
+            ).litellm_model,
             canary_identity=f"{changeset.project_id}:{connection.repository_id}",
         )
         await store.set_publication_authorization(pool, changeset_id, authorization)
@@ -325,6 +341,7 @@ async def _execute_changeset_job(
         async with mint_read_token(changeset_id) as token:
             result = await editor.implement(
                 EditRequest(
+                    changeset_id=changeset_id,
                     repo=connection.repository_full_name,
                     project_scope=changeset.project_id,
                     base_branch=base_branch,
@@ -580,7 +597,10 @@ async def _execute_changeset_job(
             return
         try:
             await store.transition_changeset(
-                pool, changeset_id, ChangesetStatus.error, error=str(exc)
+                pool,
+                changeset_id,
+                ChangesetStatus.error,
+                error=f"Changeset execution failed with {type(exc).__name__}",
             )
         except Exception:
             logger.exception("Could not mark changeset %s errored", changeset_id)

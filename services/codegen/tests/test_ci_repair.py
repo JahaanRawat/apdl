@@ -16,7 +16,8 @@ from app.editor.prompts import (
     PROMPT_TRANSCRIPT_MAX_BYTES,
     serialized_prompt_bytes,
 )
-from app.evaluations.models import RiskLevel
+from app.evaluations.models import RiskLevel, RolloutStage
+from app.evaluations.publication import PublicationAuthorization
 from app.github.publisher import UnsafeCandidateTreeError
 from app.jobs.repair import repair_failed_ci as _repair_failed_ci
 from app.models.changeset import ChangesetStatus
@@ -63,10 +64,37 @@ from app.store.observations import (
 from app.store.runtime_evidence import apply_runtime_evidence_observation
 from tests.fakes import FakePool
 from tests.publisher_fakes import FakeBranchPublisher
-from tests.publication_fakes import (
-    allowing_publication_gate,
-    denying_publication_gate,
-)
+from tests.publication_fakes import FakePublicationGate
+
+
+class _ModelBoundPublicationGate(FakePublicationGate):
+    """Build fake evidence for the exact editor model frozen on the changeset."""
+
+    def authorize(
+        self,
+        *,
+        risk: RiskLevel,
+        model: str,
+        helper_model: str,
+        canary_identity: str,
+    ) -> PublicationAuthorization:
+        authorization = super().authorize(
+            risk=risk,
+            model=model,
+            helper_model=helper_model,
+            canary_identity=canary_identity,
+        )
+        return authorization
+
+
+def allowing_publication_gate(
+    stage: RolloutStage = RolloutStage.low_risk_canary,
+) -> _ModelBoundPublicationGate:
+    return _ModelBoundPublicationGate(stage=stage)
+
+
+def denying_publication_gate() -> _ModelBoundPublicationGate:
+    return _ModelBoundPublicationGate(allowed=False)
 
 
 async def repair_failed_ci(*args, publication_gate=None, **kwargs):
@@ -814,9 +842,11 @@ async def test_editor_exception_finishes_claim_as_exhausted_event(monkeypatch):
     )
     assert final.status is ChangesetStatus.pr_open
     assert final.ci_remediation_status is CIRemediationStatus.exhausted
-    assert "sandbox disappeared" in (final.error or "")
+    assert final.error == "CI repair editor failed with RuntimeError"
+    assert "sandbox disappeared" not in final.error
     assert exhausted.finished_at is not None
-    assert "sandbox disappeared" in (exhausted.error or "")
+    assert exhausted.error == "CI repair editor failed with RuntimeError"
+    assert "sandbox disappeared" not in exhausted.error
 
 
 @pytest.mark.asyncio

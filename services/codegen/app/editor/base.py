@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
+from app.llm.contracts import LlmExecutionAuthority
 from app.requirements.models import RequirementLedger
 from app.runtime.models import (
     GeneratedRuntimeWorkflowAttestation,
@@ -50,6 +51,9 @@ class EditRequest:
     token: str  # short-lived read-only installation token, scoped to this repo
     title: str
     spec: str
+    #: Durable controller identity used for project LLM attempt binding.
+    #: Production callers always provide it; evaluation-only callers may omit it.
+    changeset_id: str = ""
     #: Tenant boundary for private dependency-contract caches. Legacy/custom
     #: callers may omit it; the editor then scopes evidence to ``repo``.
     project_scope: str = ""
@@ -91,6 +95,13 @@ class EditRequest:
     #: Risk controls whether unavailable/unparseable auxiliary model gates may
     #: fail open. Only low-risk changes may skip them.
     risk_level: str = "low"
+    #: Ephemeral per-call broker capability supplied by the controller. It
+    #: contains no provider credential; production editors exchange it for one
+    #: phase-scoped lease immediately before each provider invocation.
+    llm_execution: LlmExecutionAuthority | None = field(
+        default=None,
+        repr=False,
+    )
 
 
 @dataclass

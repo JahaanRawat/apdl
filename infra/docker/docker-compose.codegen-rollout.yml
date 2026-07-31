@@ -10,6 +10,8 @@ services:
       - "${CODEGEN_DOCKER_SOCKET_GID:?set CODEGEN_DOCKER_SOCKET_GID}"
     environment:
       CODEGEN_REVISION: ${CODEGEN_REVISION:?set the evaluated CODEGEN_REVISION}
+      CODEGEN_EVALUATION_MODEL: ${CODEGEN_EVALUATION_MODEL:?set the evaluated model identity}
+      CODEGEN_EVALUATION_HELPER_MODEL: ${CODEGEN_EVALUATION_HELPER_MODEL:-}
       CODEGEN_CONTROLLER_IMAGE_ID: ${CODEGEN_CONTROLLER_IMAGE:?set the evaluated controller image ID}
       CODEGEN_ROLLOUT_STAGE: ${CODEGEN_ROLLOUT_STAGE:-reviewed_pr}
       CODEGEN_ROLLOUT_AUTHORIZATION_PATH: /run/apdl/codegen/publication-bundle.json
@@ -25,6 +27,7 @@ services:
       # multi-tenant transport contract is introduced.
       CODEGEN_MAX_CONCURRENT_JOBS: "1"
       DOCKER_HOST: unix:///var/run/docker.sock
+      CODEGEN_LLM_BROKER_DIR: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
       # Preserve every behavior-affecting setting admitted by the candidate's
       # canonical environment contract. Defaults mirror app.config; explicit
       # values must be the same ones used for evaluation under this revision.
@@ -37,28 +40,13 @@ services:
       CODEGEN_TIMEOUT: ${CODEGEN_TIMEOUT:-1800}
       CODEGEN_GIT_TIMEOUT: ${CODEGEN_GIT_TIMEOUT:-300}
       CODEGEN_LLM_TIMEOUT: ${CODEGEN_LLM_TIMEOUT:-240}
-      # The base stack carries the primary providers. These additional LiteLLM
-      # variables keep reviewed deployment aligned with the evaluation allowlist.
-      OPENAI_API_BASE: ${OPENAI_API_BASE:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      COHERE_API_KEY: ${COHERE_API_KEY:-}
-      TOGETHERAI_API_KEY: ${TOGETHERAI_API_KEY:-}
-      FIREWORKS_API_KEY: ${FIREWORKS_API_KEY:-}
-      XAI_API_KEY: ${XAI_API_KEY:-}
-      OLLAMA_API_BASE: ${OLLAMA_API_BASE:-}
-      AZURE_API_KEY: ${AZURE_API_KEY:-}
-      AZURE_API_BASE: ${AZURE_API_BASE:-}
-      AZURE_API_VERSION: ${AZURE_API_VERSION:-}
     volumes:
       - type: bind
         source: ${CODEGEN_DOCKER_SOCKET:?set the absolute Docker socket path}
         target: /var/run/docker.sock
+      - type: bind
+        source: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
+        target: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
       - type: bind
         source: ${CODEGEN_ROLLOUT_BUNDLE_PATH:?set the absolute publication bundle path}
         target: /run/apdl/codegen/publication-bundle.json

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 from dataclasses import dataclass, field
 from time import monotonic
@@ -16,14 +15,15 @@ from app.config import (
     github_app_id,
     github_app_private_key,
 )
-from app.editor.environment import (
-    ModelProviderConfigurationError,
-    resolve_model_provider_environment,
-)
 from app.evaluations.models import RolloutStage
 from app.github.app_auth import build_app_jwt
 from app.safety.killswitch import automation_enabled
 from app.store import connections as connections_store
+from app.store.llm_credentials import (
+    CredentialCipher,
+    CredentialConfigurationError,
+)
+from app.store.llm_routing import project_model_pair_matches_rollout_evidence
 
 CapabilityState = Literal["available", "disabled"]
 CheckState = Literal["ready", "blocked"]
@@ -62,6 +62,17 @@ class CapabilityChecks(BaseModel):
     runtime: CheckState
 
 
+class ProjectLlmAssignmentCapability(BaseModel):
+    """Secret-free current assignment metadata for the authenticated project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["editor", "helper"]
+    provider: Literal["anthropic", "openai", "google", "xai"]
+    model_id: str
+    connection_state: Literal["active"]
+
+
 class ChangesetCreationCapability(BaseModel):
     """Authenticated project-specific capability response."""
 
@@ -71,6 +82,7 @@ class ChangesetCreationCapability(BaseModel):
     changeset_creation: CapabilityState
     reasons: list[CapabilityReason]
     checks: CapabilityChecks
+    llm_assignments: list[ProjectLlmAssignmentCapability]
 
 
 @dataclass(frozen=True)
@@ -123,10 +135,53 @@ class _RuntimeProbeState:
 
 def _provider_configured() -> bool:
     try:
-        resolve_model_provider_environment(os.environ)
-    except ModelProviderConfigurationError:
+        CredentialCipher.from_environment()
+    except CredentialConfigurationError:
         return False
     return True
+
+
+async def _project_llm_assignments(
+    pool: Any, project_id: str
+) -> list[ProjectLlmAssignmentCapability]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT assignment.role, assignment.provider, assignment.model_id,
+                   connection.state AS connection_state
+            FROM codegen_project_model_assignments AS assignment
+            JOIN codegen_project_provider_connections AS connection
+              ON connection.project_id = assignment.project_id
+             AND connection.provider = assignment.provider
+             AND connection.version = assignment.connection_version
+             AND connection.inventory_version = assignment.inventory_version
+             AND connection.state = 'active'
+            JOIN codegen_project_provider_models AS model
+              ON model.project_id = assignment.project_id
+             AND model.provider = assignment.provider
+             AND model.model_id = assignment.model_id
+             AND model.connection_version = connection.version
+             AND model.inventory_version = connection.inventory_version
+             AND assignment.role = ANY(model.supported_roles)
+            JOIN codegen_project_provider_credentials AS credential
+              ON credential.credential_id = connection.credential_id
+             AND credential.project_id = connection.project_id
+             AND credential.provider = connection.provider
+             AND credential.state = 'active'
+            WHERE assignment.project_id = $1
+            ORDER BY CASE assignment.role WHEN 'editor' THEN 0 ELSE 1 END
+            """,
+            project_id,
+        )
+    return [
+        ProjectLlmAssignmentCapability(
+            role=str(row["role"]),
+            provider=str(row["provider"]),
+            model_id=str(row["model_id"]),
+            connection_state="active",
+        )
+        for row in rows
+    ]
 
 
 def _github_app_configured() -> bool:
@@ -259,7 +314,26 @@ async def evaluate_changeset_creation(
     automation_ready = automation_enabled(project_id)
     connection = await connections_store.get_connection(pool, project_id)
     github_ready = _github_app_configured()
-    provider_ready = _provider_configured()
+    credential_store_ready = _provider_configured()
+    assignments = await _project_llm_assignments(pool, project_id)
+    assignments_ready = [item.role for item in assignments] == [
+        "editor",
+        "helper",
+    ]
+    model_pair_ready = assignments_ready and (
+        project_model_pair_matches_rollout_evidence(
+            stage=stage,
+            editor_provider=assignments[0].provider,
+            editor_model_id=assignments[0].model_id,
+            helper_provider=assignments[1].provider,
+            helper_model_id=assignments[1].model_id,
+        )
+    )
+    provider_ready = (
+        credential_store_ready
+        and assignments_ready
+        and model_pair_ready
+    )
     dependencies = _worker_dependencies(app)
     worker_ready = dependencies is not None
     runtime_ready = False
@@ -294,5 +368,6 @@ async def evaluate_changeset_creation(
             worker="ready" if worker_ready else "blocked",
             runtime="ready" if runtime_ready else "blocked",
         ),
+        llm_assignments=assignments,
     )
     return CapabilityEvaluation(report=report, connection=connection)

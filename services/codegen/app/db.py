@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 53
-MIGRATION_NAME = "053_codegen_llm_connections.sql"
+MIGRATION_VERSION = 54
+MIGRATION_NAME = "054_codegen_project_llm_routing.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_project_execution_authorizations", "project_id"),
@@ -74,6 +74,7 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "ci_remediation_status"),
         ("codegen_changesets", "retry_of_changeset_id"),
         ("codegen_changesets", "control_metadata"),
+        ("codegen_changesets", "llm_execution_snapshot"),
         ("codegen_project_provider_credentials", "credential_id"),
         ("codegen_project_provider_credentials", "project_id"),
         ("codegen_project_provider_credentials", "provider"),
@@ -92,6 +93,17 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_project_provider_models", "provider"),
         ("codegen_project_provider_models", "model_id"),
         ("codegen_project_provider_models", "supported_roles"),
+        ("codegen_project_model_assignments", "project_id"),
+        ("codegen_project_model_assignments", "role"),
+        ("codegen_project_model_assignments", "provider"),
+        ("codegen_project_model_assignments", "model_id"),
+        ("codegen_project_model_assignments", "assignment_version"),
+        ("codegen_llm_attempts", "attempt_id"),
+        ("codegen_llm_attempts", "project_id"),
+        ("codegen_llm_attempts", "changeset_id"),
+        ("codegen_llm_attempts", "phase"),
+        ("codegen_llm_attempts", "role"),
+        ("codegen_llm_attempts", "credential_id"),
         ("codegen_pull_request_observations", "github_updated_at"),
         ("codegen_pull_request_publication_events", "event_id"),
         ("codegen_pull_request_publication_events", "event_sequence"),

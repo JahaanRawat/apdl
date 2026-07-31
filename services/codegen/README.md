@@ -24,13 +24,15 @@ merge.
 
 Publication is fail-closed. Offline and shadow deployments have no PR
 publication capability. Reviewed and low-risk-canary deployments must load an
-operator-controlled evaluation bundle for the exact `CODEGEN_MODEL` and
-`CODEGEN_REVISION`; the decision is persisted before any GitHub write token is
-minted and is read-only in Admin. The OSS developer-preview commands do not
-enable any publishing stage: `make dev-all` opts into Codegen only in `offline`
-mode, without a Docker socket or branch/PR authority. Publication tooling in the
-source tree is experimental operator infrastructure and is outside the supported
-release surface.
+operator-controlled evaluation bundle for the exact
+`CODEGEN_EVALUATION_MODEL`, evaluation behavior, and `CODEGEN_REVISION`; the
+decision is persisted before any GitHub write token is minted and is read-only
+in Admin. Those evaluation inputs are not tenant-serving defaults. Runtime model
+selection comes only from the project's active editor and helper assignments.
+The OSS developer-preview commands do not enable any publishing stage:
+`make dev-all` opts into Codegen only in `offline` mode, without a Docker socket
+or branch/PR authority. Publication tooling in the source tree is experimental
+operator infrastructure and is outside the supported release surface.
 
 The 0.3.0 dependency gate covers both the offline API/control plane and the
 published `Dockerfile.worker` Aider dependency graph. The worker uses a
@@ -191,7 +193,7 @@ GITHUB_APP_PRIVATE_KEY_BASE64=     # standard Base64 of the UTF-8 PEM
 GITHUB_API_URL=https://api.github.com
 GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty returns 503
 CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64= # canonical Base64 of exactly 32 random bytes
-CODEGEN_MODEL=claude-opus-4-8      # canonical supported provider/model ID; see below
+CODEGEN_LLM_BROKER_DIR=/tmp/apdl-codegen-llm-broker # absolute host-visible broker root
 CODEGEN_REVISION=                  # immutable candidate/deployment digest
 CODEGEN_ROLLOUT_STAGE=offline      # offline | shadow | reviewed_pr | low_risk_canary
                                    # release Compose commands force offline
@@ -206,12 +208,16 @@ CODEGEN_EGRESS_SOCKET_VOLUME=      # controller-owned proxy Unix-socket volume
 CODEGEN_EGRESS_PROXY_URL=http://127.0.0.1:3128
 CODEGEN_TRUSTED_REPOS_ONLY=false   # explicit opt-in for local in-process mode
 CODEGEN_JOB_BUDGET=3000            # optional lower cap; cannot exceed 50 minutes
-ANTHROPIC_API_KEY=                 # provider key matching CODEGEN_MODEL
-                                   #   (or OPENAI_API_KEY / GOOGLE_API_KEY / …)
-ANTHROPIC_BASE_URL=https://api.anthropic.com
-OPENAI_BASE_URL=https://api.openai.com/v1
 CODEGEN_KILL_SWITCH=               # "true" halts all changeset jobs
 CODEGEN_DISABLED_PROJECTS=         # comma-separated per-project denylist
+
+# Operator-only evaluation inputs; tenant serving never reads these credentials.
+CODEGEN_EVALUATION_MODEL=anthropic/claude-opus-5
+CODEGEN_EVALUATION_HELPER_MODEL=   # optional; defaults to the evaluation editor model
+CODEGEN_EVALUATION_ANTHROPIC_API_KEY=
+CODEGEN_EVALUATION_OPENAI_API_KEY=
+CODEGEN_EVALUATION_GOOGLE_API_KEY=
+CODEGEN_EVALUATION_XAI_API_KEY=
 ```
 
 Generate the canonical private-key value as one unwrapped line:
@@ -267,6 +273,29 @@ or an active delegated member holding both `agents:manage` and
 The revoke request's required human reason is validated as request intent but is
 never logged or persisted; lifecycle storage records only the canonical
 non-secret `provider_connection_revoked` category.
+
+After creating the required connections, a trusted control-plane operator
+atomically assigns exactly one editor model and one helper model:
+
+```bash
+cd services/codegen
+.venv/bin/python -m scripts.assign_llm_models \
+  --project-id demo \
+  --editor-provider anthropic \
+  --editor-model-id claude-sonnet-5 \
+  --helper-provider openai \
+  --helper-model-id gpt-5.4-nano \
+  --actor operator@example.com
+```
+
+The two roles may use different providers, but each selected model must be in
+that project's active inventory and support the assigned role. New changesets
+snapshot both assignments. Each brief, edit, review, or repair phase then
+revalidates current project, repository, rollout, model, connection, and
+credential authority before decrypting only that phase's credential through
+the local broker. Replacing or revoking a credential therefore affects the next
+phase that has not started provider egress; no global `CODEGEN_MODEL`,
+`CODEGEN_HELPER_MODEL`, or ambient provider-key setting can route tenant work.
 
 Platform-key rotation is an offline maintenance operation. Drain and stop every
 APDL runtime that holds the shared PostgreSQL maintenance locks—not only Codegen
@@ -401,8 +430,12 @@ credential matching the selected model; do not pass the repository `.env` into
 the evaluation container:
 
 ```bash
-export CODEGEN_MODEL=claude-opus-4-8
-export ANTHROPIC_API_KEY=... # use your secret manager or current shell
+export CODEGEN_EVALUATION_MODEL=anthropic/claude-opus-5
+export CODEGEN_EVALUATION_ANTHROPIC_API_KEY=... # secret manager or current shell
+
+# Optional helper evaluation on a different provider/model.
+# export CODEGEN_EVALUATION_HELPER_MODEL=openai/gpt-5.4-mini
+# export CODEGEN_EVALUATION_OPENAI_API_KEY=...
 
 # Optional. Defaults to the current Git commit only for a clean worktree. A
 # dirty tree must be committed or given a distinct tag-safe revision.
@@ -541,8 +574,10 @@ criteria), and `CODEGEN_REVIEW` judges the produced diff against the original
 spec before the push. A review rejection re-invokes the agent with feedback
 (`CODEGEN_EDIT_RETRIES`, default 1) before the changeset fails; the retry message
 re-carries the full work order, since each aider
-invocation is a fresh process. `CODEGEN_HELPER_MODEL` runs these passes on a
-different model than the editor (default: `CODEGEN_MODEL`).
+invocation is a fresh process. Tenant execution runs these passes with the
+project's helper assignment; edit and repair use its editor assignment.
+`CODEGEN_EVALUATION_HELPER_MODEL` is the separate operator-only equivalent for
+the sealed evaluation workflow and defaults to `CODEGEN_EVALUATION_MODEL`.
 
 GitHub merge observation records the merge commit SHA, and `/revert` uses it deterministically:
 the editor fetches the commit into the shallow clone and runs `git revert`
@@ -712,12 +747,13 @@ The autonomous loop runs once these external pieces are set up:
    the editor runs
    — `uv pip install -e ".[agent]"` on the codegen host for v1, or build the
    hardened sandbox image (`Dockerfile.worker`) to run one changeset per
-   container. Set `CODEGEN_MODEL` and the matching provider key (e.g.
-   `ANTHROPIC_API_KEY`). Run the offline/shadow corpus for the exact model and
-   immutable `CODEGEN_REVISION`, review the report, and mount the resulting
-   operator bundle before selecting a PR rollout stage. Optionally set each
-   repo's test command through connection `tenant_policy.test_cmd` (otherwise it is
-   auto-detected).
+   container. Create the project's provider connections and atomically assign
+   its editor and helper models as described above. Separately set the matching
+   `CODEGEN_EVALUATION_*` model and credential inputs, run the offline/shadow
+   corpus for the exact evaluation model and immutable `CODEGEN_REVISION`,
+   review the report, and mount the resulting operator bundle before selecting
+   a PR rollout stage. Optionally set each repo's test command through
+   connection `tenant_policy.test_cmd` (otherwise it is auto-detected).
 3. **Add a repo webhook** → configure a non-empty `GITHUB_WEBHOOK_SECRET`, then
    point GitHub at `POST /webhooks/github` with events `pull_request`,
    `check_run`, `check_suite`, and `status`. An unset secret disables the

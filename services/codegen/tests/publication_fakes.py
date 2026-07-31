@@ -27,13 +27,16 @@ class FakePublicationGate:
         self,
         *,
         risk: RiskLevel,
+        model: str,
+        helper_model: str,
         canary_identity: str,
     ) -> PublicationAuthorization:
+        del helper_model
         self.calls.append((risk, canary_identity))
         request = PublicationRequest(
             requested_stage=self.stage,
             risk=risk,
-            model="test-model@1",
+            model=model,
             codegen_revision="test-revision",
             candidate_identity_sha256="a" * 64,
             egress_policy_sha256="8" * 64,
@@ -69,7 +72,7 @@ class FakePublicationGate:
         authorization_payload = {
             "schema_version": "publication_authorization@4",
             "request": request.model_dump(mode="python"),
-            "expected_model": "test-model@1",
+            "expected_model": model,
             "expected_codegen_revision": "test-revision",
             "expected_candidate_identity_sha256": "a" * 64,
             "expected_egress_policy_sha256": "8" * 64,

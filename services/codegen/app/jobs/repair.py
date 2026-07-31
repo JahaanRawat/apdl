@@ -21,6 +21,7 @@ from app.models.observations import (
     RemediationPromptEvidence,
     RemediationDisposition,
 )
+from app.llm.provider_catalog import runtime_model
 from app.publication import PublicationGate
 from app.runtime.github_actions import workflow_attestation_is_valid
 from app.runtime.models import RuntimeAcceptancePolicy, RuntimeEvidenceObservation
@@ -508,8 +509,23 @@ async def repair_failed_ci(
         return
     try:
         risk = changeset.controls.risk_level
+        llm_snapshot = changeset.llm_execution_snapshot
+        if llm_snapshot is None:
+            raise RuntimeError(
+                "Changeset is missing immutable LLM execution authority"
+            )
+        editor_assignment = llm_snapshot.assignment("editor")
+        helper_assignment = llm_snapshot.assignment("helper")
         authorization = publication_gate.authorize(
             risk=risk,
+            model=runtime_model(
+                editor_assignment.provider,
+                editor_assignment.model_id,
+            ).litellm_model,
+            helper_model=runtime_model(
+                helper_assignment.provider,
+                helper_assignment.model_id,
+            ).litellm_model,
             canary_identity=f"{changeset.project_id}:{connection.repository_id}",
         )
         await changeset_store.set_publication_authorization(
@@ -581,6 +597,7 @@ async def repair_failed_ci(
         async with mint_read_token(observation.changeset_id) as token:
             result = await editor.implement(
                 EditRequest(
+                    changeset_id=observation.changeset_id,
                     repo=connection.repository_full_name,
                     project_scope=changeset.project_id,
                     requirement_ledger=changeset.requirement_ledger,
@@ -625,7 +642,7 @@ async def repair_failed_ci(
             classification=classification,
             confidence=confidence,
             started_at=started_at,
-            error=f"CI repair editor failed: {exc}",
+            error=f"CI repair editor failed with {type(exc).__name__}",
             exhausted=True,
             runtime_evidence=runtime_evidence,
         )

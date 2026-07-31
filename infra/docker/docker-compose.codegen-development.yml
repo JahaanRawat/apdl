@@ -16,10 +16,14 @@ services:
       CODEGEN_SANDBOX_IMAGE: ${CODEGEN_DEVELOPMENT_SANDBOX_IMAGE:-apdl-codegen-sandbox:local-development}
       CODEGEN_SANDBOX_NETWORK: ${CODEGEN_DEVELOPMENT_SANDBOX_NETWORK:-apdl-codegen-development}
       DOCKER_HOST: unix:///var/run/docker.sock
+      CODEGEN_LLM_BROKER_DIR: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
     volumes:
       - type: bind
         source: ${CODEGEN_DEVELOPMENT_DOCKER_SOCKET:?make dev-all must resolve a local Docker unix socket}
         target: /var/run/docker.sock
+      - type: bind
+        source: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
+        target: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8084/ready"]
       interval: 2s

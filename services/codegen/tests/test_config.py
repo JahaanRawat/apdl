@@ -1,6 +1,7 @@
 """Tests for environment-derived Codegen configuration."""
 
 import base64
+import os
 
 import pytest
 
@@ -17,7 +18,9 @@ from app.editor.container_editor import ContainerAiderEditor
 from app.main import _make_editor, _make_publication_gate
 from app.publication import (
     DEVELOPMENT_CODEGEN_REVISION,
+    ConfiguredPublicationGate,
     DevelopmentPublicationAuthorization,
+    PublicationGateError,
 )
 
 _PEM = "-----BEGIN RSA PRIVATE KEY-----\nMIIBVQIBADAN\n-----END RSA PRIVATE KEY-----\n"
@@ -94,6 +97,23 @@ def test_empty_private_key_material_fails_closed(monkeypatch, caplog):
     assert config.github_app_private_key() == ""
     assert _PRIVATE_KEY_SETTING in caplog.text
     assert encoded not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "//tmp/apdl-codegen-llm-broker",
+        "/tmp//apdl-codegen-llm-broker",
+    ],
+)
+def test_llm_broker_directory_rejects_noncanonical_slashes(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("CODEGEN_LLM_BROKER_DIR", value)
+
+    with pytest.raises(ValueError, match="canonical safe absolute path"):
+        config.codegen_llm_broker_dir()
 
 
 def test_cors_origins_default_to_local_admin(monkeypatch):
@@ -268,11 +288,17 @@ def test_development_publication_gate_is_explicit_and_unevaluated(monkeypatch):
 
     monkeypatch.setenv("CODEGEN_DEVELOPMENT_MODE", "true")
     gate = _make_publication_gate()
-    authorization = gate.authorize(risk=RiskLevel.low, canary_identity="ignored")
+    authorization = gate.authorize(
+        risk=RiskLevel.low,
+        model="openai/gpt-5",
+        helper_model="openai/gpt-5-mini",
+        canary_identity="ignored",
+    )
 
     assert gate.stage is RolloutStage.development_pr
     assert isinstance(authorization, DevelopmentPublicationAuthorization)
     assert authorization.request.codegen_revision == DEVELOPMENT_CODEGEN_REVISION
+    assert authorization.request.model == "openai/gpt-5"
     assert authorization.decision.ready_for_review is False
     assert authorization.draft_only is True
     assert "report_sha256" not in authorization.model_dump(mode="json")
@@ -301,6 +327,7 @@ def test_development_marker_is_rejected_for_offline_stage(monkeypatch):
 
 def test_publication_gate_requires_operator_artifact_for_pr_stages(monkeypatch):
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.setenv("CODEGEN_EVALUATION_MODEL", "openai/gpt-5")
     monkeypatch.delenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", raising=False)
     with pytest.raises(RuntimeError, match="AUTHORIZATION_PATH"):
         _make_publication_gate()
@@ -329,8 +356,11 @@ def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch)
 
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
     monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "/bundle.json")
-    monkeypatch.setenv("CODEGEN_MODEL", "openai/test-model@1")
-    monkeypatch.setenv("CODEGEN_HELPER_MODEL", "anthropic/test-helper@1")
+    monkeypatch.setenv("CODEGEN_EVALUATION_MODEL", "openai/test-model@1")
+    monkeypatch.setenv(
+        "CODEGEN_EVALUATION_HELPER_MODEL",
+        "anthropic/test-helper@1",
+    )
     monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
     monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", controller)
     monkeypatch.setenv("CODEGEN_SANDBOX_IMAGE", candidate)
@@ -341,11 +371,16 @@ def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch)
     monkeypatch.setattr("app.main.load_publication_authorizer", fake_loader)
 
     gate = _make_publication_gate()
+    evaluation_environment = dict(os.environ)
+    evaluation_environment["CODEGEN_MODEL"] = "openai/test-model@1"
+    evaluation_environment["CODEGEN_HELPER_MODEL"] = "anthropic/test-helper@1"
     identity = CodegenCandidateIdentity.build(
         controller_image_id=controller,
         candidate_image_id=candidate,
         codegen_revision="evaluated-revision",
-        behavior_configuration_sha256=codegen_behavior_configuration_sha256(),
+        behavior_configuration_sha256=codegen_behavior_configuration_sha256(
+            evaluation_environment
+        ),
         egress_policy_sha256=egress_policy,
         egress_proxy_image_id=proxy,
         reviewed_max_concurrent_jobs=1,
@@ -358,12 +393,42 @@ def test_publication_gate_binds_exact_images_and_effective_behavior(monkeypatch)
         "expected_egress_policy_sha256": egress_policy,
     }
     assert gate.provider is provider
+    assert gate.model == "openai/test-model@1"
+    assert gate.helper_model == "anthropic/test-helper@1"
     assert gate.candidate_identity_sha256 == identity.identity_sha256
     assert gate.egress_policy_sha256 == egress_policy
 
 
+def test_reviewed_publication_gate_rejects_helper_model_drift() -> None:
+    class UnexpectedProvider:
+        def authorize(self, _request):
+            raise AssertionError("drifted model pair must not reach evidence provider")
+
+    gate = ConfiguredPublicationGate(
+        stage=RolloutStage.reviewed_pr,
+        model="openai/gpt-5.4-mini",
+        helper_model="anthropic/claude-haiku-4-5-20251001",
+        codegen_revision="evaluated-revision",
+        candidate_identity_sha256="a" * 64,
+        egress_policy_sha256="b" * 64,
+        provider=UnexpectedProvider(),
+    )
+
+    with pytest.raises(
+        PublicationGateError,
+        match="model assignments do not match evaluated rollout evidence",
+    ):
+        gate.authorize(
+            risk=RiskLevel.low,
+            model="openai/gpt-5.4-mini",
+            helper_model="openai/gpt-5.4-mini",
+            canary_identity="ignored",
+        )
+
+
 def test_publication_gate_rejects_mutable_image_identity(monkeypatch):
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.setenv("CODEGEN_EVALUATION_MODEL", "openai/gpt-5")
     monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "/bundle.json")
     monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
     monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", "controller:latest")
@@ -379,6 +444,7 @@ def test_publication_gate_rejects_mutable_image_identity(monkeypatch):
 
 def test_publication_gate_rejects_reviewed_concurrency_above_one(monkeypatch):
     monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.setenv("CODEGEN_EVALUATION_MODEL", "openai/gpt-5")
     monkeypatch.setenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "/bundle.json")
     monkeypatch.setenv("CODEGEN_REVISION", "evaluated-revision")
     monkeypatch.setenv("CODEGEN_CONTROLLER_IMAGE_ID", "sha256:" + "a" * 64)
