@@ -16,7 +16,7 @@ AGENTS_MIGRATION_SQL = (
     / "pipeline"
     / "postgres"
     / "migrations"
-    / "004_agents_core.sql"
+    / "001_initial_schema.sql"
 ).read_text()
 
 
@@ -94,7 +94,7 @@ class _FakePool:
 
 def test_ddl_enforces_active_slug_uniqueness_only():
     # Partial unique index: archive-then-recreate under the same slug works.
-    assert "WHERE status = 'active'" in AGENTS_MIGRATION_SQL
+    assert "WHERE (status = 'active'::text)" in AGENTS_MIGRATION_SQL
     assert "UNIQUE INDEX" in AGENTS_MIGRATION_SQL
     assert "(project_id, slug)" in AGENTS_MIGRATION_SQL
 
@@ -169,8 +169,8 @@ def test_row_to_dict_defaults_missing_preset_tools_to_empty():
     assert store._row_to_dict(row)["preset_tools"] == []
 
 
-def test_migration_adds_preset_tools_column():
-    assert "ADD COLUMN IF NOT EXISTS preset_tools" in AGENTS_MIGRATION_SQL
+def test_baseline_defines_preset_tools_column():
+    assert "preset_tools jsonb DEFAULT '[]'::jsonb NOT NULL" in AGENTS_MIGRATION_SQL
 
 
 @pytest.mark.asyncio

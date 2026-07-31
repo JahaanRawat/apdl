@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 44
-MIGRATION_NAME = "044_operator_recovery_and_retention.sql"
+MIGRATION_VERSION = 1
+MIGRATION_NAME = "001_initial_schema.sql"
 REQUIRED_CONSTRAINTS = frozenset(
     {
         ("flags", "flags_variants_canonical_check"),

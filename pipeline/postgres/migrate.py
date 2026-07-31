@@ -707,7 +707,7 @@ SELECT format(
 WHERE NOT EXISTS (
     SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'apdl_llm_vault'
 )
-\gexec
+\\gexec
 ALTER ROLE apdl_llm_vault WITH
     LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
     NOREPLICATION NOBYPASSRLS PASSWORD :'llm_vault_password';
@@ -753,10 +753,8 @@ def _assert_fresh_database_for_empty_ledger(
     """Refuse to adopt an unversioned APDL schema.
 
     The developer-preview release supports fresh databases and exact-prefix
-    migrations created by this ledger only.  In particular, migration 006
-    contains legacy reconciliation that cannot prove the original meaning of
-    every pre-ledger flag row.  An empty ledger beside existing public tables
-    is therefore an unsupported in-place upgrade, not a fresh install.
+    migrations created by this ledger only. An empty ledger beside existing
+    public tables is an unsupported in-place upgrade, not a fresh install.
     """
     if applied:
         return

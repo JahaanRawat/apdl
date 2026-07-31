@@ -77,35 +77,14 @@ The operator-owned timeout settings are:
 Increase a timeout only after measuring the target table and confirming the
 maintenance window.
 
-### Migration 034 sizing and lock risk
+### Fresh-baseline boundary
 
-Migration `034_agent_project_execution_lane.sql` is classified as
-fresh-install-only for the current developer preview. On a populated
-`agent_runs` table, adding its stored generated column rewrites existing rows,
-the validation queries scan the table and approval effects, and its
-non-concurrent unique-index build scans and sorts the full live lane set.
-`ALTER TABLE` and non-concurrent index creation also take locks that block
-normal writers. The transaction rollback path can take material time after a
-large rewrite and does not remove the WAL, temporary-disk, replica-lag, or
-backup-window cost already incurred.
-
-Do not apply `034` in place to a populated preview database. Provision a fresh
-database and migrate data only under a separately reviewed cutover plan. Before
-promoting a future in-place path, rehearse against a production-sized snapshot,
-measure `pg_total_relation_size('agent_runs')`, active-lane cardinality, index
-build time, peak WAL and temporary disk, replica catch-up, and transaction
-rollback time. Reserve capacity for both the table rewrite and new index plus
-operational headroom; a schema timeout is a safety bound, not a sizing plan.
-
-### Migration 044 is also fresh-install-only
-
-Migration `044_operator_recovery_and_retention.sql` creates non-concurrent
-indexes over `config_outbox` and `experiment_audit_log` inside its migration
-transaction. On a populated database those builds can scan and lock retained
-rows and consume material WAL, temporary disk, and replica time. This release
-does not qualify that upgrade path: the migration is covered only as part of a
-fresh, empty canonical sequence. Do not use the fresh-cluster role bootstrap or
-migration `044` as an in-place upgrade procedure.
+The checked-in `001_initial_schema.sql` files are fresh-install baselines, not
+in-place upgrade procedures. They create final tables and indexes directly and
+contain no historical data reconciliation. If a database already contains APDL
+tables without the exact migration ledger, provision a new database and use a
+separately reviewed data cutover plan. Do not copy ledger rows or run the
+baseline over a populated unversioned schema.
 
 ## Failure and rerun
 
@@ -161,5 +140,5 @@ Rerun `make migrate-clickhouse` immediately. Do not manually open
 
 The repository exercises the protocol through unit tests, a real PostgreSQL
 fence-owner termination/rollback probe in both fresh-install smokes, a real
-closed-gate ClickHouse insert rejection in the upgrade smoke, and exact
-checksummed fresh migration runs.
+boundary-marker fairness/retry/quarantine smoke, and exact checksummed fresh
+migration runs.

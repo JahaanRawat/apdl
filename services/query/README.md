@@ -163,7 +163,7 @@ Config timestamps are converted to explicit UTC epoch-millisecond boundaries
 before querying ClickHouse's `DateTime64(3)` columns, preserving the declared
 half-open `[start, end)` window across offsets and fractional seconds.
 Scheduled and pre-settlement experiments do not query ClickHouse. Draft,
-legacy no-plan, or malformed experiments are rejected by Config. Automatic
+missing-plan, or malformed experiments are rejected by Config. Automatic
 stopping, shipping, proposal generation, and rollback are not supported in the
 OSS developer preview.
 

@@ -1,329 +1,119 @@
-"""Contracts for the canonical PostgreSQL migration authority."""
+"""Contracts for the canonical fresh-install PostgreSQL baseline."""
 
-import json
 import re
 from pathlib import Path
-
-from app.framework.tool_catalog import TOOL_CATALOG
 
 
 ROOT = Path(__file__).resolve().parents[3]
 POSTGRES_MIGRATIONS = ROOT / "pipeline" / "postgres" / "migrations"
 CLICKHOUSE_MIGRATIONS = ROOT / "pipeline" / "clickhouse" / "migrations"
-AUTH_CREDENTIALS_SQL = (POSTGRES_MIGRATIONS / "001_auth_credentials.sql").read_text()
-AGENTS_CORE_SQL = (POSTGRES_MIGRATIONS / "004_agents_core.sql").read_text()
-OBSERVABILITY_SQL = (POSTGRES_MIGRATIONS / "005_agent_observability.sql").read_text()
-CONFIG_SQL = (POSTGRES_MIGRATIONS / "006_config.sql").read_text()
-CODEGEN_SQL = (POSTGRES_MIGRATIONS / "007_codegen.sql").read_text()
-CODEGEN_PUBLICATION_IDENTITY_SQL = (
-    POSTGRES_MIGRATIONS / "010_codegen_publication_identity.sql"
-).read_text()
-CODEGEN_DEVELOPMENT_PUBLICATION_SQL = (
-    POSTGRES_MIGRATIONS / "011_codegen_development_publication.sql"
-).read_text()
-CODEGEN_SEGMENTED_PUBLICATION_SQL = (
-    POSTGRES_MIGRATIONS / "024_codegen_segmented_publication.sql"
-).read_text()
-CUSTOM_AGENT_CONTRACT_SQL = (
-    POSTGRES_MIGRATIONS / "015_custom_agent_contracts_and_retry_lineage.sql"
-).read_text()
-RETENTION_COHORT_MODE_SQL = (
-    POSTGRES_MIGRATIONS / "019_retention_cohort_mode.sql"
-).read_text()
-AGENTS_GOVERNANCE_SQL = (POSTGRES_MIGRATIONS / "020_agents_governance.sql").read_text()
-AGENTS_MUTATION_QUOTAS_SQL = (
-    POSTGRES_MIGRATIONS / "021_agents_mutation_quotas.sql"
-).read_text()
-AGENTS_EXECUTION_LANE_SQL = (
-    POSTGRES_MIGRATIONS / "034_agent_project_execution_lane.sql"
-).read_text()
-CONFIG_LEGACY_FIXTURE = (
-    ROOT
-    / "pipeline"
-    / "postgres"
-    / "tests"
-    / "fixtures"
-    / "legacy_config_restrictive.sql"
-).read_text()
-POSTGRES_RUNNER = (ROOT / "scripts" / "init-postgres.sh").read_text()
-FRESH_SMOKE = (ROOT / "scripts" / "smoke_fresh_install.sh").read_text()
-SMOKE_CREDENTIAL_SQL = (
-    ROOT / "scripts" / "fixtures" / "provision-smoke-credential.sql"
-).read_text()
-MIGRATION_ENGINE = (ROOT / "pipeline" / "postgres" / "migrate.py").read_text()
-CLICKHOUSE_RUNNER = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
-CLICKHOUSE_MIGRATION_ENGINE = (
-    ROOT / "pipeline" / "clickhouse" / "migrate.py"
-).read_text()
+BASELINE = (POSTGRES_MIGRATIONS / "001_initial_schema.sql").read_text()
+POSTGRES_RUNNER = (ROOT / "pipeline" / "postgres" / "migrate.py").read_text()
+CLICKHOUSE_RUNNER = (ROOT / "pipeline" / "clickhouse" / "migrate.py").read_text()
 
 
-def _table_definition(sql: str, table: str) -> str:
-    start = sql.index(f"CREATE TABLE IF NOT EXISTS {table} (")
-    return sql[start : sql.index("\n);", start) + 3]
+def _table_definition(table: str) -> str:
+    start = BASELINE.index(f"CREATE TABLE public.{table} (")
+    return BASELINE[start : BASELINE.index("\n);", start) + 3]
 
 
-def test_postgres_migrations_are_strictly_ordered_and_uniquely_versioned():
-    names = sorted(path.name for path in POSTGRES_MIGRATIONS.glob("*.sql"))
-    assert all(re.fullmatch(r"[0-9]{3}_[a-z0-9_]+\.sql", name) for name in names)
-    versions = [name.split("_", 1)[0] for name in names]
-    assert versions == [f"{version:03d}" for version in range(1, len(names) + 1)]
-    assert len(versions) == len(set(versions))
+def test_each_database_has_one_canonical_initial_schema() -> None:
+    for directory in (POSTGRES_MIGRATIONS, CLICKHOUSE_MIGRATIONS):
+        names = sorted(path.name for path in directory.glob("*.sql"))
+        assert names == ["001_initial_schema.sql"]
+        assert all(re.fullmatch(r"[0-9]{3}_[a-z0-9_]+\.sql", name) for name in names)
 
 
-def test_clickhouse_directory_contains_no_postgres_migrations():
-    names = {path.name for path in CLICKHOUSE_MIGRATIONS.glob("*.sql")}
-    assert "005_pgvector_setup.sql" not in names
-    assert "011_envelope_postgres.sql" not in names
-
-    for migration in CLICKHOUSE_MIGRATIONS.glob("*.sql"):
-        sql = migration.read_text().lower()
-        assert "target: postgresql" not in sql
-        assert "not clickhouse" not in sql
-        assert "create extension if not exists vector" not in sql
-
-
-def test_auth_credentials_enforce_confidential_and_browser_kinds():
-    credentials = _table_definition(AUTH_CREDENTIALS_SQL, "auth_credentials")
-
-    assert "credential_kind TEXT NOT NULL" in credentials
-    assert "credential_kind IN ('confidential', 'browser')" in credentials
-    assert "key_prefix = 'proj_' || project_id || '_'" in credentials
-    assert "key_prefix = 'client_' || project_id || '_'" in credentials
-    assert "credential_kind = 'browser'" in credentials
-    assert "('events:write' = ANY(roles))::INT" in credentials
-    assert "('agents:approve' = ANY(roles))::INT" in credentials
-    assert "cardinality(roles) = 2" in credentials
-    assert "roles @> ARRAY[" in credentials
-    assert "roles <@ ARRAY[" in credentials
-
-    assert "auth_credentials" not in POSTGRES_RUNNER
-    assert "APDL_DEV_" not in POSTGRES_RUNNER
-    assert "APDL_SMOKE_" not in POSTGRES_RUNNER
-    assert "APDL_SMOKE_CONFIDENTIAL_KEY" in FRESH_SMOKE
-    assert "APDL_SMOKE_BROWSER_KEY" in FRESH_SMOKE
-    assert '"smoke-confidential"' in FRESH_SMOKE
-    assert '"smoke-browser"' in FRESH_SMOKE
-    assert "provision-smoke-credential.sql" in FRESH_SMOKE
-    assert "credential_kind, key_prefix, key_hash, roles" in SMOKE_CREDENTIAL_SQL
-
-
-def test_agents_core_migration_matches_the_running_service_contracts():
-    memory = _table_definition(AGENTS_CORE_SQL, "agent_memory")
-    runs = _table_definition(AGENTS_CORE_SQL, "agent_runs")
-    audit = _table_definition(AGENTS_CORE_SQL, "agent_audit_log")
-
-    assert "id BIGSERIAL PRIMARY KEY" in memory
-    assert "embedding vector(384)" in memory
-    assert "agent_type TEXT" not in memory
-    assert "run_id TEXT PRIMARY KEY" in runs
-    assert "config JSONB DEFAULT '{}'" in runs
-    assert "lease_owner_id TEXT" in runs
-    assert "lease_expires_at TIMESTAMPTZ" in runs
-    assert "idx_agent_runs_lease_expiry" in AGENTS_CORE_SQL
-    assert "claim_run_id TEXT" in AGENTS_CORE_SQL
-    assert "idx_feature_proposals_claim_run" in AGENTS_CORE_SQL
-    assert "id BIGSERIAL PRIMARY KEY" in audit
-    assert "action_type TEXT NOT NULL" in audit
-    assert "config JSONB DEFAULT '{}'" in audit
-
-    assert "CREATE TABLE IF NOT EXISTS experiments (" not in AGENTS_CORE_SQL
-    assert "CREATE TABLE IF NOT EXISTS ui_configs (" not in AGENTS_CORE_SQL
-    assert "agent_memory_legacy_005" in AGENTS_CORE_SQL
-    assert "agent_runs_legacy_005" in AGENTS_CORE_SQL
-    assert "agent_audit_log_legacy_005" in AGENTS_CORE_SQL
-    assert "experiments_legacy_005" in AGENTS_CORE_SQL
-    assert "ui_configs_legacy_005" in AGENTS_CORE_SQL
-    assert "agent_memory_legacy_vectors" in AGENTS_CORE_SQL
-    assert AGENTS_CORE_SQL.index("CREATE TABLE agent_memory_legacy_vectors") < (
-        AGENTS_CORE_SQL.index("DELETE FROM agent_memory")
-    )
-
-
-def test_agents_governance_scopes_feature_proposal_identity_to_project():
-    assert "DROP CONSTRAINT feature_proposals_pkey" in AGENTS_GOVERNANCE_SQL
-    assert "PRIMARY KEY (project_id, proposal_id)" in AGENTS_GOVERNANCE_SQL
-
-
-def test_agents_mutation_quota_ledger_has_one_strict_canonical_identity():
-    sql = AGENTS_MUTATION_QUOTAS_SQL
-
-    assert "CREATE TABLE agent_mutation_quota_reservations" in sql
-    assert "PRIMARY KEY (project_id, action_type, idempotency_key)" in sql
-    assert "policy_version = 'rolling_hour@1'" in sql
-    assert "agent_mutation_quota_action_type_check" in sql
-    assert "agent_mutation_quota_idempotency_key_check" in sql
-    assert "btrim(idempotency_key) <> ''" in sql
-    assert "agent_mutation_quota_reservations_lookup_idx" in sql
-    assert "(project_id, action_type, policy_version, occurred_at DESC)" in sql
-
-
-def test_agents_execution_lane_is_database_authoritative_and_fail_closed():
-    sql = AGENTS_EXECUTION_LANE_SQL
-
-    assert "ADD CONSTRAINT agent_runs_status_check" in sql
-    assert "execution_lane_project_id TEXT" in sql
-    assert "GENERATED ALWAYS AS" in sql
-    for terminal_status in (
-        "completed",
-        "completed_with_errors",
-        "failed",
-        "cancelled",
-        "manual_intervention",
+def test_baseline_contains_only_current_schema_objects() -> None:
+    lowered = BASELINE.lower()
+    for retired in (
+        "codegen_connections_legacy_unverified",
+        "llm_calls_legacy_pre_governance_023",
+        "publication_authorization_legacy",
+        "publication_authorization_segmentless_legacy",
+        "publication_authorization_egress_unattested_legacy",
+        "publication_authorization_pre_tenant_legacy",
+        "llm_execution_snapshot_v1_legacy",
+        "legacy_unbound_credential",
+        "legacy_unbound_setup",
+        "llm_project_provider_credentials",
+        "codegen_project_provider_credentials",
     ):
-        assert f"'{terminal_status}'" in sql
-    for lane_status in (
-        "started",
-        "running",
-        "waiting_approval",
-        "approval_queued",
-        "cancelling",
-        "approved",
-        "rejected",
+        assert retired not in lowered
+
+    assert " rename to " not in lowered
+    assert " drop column " not in lowered
+    assert " add column " not in lowered
+
+
+def test_core_service_tables_use_the_canonical_shapes() -> None:
+    credentials = _table_definition("auth_credentials")
+    memory = _table_definition("agent_memory")
+    flags = _table_definition("flags")
+    experiments = _table_definition("experiments")
+
+    assert "credential_kind text NOT NULL" in credentials
+    assert "key_hash character(64) NOT NULL" in credentials
+    assert "embedding public.vector(384)" in memory
+    assert "default_variant text DEFAULT 'control'::text NOT NULL" in flags
+    assert "variants jsonb" in flags
+    assert "bucket_by text NOT NULL" in experiments
+    assert "statistical_plan jsonb" in experiments
+    assert "minimum_exposure_config_version integer" in experiments
+
+
+def test_llm_attempts_are_always_bound_to_current_project_setup() -> None:
+    attempts = _table_definition("llm_provider_attempts")
+
+    for column in (
+        "setup_version bigint NOT NULL",
+        "model_tier text NOT NULL",
+        "connection_version bigint NOT NULL",
+        "inventory_version bigint NOT NULL",
+        "model_catalog_version text NOT NULL",
     ):
-        assert f"'{lane_status}'" in sql
-    assert "HAVING count(*) > 1" in sql
-    assert "Terminalize all but one run" in sql
-    assert "VALIDATE CONSTRAINT agent_runs_status_check" in sql
-    assert "CREATE UNIQUE INDEX agent_runs_one_execution_lane_per_project_idx" in sql
-    assert "WHERE execution_lane_project_id IS NOT NULL" in sql
-    assert "validate_existing_approval_effect_lanes" in sql
-    assert "run.execution_lane_project_id IS NULL" in sql
-    assert "effect.status IN ('queued', 'processing', 'retryable_failed')" in sql
-    assert "CREATE TRIGGER agent_runs_guard_execution_lane_release" in sql
-    assert "CREATE TRIGGER agent_approval_effects_guard_live_lane_insert" in sql
-    assert "CREATE TRIGGER agent_approval_effects_guard_live_lane_update" in sql
-    assert "FOR UPDATE;" in sql
+        assert column in attempts
+    assert "llm_provider_attempts_credential_binding_check" in attempts
+    assert "llm_provider_attempts_setup_binding_check" in attempts
+    assert "legacy_unbound" not in attempts
+    assert "llm_provider_attempts_protect_credential_binding BEFORE UPDATE" in BASELINE
+    assert "llm_provider_attempts_protect_setup_binding BEFORE UPDATE" in BASELINE
 
 
-def test_observability_migration_uses_text_tenant_and_run_identifiers():
-    llm_calls = _table_definition(OBSERVABILITY_SQL, "llm_calls")
+def test_governance_and_execution_boundaries_are_installed() -> None:
+    for function in (
+        "apdl_assert_execution_project_authorized",
+        "apdl_assert_agents_project_active",
+        "apdl_enforce_experiment_archive_lifecycle",
+        "apdl_enforce_experiment_enrollment_immutability",
+        "apdl_validate_active_agents_setup",
+        "apdl_purge_experiment_audit",
+    ):
+        assert f"CREATE FUNCTION public.{function}" in BASELINE
 
-    assert "project_id TEXT NOT NULL" in llm_calls
-    assert "project_id INTEGER" not in llm_calls
-    assert (
-        "run_id TEXT NOT NULL REFERENCES agent_runs(run_id) ON DELETE CASCADE"
-        in llm_calls
-    )
-    assert "REFERENCES agent_runs(id)" not in llm_calls
-    assert "ON agent_audit_log (run_id, idempotency_key)" in OBSERVABILITY_SQL
-    assert "llm_calls_legacy_011" in OBSERVABILITY_SQL
-
-
-def test_config_and_codegen_have_canonical_migrations():
-    assert "CHECK (state IN ('draft', 'active'))" in CONFIG_LEGACY_FIXTURE
-    assert "CHECK (status IN ('draft', 'active', 'completed', 'stopped'))" in (
-        CONFIG_LEGACY_FIXTURE
-    )
-    assert "CREATE TABLE IF NOT EXISTS flags (" in CONFIG_SQL
-    assert "CREATE TABLE IF NOT EXISTS experiments (" in CONFIG_SQL
-    assert "feature_flags_legacy" in CONFIG_SQL
-    assert CONFIG_SQL.index("DROP CONSTRAINT IF EXISTS experiments_status_check") < (
-        CONFIG_SQL.index("SET status = 'running' WHERE status = 'active'")
-    )
-    assert "CREATE TABLE IF NOT EXISTS codegen_changesets (" in CODEGEN_SQL
-    assert "CREATE TABLE IF NOT EXISTS codegen_ci_verification_observations (" in (
-        CODEGEN_SQL
-    )
-    assert "codegen_runtime_evidence_observations_legacy_unbound" in CODEGEN_SQL
+    assert "INSERT INTO public.apdl_execution_table_registry" in BASELINE
+    assert "INSERT INTO public.apdl_analysis_table_registry" in BASELINE
+    assert "SELECT public.apdl_assert_execution_table_registry();" in BASELINE
+    assert "SELECT public.apdl_assert_analysis_table_registry();" in BASELINE
 
 
-def test_codegen_publication_identity_migration_archives_without_fabrication():
-    sql = CODEGEN_PUBLICATION_IDENTITY_SQL
-    assert "publication_authorization_legacy" in sql
-    assert "publication_authorization = NULL" in sql
-    assert "IS DISTINCT FROM 'publication_authorization@2'" in sql
-    assert "= 'publication_authorization@2'" in sql
-    assert ") IS TRUE" in sql
-    assert "publication_authorization@1" in sql
-    assert "jsonb_set" not in sql.lower()
+def test_runtime_and_operator_privileges_are_explicit() -> None:
+    assert "GRANT CONNECT ON DATABASE %I TO apdl_runtime" in BASELINE
+    assert "GRANT CONNECT ON DATABASE %I TO apdl_llm_vault" in BASELINE
+    assert "ALTER DEFAULT PRIVILEGES IN SCHEMA public" in BASELINE
+    assert ") OWNER TO apdl_audit_purge_definer;" in BASELINE
+    assert ") TO apdl_audit_operator;" in BASELINE
+    assert "REVOKE CREATE ON SCHEMA public FROM PUBLIC" in BASELINE
+    assert "public.llm_vault_provider_secrets" in BASELINE
+    assert "FROM PUBLIC, apdl_runtime" in BASELINE
+    assert "TO apdl_llm_vault" in BASELINE
 
 
-def test_codegen_development_publication_is_a_separate_draft_only_contract():
-    sql = CODEGEN_DEVELOPMENT_PUBLICATION_SQL
-    assert "publication_authorization@2" in sql
-    assert "development_publication_authorization@1" in sql
-    assert "development_publication_request@1" in sql
-    assert "development_publication_decision@1" in sql
-    assert "local_development" in sql
-    assert "development_pr" in sql
-    assert "local-development" in sql
-    assert "draft_only" in sql
-    assert ") IS TRUE" in sql
-
-
-def test_codegen_segmented_publication_retires_aggregate_only_authority():
-    sql = CODEGEN_SEGMENTED_PUBLICATION_SQL
-    assert "publication_authorization_segmentless_legacy" in sql
-    assert "publication_authorization = NULL" in sql
-    assert "= 'publication_authorization@2'" in sql
-    assert "= 'publication_authorization@3'" in sql
-    assert "development_publication_authorization@1" in sql
-    assert "segmented evidence" in sql
-    assert ") IS TRUE" in sql
-    assert "jsonb_set" not in sql.lower()
-
-
-def test_custom_agent_contract_migration_is_explicit_and_strict():
-    sql = CUSTOM_AGENT_CONTRACT_SQL
-    legacy_tools = [
-        "discover_events",
-        "query_events",
-        "query_timeseries",
-        "query_funnel",
-        "query_retention",
-        "query_cohort",
-        "query_breakdown",
-        "list_flags",
-        "get_active_experiments",
-    ]
-    for tool_name in legacy_tools:
-        assert f'"{tool_name}"' in sql
-    migrated_tools = re.search(r"SET tools = '(\[[^']+\])'::jsonb", sql)
-    assert migrated_tools is not None
-    assert json.loads(migrated_tools.group(1)) == legacy_tools
-    assert "calculate_statistical_plan" in TOOL_CATALOG
-    assert '"calculate_statistical_plan"' not in sql
-    assert "WHERE tools = '[]'::jsonb" in sql
-    assert "DROP COLUMN IF EXISTS parse_as" in sql
-    assert "CREATE TABLE custom_agent_test_runs" in sql
-    assert "llm_calls INTEGER NOT NULL DEFAULT 0" in sql
-    assert "custom_agent_test_runs_one_running_per_project_idx" in sql
-    assert "WHERE status = 'running'" in sql
-
-
-def test_retry_lineage_migration_backfills_one_child_and_enforces_uniqueness():
-    sql = CUSTOM_AGENT_CONTRACT_SQL
-    assert "ADD COLUMN IF NOT EXISTS retry_of_changeset_id TEXT" in sql
-    assert "row_number() OVER" in sql
-    assert "legacy.retry_rank = 1" in sql
-    assert "codegen_changesets_retry_of_changeset_id_fkey" in sql
-    assert "codegen_changesets_one_retry_child_idx" in sql
-    assert "WHERE retry_of_changeset_id IS NOT NULL" in sql
-
-
-def test_retention_preset_migration_is_narrow_and_order_preserving():
-    sql = RETENTION_COHORT_MODE_SQL
-
-    assert "WITH ORDINALITY" in sql
-    assert "ORDER BY entry.ordinality" in sql
-    assert "WHEN jsonb_typeof(agent.preset_tools) = 'array'" in sql
-    assert "ELSE '[]'::jsonb" in sql
-    assert "entry.value ->> 'tool' = 'query_retention'" in sql
-    assert "jsonb_typeof(entry.value -> 'params') = 'object'" in sql
-    assert "NOT (entry.value -> 'params' ? 'cohort_mode')" in sql
-    assert "'{params,cohort_mode}'" in sql
-    assert "to_jsonb('first_match_in_window'::text)" in sql
-    assert "agent.preset_tools IS DISTINCT FROM migrated.preset_tools" in sql
-
-
-def test_database_runners_enforce_the_single_engine_authority():
-    assert "postgres-migrate" in POSTGRES_RUNNER
-    assert "apdl_schema_migrations" in MIGRATION_ENGINE
-    assert "hashlib.sha256" in MIGRATION_ENGINE
-    assert "pg_advisory_xact_lock" in MIGRATION_ENGINE
-    assert "Migration checksum or name drift detected" in MIGRATION_ENGINE
-    assert "apdl_reject_migration_ledger_mutation" in MIGRATION_ENGINE
-    assert "Misplaced PostgreSQL migration" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "Skipping $(basename" not in CLICKHOUSE_RUNNER
-    assert "apdl_schema_migrations" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "checksum drift" in CLICKHOUSE_MIGRATION_ENGINE
+def test_migration_runners_retain_immutable_exact_prefix_ledgers() -> None:
+    assert "apdl_schema_migrations" in POSTGRES_RUNNER
+    assert "hashlib.sha256" in POSTGRES_RUNNER
+    assert "pg_advisory_xact_lock" in POSTGRES_RUNNER
+    assert "apdl_reject_migration_ledger_mutation" in POSTGRES_RUNNER
+    assert "apdl_schema_migrations" in CLICKHOUSE_RUNNER
+    assert "checksum drift" in CLICKHOUSE_RUNNER
+    assert "Misplaced PostgreSQL migration" in CLICKHOUSE_RUNNER

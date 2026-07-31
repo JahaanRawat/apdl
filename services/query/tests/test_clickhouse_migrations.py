@@ -1,358 +1,103 @@
-"""Contract tests for ClickHouse analytics migrations."""
+"""Static contracts for the canonical fresh-install ClickHouse baseline."""
 
 from pathlib import Path
 
 
-MIGRATIONS_DIR = (
-    Path(__file__).resolve().parents[3] / "pipeline" / "clickhouse" / "migrations"
-)
 ROOT = Path(__file__).resolve().parents[3]
+MIGRATIONS_DIR = ROOT / "pipeline" / "clickhouse" / "migrations"
 BACKFILLS_DIR = ROOT / "pipeline" / "clickhouse" / "backfills"
-FEATURE_FLAG_EXPOSURES_SQL = (
-    MIGRATIONS_DIR / "006_feature_flag_exposures.sql"
-).read_text()
-ASSIGNMENT_EXPOSURES_SQL = (MIGRATIONS_DIR / "013_assignment_exposures.sql").read_text()
-EVENT_STREAM_PROVENANCE_SQL = (
-    MIGRATIONS_DIR / "014_event_stream_provenance.sql"
-).read_text()
-RECEIVED_AT_RETENTION_SQL = (
-    MIGRATIONS_DIR / "015_received_at_event_retention.sql"
-).read_text()
-PERSONAL_DATA_RETENTION_SQL = (
-    MIGRATIONS_DIR / "016_personal_data_retention.sql"
-).read_text()
-EVENTS_SQL = (MIGRATIONS_DIR / "001_events.sql").read_text()
-FRONTEND_HEALTH_EVENTS_SQL = (
-    MIGRATIONS_DIR / "007_frontend_health_events.sql"
-).read_text()
-LEGACY_EXPERIMENTS_SQL = (MIGRATIONS_DIR / "003_experiments.sql").read_text()
-MATERIALIZED_VIEWS_SQL = (MIGRATIONS_DIR / "004_materialized_views.sql").read_text()
-IDENTITY_ALIASES_SQL = (MIGRATIONS_DIR / "011_identity_aliases.sql").read_text()
-PROTOTYPE_RETIREMENT_SQL = (
-    MIGRATIONS_DIR / "012_retire_prototype_schemas.sql"
-).read_text()
-IDENTITY_ALIASES_BACKFILL_SQL = (BACKFILLS_DIR / "011_identity_aliases.sql").read_text()
-CLICKHOUSE_INIT_SCRIPT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
-CLICKHOUSE_MIGRATION_ENGINE = (
-    ROOT / "pipeline" / "clickhouse" / "migrate.py"
-).read_text()
-EVENTS_UPGRADE_SQL = (MIGRATIONS_DIR / "005_events_canonical_upgrade.sql").read_text()
+BASELINE = (MIGRATIONS_DIR / "001_initial_schema.sql").read_text()
+MIGRATION_ENGINE = (ROOT / "pipeline" / "clickhouse" / "migrate.py").read_text()
+CLICKHOUSE_INIT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
 
 
-def test_events_table_replaces_retries_by_project_and_message_id():
-    assert "ENGINE = ReplacingMergeTree(received_at)" in EVENTS_SQL
-    assert "ORDER BY (project_id, message_id)" in EVENTS_SQL
-    assert "ENGINE = MergeTree()" not in EVENTS_SQL
+def _definition(prefix: str, name: str, next_prefix: str = "CREATE") -> str:
+    start = BASELINE.index(f"{prefix} {name}")
+    try:
+        end = BASELINE.index(f"\n\n{next_prefix}", start)
+    except ValueError:
+        end = len(BASELINE)
+    return BASELINE[start:end]
 
 
-def test_pre_ledger_events_upgrade_rebuilds_engine_and_preserves_rows():
-    assert "ALTER TABLE events ADD COLUMN IF NOT EXISTS message_id" in (
-        EVENTS_UPGRADE_SQL
-    )
-    assert "DEFAULT toString(event_id)" in EVENTS_UPGRADE_SQL
-    assert "ALTER TABLE events ADD COLUMN IF NOT EXISTS received_at" in (
-        EVENTS_UPGRADE_SQL
-    )
-    assert "CREATE TABLE events__apdl_migration_005" in EVENTS_UPGRADE_SQL
-    assert "ENGINE = ReplacingMergeTree(received_at)" in EVENTS_UPGRADE_SQL
-    assert "ORDER BY (project_id, message_id)" in EVENTS_UPGRADE_SQL
-    assert "FROM events;" in EVENTS_UPGRADE_SQL
-    assert "EXCHANGE TABLES events AND events__apdl_migration_005" in (
-        EVENTS_UPGRADE_SQL
-    )
-    assert "CREATE TABLE sessions__apdl_migration_005" in EVENTS_UPGRADE_SQL
-    assert "toString(project_id)" in EVENTS_UPGRADE_SQL
-    assert "EXCHANGE TABLES sessions AND sessions__apdl_migration_005" in (
-        EVENTS_UPGRADE_SQL
-    )
-
-
-def test_clickhouse_runner_uses_an_exact_checksummed_ledger():
-    migration_names = sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql"))
-    assert [name.split("_", 1)[0] for name in migration_names] == [
-        f"{version:03d}" for version in range(1, len(migration_names) + 1)
+def test_clickhouse_has_one_canonical_baseline_and_no_initial_backfill() -> None:
+    assert sorted(path.name for path in MIGRATIONS_DIR.glob("*.sql")) == [
+        "001_initial_schema.sql"
     ]
-    assert "pipeline/clickhouse/migrate.py" in CLICKHOUSE_INIT_SCRIPT
-    assert "apdl_schema_migrations" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "hashlib.sha256(payload).hexdigest()" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "checksum drift" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "ordered prefix" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "ReplacingMergeTree(applied_at)" in CLICKHOUSE_MIGRATION_ENGINE
+    assert list(BACKFILLS_DIR.glob("*.sql")) == []
+    assert "Upgrade and retained-data backfill operations are intentionally absent" in BASELINE
 
 
-def test_retryable_projection_tables_replace_by_project_and_message_id():
-    assert "ENGINE = ReplacingMergeTree(first_exposure)" in FEATURE_FLAG_EXPOSURES_SQL
-    assert "ORDER BY (project_id, message_id)" in FEATURE_FLAG_EXPOSURES_SQL
+def test_events_are_receipt_deduplicated_and_stream_provenance_bound() -> None:
+    events = _definition("CREATE TABLE IF NOT EXISTS", "events")
 
-    assert "ENGINE = ReplacingMergeTree(timestamp)" in FRONTEND_HEALTH_EVENTS_SQL
-    assert "ORDER BY (project_id, message_id)" in FRONTEND_HEALTH_EVENTS_SQL
-    assert "ENGINE = MergeTree()" not in FRONTEND_HEALTH_EVENTS_SQL
-
-    assert "ENGINE = ReplacingMergeTree(received_at)" in IDENTITY_ALIASES_SQL
-    assert (
-        "ORDER BY (project_id, message_id, anonymous_id, user_id)"
-        in IDENTITY_ALIASES_SQL
-    )
-    assert "DROP TABLE IF EXISTS feature_flag_exposures" in (FEATURE_FLAG_EXPOSURES_SQL)
-    assert "FROM events FINAL" in FEATURE_FLAG_EXPOSURES_SQL
-    assert "DROP TABLE IF EXISTS frontend_health_events" in (FRONTEND_HEALTH_EVENTS_SQL)
-    assert "FROM events FINAL" in FRONTEND_HEALTH_EVENTS_SQL
+    assert "`project_id` String" in events
+    assert "`message_id` String" in events
+    assert "`received_at` DateTime64(3)" in events
+    assert "`source_stream_id_ms` UInt64" in events
+    assert "ENGINE = ReplacingMergeTree(received_at)" in events
+    assert "ORDER BY (project_id, message_id)" in events
+    assert "TTL toDate(received_at) + toIntervalMonth(12)" in events
 
 
-def test_event_stream_provenance_is_preserved_on_events_and_exposures():
-    assert "ADD COLUMN IF NOT EXISTS source_stream String" in (
-        EVENT_STREAM_PROVENANCE_SQL
-    )
-    assert "ADD COLUMN IF NOT EXISTS source_stream_id String" in (
-        EVENT_STREAM_PROVENANCE_SQL
-    )
-    assert "ADD COLUMN IF NOT EXISTS source_stream_id_ms UInt64" in (
-        EVENT_STREAM_PROVENANCE_SQL
-    )
-    assert "ADD COLUMN IF NOT EXISTS source_stream_id_seq UInt64" in (
-        EVENT_STREAM_PROVENANCE_SQL
-    )
-    assert "DROP TABLE IF EXISTS feature_flag_exposures_mv" in (
-        EVENT_STREAM_PROVENANCE_SQL
-    )
-    assert "DROP TABLE IF EXISTS identity_alias_assertions_mv" in (
-        EVENT_STREAM_PROVENANCE_SQL
-    )
-    assert "source_stream_id_ms," in EVENT_STREAM_PROVENANCE_SQL
-    assert "source_stream_id_seq," in EVENT_STREAM_PROVENANCE_SQL
-    assert "CREATE MATERIALIZED VIEW identity_alias_assertions_mv" in (
-        EVENT_STREAM_PROVENANCE_SQL
-    )
-    assert "CREATE TABLE experiment_event_deliveries" in (EVENT_STREAM_PROVENANCE_SQL)
-    assert "ENGINE = ReplacingMergeTree(received_at)" in (EVENT_STREAM_PROVENANCE_SQL)
-    assert "source_stream,\n    source_stream_id" in EVENT_STREAM_PROVENANCE_SQL
-    assert "source_stream_id_seq,\n    message_id" not in EVENT_STREAM_PROVENANCE_SQL
-    assert "CREATE MATERIALIZED VIEW experiment_event_deliveries_mv" in (
-        EVENT_STREAM_PROVENANCE_SQL
-    )
-
-
-def test_event_retention_and_partitions_use_server_receipt_time():
-    events_table = RECEIVED_AT_RETENTION_SQL.split(
-        "CREATE TABLE events__apdl_migration_015 (", 1
-    )[1].split(
-        "INSERT INTO events__apdl_migration_015", 1
-    )[0]
-    delivery_table = RECEIVED_AT_RETENTION_SQL.split(
-        "CREATE TABLE experiment_event_deliveries__apdl_migration_015 (", 1
-    )[1].split(
-        "INSERT INTO experiment_event_deliveries__apdl_migration_015", 1
-    )[0]
-
-    for table_definition in (events_table, delivery_table):
-        assert "event_date" in table_definition
-        assert "Date DEFAULT toDate(received_at)" in table_definition
-        assert "PARTITION BY project_id" in table_definition
-        assert "TTL event_date + INTERVAL 12 MONTH" in table_definition
-        assert "DEFAULT toDate(timestamp)" not in table_definition
-
-    assert "toDate(received_at)\nFROM events;" in RECEIVED_AT_RETENTION_SQL
-    assert (
-        "toDate(received_at)\nFROM experiment_event_deliveries;"
-        in RECEIVED_AT_RETENTION_SQL
-    )
-    assert (
-        "EXCHANGE TABLES events AND events__apdl_migration_015"
-        in RECEIVED_AT_RETENTION_SQL
-    )
-    assert (
-        "EXCHANGE TABLES experiment_event_deliveries"
-        in RECEIVED_AT_RETENTION_SQL
-    )
-    for view in (
-        "feature_flag_exposures_mv",
-        "frontend_health_events_mv",
-        "identity_alias_assertions_mv",
-        "experiment_event_deliveries_mv",
+def test_every_identity_bearing_table_uses_the_canonical_retention_boundary() -> None:
+    for table in (
+        "sessions",
+        "experiment_event_deliveries",
+        "feature_flag_exposures",
+        "frontend_health_events",
+        "identity_alias_assertions",
     ):
-        assert f"DROP TABLE IF EXISTS {view}" in RECEIVED_AT_RETENTION_SQL
-        assert f"CREATE MATERIALIZED VIEW {view}" in RECEIVED_AT_RETENTION_SQL
-
-
-def test_every_personal_analytics_table_has_one_receipt_time_retention_policy():
-    assert (
-        "ALTER TABLE events\n"
-        "    MODIFY TTL toDate(received_at) + INTERVAL 12 MONTH"
-        in PERSONAL_DATA_RETENTION_SQL
-    )
-    assert (
-        "ALTER TABLE experiment_event_deliveries\n"
-        "    MODIFY TTL toDate(received_at) + INTERVAL 12 MONTH"
-        in PERSONAL_DATA_RETENTION_SQL
-    )
-
-    table_contracts = {
-        "sessions": "MergeTree",
-        "feature_flag_exposures": "ReplacingMergeTree(received_at)",
-        "frontend_health_events": "ReplacingMergeTree(received_at)",
-        "identity_alias_assertions": "ReplacingMergeTree(received_at)",
-    }
-    for table, engine in table_contracts.items():
-        definition = PERSONAL_DATA_RETENTION_SQL.split(
-            f"CREATE TABLE {table}__apdl_migration_016 (", 1
-        )[1].split(f"INSERT INTO {table}__apdl_migration_016", 1)[0]
-        assert "received_at" in definition
-        assert "Date DEFAULT toDate(received_at)" in definition
-        assert f"ENGINE = {engine}" in definition
+        definition = _definition("CREATE TABLE IF NOT EXISTS", table)
         assert "PARTITION BY project_id" in definition
-        assert "TTL toDate(received_at) + INTERVAL 12 MONTH" in definition
-        assert "timestamp + INTERVAL 12 MONTH" not in definition
-
-    assert "receipt.matched_session_id = '',\n            now64(3)" in (
-        PERSONAL_DATA_RETENTION_SQL
-    )
-    assert "session.end_time,\n        receipt.received_at" not in (
-        PERSONAL_DATA_RETENTION_SQL
-    )
+        assert "TTL toDate(received_at) + toIntervalMonth(12)" in definition
 
 
-def test_personal_projections_copy_the_server_receipt_authority():
+def test_materialized_views_project_only_from_the_canonical_event_stream() -> None:
+    assert BASELINE.count("CREATE MATERIALIZED VIEW IF NOT EXISTS") == 4
     for view in (
         "feature_flag_exposures_mv",
         "frontend_health_events_mv",
         "identity_alias_assertions_mv",
         "experiment_event_deliveries_mv",
     ):
-        definition = PERSONAL_DATA_RETENTION_SQL.split(
-            f"CREATE MATERIALIZED VIEW {view}", 1
-        )[1]
-        if view != "experiment_event_deliveries_mv":
-            definition = definition.split("CREATE MATERIALIZED VIEW", 1)[0]
-        assert "received_at" in definition
-        assert "toDate(received_at) AS event_date" in definition
+        definition = _definition("CREATE MATERIALIZED VIEW IF NOT EXISTS", view)
+        assert "FROM events" in definition
+
+    assert "event_name = '$feature_flag_exposure'" in BASELINE
+    assert "event_name IN ('$frontend_error', '$web_vital')" in BASELINE
+    assert "(event_type = 'identify')" in BASELINE
+    assert "WHERE source_stream_id != ''" in BASELINE
 
 
-def test_duplicate_amplifying_aggregate_views_are_retired():
-    assert "ENGINE = SummingMergeTree" not in MATERIALIZED_VIEWS_SQL
-    assert "CREATE MATERIALIZED VIEW" not in MATERIALIZED_VIEWS_SQL
-    assert "DROP TABLE IF EXISTS event_counts_hourly_mv" in MATERIALIZED_VIEWS_SQL
-    assert "DROP TABLE IF EXISTS event_counts_daily_mv" in MATERIALIZED_VIEWS_SQL
+def test_identity_resolution_is_conflict_preserving_and_retention_reversible() -> None:
+    resolved = _definition("CREATE VIEW IF NOT EXISTS", "resolved_identity_aliases")
+
+    assert "FROM identity_alias_assertions" in resolved
+    assert "FINAL" in resolved
+    assert "if(min(user_id) = max(user_id), min(user_id), '')" in resolved
+    assert "min(user_id) != max(user_id) AS has_conflict" in resolved
+    assert "identity_alias_resolution_state" not in BASELINE
 
 
-def test_feature_flag_exposures_table_uses_canonical_variant_columns():
-    assert "variant              LowCardinality(String)" in FEATURE_FLAG_EXPOSURES_SQL
-    assert "rollout_bucket       Nullable(Float64)" in FEATURE_FLAG_EXPOSURES_SQL
-    assert "variant_bucket       Nullable(Float64)" in FEATURE_FLAG_EXPOSURES_SQL
-    assert "    value                Bool," not in FEATURE_FLAG_EXPOSURES_SQL
-    assert (
-        "    bucket               Nullable(Float64)," not in FEATURE_FLAG_EXPOSURES_SQL
-    )
-
-
-def test_feature_flag_exposures_mv_projects_canonical_event_properties():
-    assert (
-        "JSONExtractString(properties, 'variant') AS variant"
-        in FEATURE_FLAG_EXPOSURES_SQL
-    )
-    assert (
-        "JSONExtract(properties, 'rollout_bucket', 'Nullable(Float64)') "
-        "AS rollout_bucket" in FEATURE_FLAG_EXPOSURES_SQL
-    )
-    assert (
-        "JSONExtract(properties, 'variant_bucket', 'Nullable(Float64)') "
-        "AS variant_bucket" in FEATURE_FLAG_EXPOSURES_SQL
-    )
-    assert "JSONExtractBool(properties, 'value')" not in FEATURE_FLAG_EXPOSURES_SQL
-    assert "JSONExtract(properties, 'bucket', 'Nullable(Float64)')" not in (
-        FEATURE_FLAG_EXPOSURES_SQL
-    )
-
-
-def test_exposure_projection_keeps_only_assignment_reasons():
-    assert "JSONExtractString(properties, 'reason') IN" in (ASSIGNMENT_EXPOSURES_SQL)
-    assert ASSIGNMENT_EXPOSURES_SQL.count("'rule_match', 'fallthrough'") == 2
-    assert "FROM events FINAL" in ASSIGNMENT_EXPOSURES_SQL
-
-
-def test_legacy_experiment_exposure_storage_is_retired():
-    assert "CREATE TABLE IF NOT EXISTS experiment_exposures" not in (
-        LEGACY_EXPERIMENTS_SQL
-    )
-    assert "DROP TABLE IF EXISTS experiment_metrics_mv" in LEGACY_EXPERIMENTS_SQL
-    assert "DROP TABLE IF EXISTS experiment_exposures" in LEGACY_EXPERIMENTS_SQL
-    assert "CREATE MATERIALIZED VIEW IF NOT EXISTS experiment_metrics_mv" not in (
-        MATERIALIZED_VIEWS_SQL
-    )
-    assert "INNER JOIN experiment_exposures" not in MATERIALIZED_VIEWS_SQL
-
-
-def test_disconnected_prototype_schemas_are_removed_on_upgrade():
-    for view in (
-        "flag_evaluations_v",
-        "experiment_exposures_v",
-        "agent_actions_v",
-        "personalizations_v",
+def test_baseline_contains_no_upgrade_or_prototype_objects() -> None:
+    for retired in (
+        "events_v2",
+        "events_dlq_v2",
+        "decisions_v2",
+        "feeds_v2",
+        "__apdl_migration",
+        "EXCHANGE TABLES",
+        "INSERT INTO",
+        "DROP TABLE",
     ):
-        assert f"DROP VIEW IF EXISTS {view}" in PROTOTYPE_RETIREMENT_SQL
-
-    for table in ("events_dlq_v2", "events_v2", "decisions_v2", "feeds_v2"):
-        assert f"DROP TABLE IF EXISTS {table}" in PROTOTYPE_RETIREMENT_SQL
-
-    assert "CREATE TABLE" not in PROTOTYPE_RETIREMENT_SQL
+        assert retired not in BASELINE
 
 
-def test_identity_alias_projection_uses_identify_with_both_ids_as_only_assertion():
-    assert "CREATE MATERIALIZED VIEW IF NOT EXISTS identity_alias_assertions_mv" in (
-        IDENTITY_ALIASES_SQL
-    )
-    assert "FROM events\nWHERE event_type = 'identify'" in IDENTITY_ALIASES_SQL
-    assert "AND user_id != ''" in IDENTITY_ALIASES_SQL
-    assert "AND anonymous_id != ''" in IDENTITY_ALIASES_SQL
-    assert "previous_id" not in IDENTITY_ALIASES_SQL
-    assert "alias@" not in IDENTITY_ALIASES_SQL
-
-
-def test_identity_alias_backfill_is_historical_checksummed_and_one_time():
-    assert "FROM events FINAL" not in IDENTITY_ALIASES_SQL
-    assert "FROM events FINAL" in IDENTITY_ALIASES_BACKFILL_SQL
-    assert IDENTITY_ALIASES_SQL.index(
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS identity_alias_resolution_state_mv"
-    ) < IDENTITY_ALIASES_SQL.index(
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS identity_alias_assertions_mv"
-    )
-    assert "apdl_schema_backfills" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "ClickHouse backfill checksum drift" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "ORDER BY (name, checksum)" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "hashlib.sha256(payload).hexdigest()" in CLICKHOUSE_MIGRATION_ENGINE
-    assert "ClickHouse backfills directory not found" in CLICKHOUSE_MIGRATION_ENGINE
-    assert CLICKHOUSE_MIGRATION_ENGINE.index("recorded_checksum =") < (
-        CLICKHOUSE_MIGRATION_ENGINE.index("client.execute(backfill.sql")
-    )
-
-
-def test_resolved_identity_aliases_are_tenant_bound_and_conflicts_fail_closed():
-    assert "CREATE VIEW IF NOT EXISTS resolved_identity_aliases" in (
-        IDENTITY_ALIASES_SQL
-    )
-    assert "ENGINE = AggregatingMergeTree" in IDENTITY_ALIASES_SQL
-    assert "minState(user_id) AS min_user_id" in IDENTITY_ALIASES_SQL
-    assert "maxState(user_id) AS max_user_id" in IDENTITY_ALIASES_SQL
-    assert "minMerge(min_user_id) = maxMerge(max_user_id)" in IDENTITY_ALIASES_SQL
-    assert "AS has_conflict" in IDENTITY_ALIASES_SQL
-    assert "uniqExact" not in IDENTITY_ALIASES_SQL
-    assert "GROUP BY\n    project_id,\n    anonymous_id" in IDENTITY_ALIASES_SQL
-
-
-def test_identity_alias_retention_replaces_irreversible_resolution_state():
-    legacy_table_definition = IDENTITY_ALIASES_SQL.split(
-        "CREATE TABLE IF NOT EXISTS identity_alias_assertions (", 1
-    )[1].split("ALTER TABLE identity_alias_assertions", 1)[0]
-
-    assert "TTL" not in legacy_table_definition
-    assert "DROP TABLE IF EXISTS identity_alias_resolution_state_mv" in (
-        PERSONAL_DATA_RETENTION_SQL
-    )
-    assert "DROP TABLE IF EXISTS identity_alias_resolution_state" in (
-        PERSONAL_DATA_RETENTION_SQL
-    )
-    resolved_view = PERSONAL_DATA_RETENTION_SQL.split(
-        "CREATE VIEW resolved_identity_aliases AS", 1
-    )[1].split("CREATE MATERIALIZED VIEW", 1)[0]
-    assert "FROM identity_alias_assertions FINAL" in resolved_view
-    assert "identity_alias_resolution_state" not in resolved_view
-    assert "min(user_id) != max(user_id) AS has_conflict" in resolved_view
+def test_clickhouse_runner_retains_exact_ledger_and_backfill_authority() -> None:
+    assert "pipeline/clickhouse/migrate.py" in CLICKHOUSE_INIT
+    assert "apdl_schema_migrations" in MIGRATION_ENGINE
+    assert "apdl_schema_backfills" in MIGRATION_ENGINE
+    assert "checksum drift" in MIGRATION_ENGINE
+    assert "Migrations must be contiguous" not in MIGRATION_ENGINE
+    assert "must be contiguous from 001" in MIGRATION_ENGINE

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exact PostgreSQL proof for the migration-044 operator boundary.
+# Exact PostgreSQL proof for the canonical operator boundary.
 #
 # Run only against a disposable database after the canonical migrations. The
 # script creates and drops one temporary login role and leaves uniquely named

@@ -10,12 +10,12 @@ from app.config_client import assert_experiment_analysis_capability
 
 
 REQUIRED_POSTGRES_MIGRATION = (
-    41,
-    "041_boundary_marker_retry_quarantine.sql",
+    1,
+    "001_initial_schema.sql",
 )
 REQUIRED_CLICKHOUSE_MIGRATION = (
-    16,
-    "016_personal_data_retention.sql",
+    1,
+    "001_initial_schema.sql",
 )
 REQUIRED_POSTGRES_COLUMNS = frozenset(
     {

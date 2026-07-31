@@ -808,8 +808,8 @@ async def set_safety_policy_provenance(
 ) -> Changeset | None:
     """Persist the immutable tenant snapshot and latest effective-policy digest.
 
-    A legacy row may not have a tenant snapshot yet, so the first safe execution
-    fills it. Once present it is never replaced by a later connection update.
+    An admitted row may not have a tenant snapshot until its first safe
+    execution. Once present it is never replaced by a later connection update.
     """
     async with pool.acquire() as conn:
         row = await conn.fetchrow(

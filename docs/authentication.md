@@ -163,7 +163,7 @@ closes. This keeps self-created projects usable without exposing a persistent
 service credential to the browser or storing a recoverable key.
 
 Agents and Codegen execution requires a canonical
-`admin_project_execution_authorizations` row. Migration 028 backfills and
+`admin_project_execution_authorizations` row. The PostgreSQL baseline
 automatically records `operator_provisioned` authority only for projects whose
 immutable `admin_projects.created_by` is null. Self-created projects retain
 `agents:read` by default. An operator may authorize one deliberately with the

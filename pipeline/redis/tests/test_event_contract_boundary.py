@@ -10,9 +10,7 @@ QUERY_SOURCES = "\n".join(
     for path in sorted((ROOT / "services" / "query" / "app").rglob("*.py"))
 )
 SUPPORTED_MIGRATIONS = ROOT / "pipeline" / "clickhouse" / "migrations"
-PROTOTYPE_RETIREMENT = (
-    SUPPORTED_MIGRATIONS / "012_retire_prototype_schemas.sql"
-).read_text()
+BASELINE = (SUPPORTED_MIGRATIONS / "001_initial_schema.sql").read_text()
 REMOVED_ETL_MANIFEST = ROOT / "pipeline" / "etl" / "pyproject.toml"
 CLICKHOUSE_INIT = (ROOT / "scripts" / "init-clickhouse.sh").read_text()
 CLICKHOUSE_MIGRATION_ENGINE = (
@@ -31,7 +29,7 @@ def test_live_writer_and_query_use_the_events_table_only():
     assert "events_v2" not in QUERY_SOURCES
 
 
-def test_supported_migrations_only_retire_removed_prototype_v2_tables():
+def test_baseline_never_creates_removed_prototype_v2_tables():
     migration_sql = "\n".join(
         path.read_text() for path in sorted(SUPPORTED_MIGRATIONS.glob("*.sql"))
     )
@@ -39,7 +37,7 @@ def test_supported_migrations_only_retire_removed_prototype_v2_tables():
     for table in ("events_v2", "decisions_v2", "feeds_v2"):
         assert f"CREATE TABLE {table}" not in migration_sql
         assert f"CREATE TABLE IF NOT EXISTS {table}" not in migration_sql
-        assert f"DROP TABLE IF EXISTS {table}" in PROTOTYPE_RETIREMENT
+        assert table not in BASELINE
         assert table in CLICKHOUSE_MIGRATION_ENGINE
 
     assert not REMOVED_ETL_MANIFEST.exists()
@@ -56,9 +54,9 @@ def test_migrations_are_the_only_executable_clickhouse_schema_authority():
     executable_event_ddl = [
         path
         for path in (ROOT / "pipeline" / "clickhouse").rglob("*.sql")
-        if "CREATE TABLE IF NOT EXISTS events (" in path.read_text()
+        if "CREATE TABLE IF NOT EXISTS events\n(" in path.read_text()
     ]
-    assert executable_event_ddl == [SUPPORTED_MIGRATIONS / "001_events.sql"]
+    assert executable_event_ddl == [SUPPORTED_MIGRATIONS / "001_initial_schema.sql"]
 
 
 def test_runtime_services_do_not_publish_disconnected_envelope_models():

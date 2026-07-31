@@ -126,9 +126,9 @@ async def test_fresh_run_cannot_cross_waiting_or_approval_resume_boundaries() ->
 
     try:
         applied_name = await observer.fetchval(
-            "SELECT name FROM apdl_schema_migrations WHERE version = 34"
+            "SELECT name FROM apdl_schema_migrations WHERE version = 1"
         )
-        assert applied_name == "034_agent_project_execution_lane.sql"
+        assert applied_name == "001_initial_schema.sql"
 
         waiting_tx = waiting.transaction()
         await waiting_tx.start()

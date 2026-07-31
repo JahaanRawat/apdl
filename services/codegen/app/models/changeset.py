@@ -233,7 +233,7 @@ class Changeset(BaseModel):
     #: tightening takes effect immediately.
     tenant_policy_snapshot: TenantCodegenConnectionPolicy | None = None
     #: Canonical effective-policy digest used by the most recent generation or
-    #: repair attempt. Legacy rows are nullable until they execute again.
+    #: repair attempt. Rows are nullable until they execute a repair attempt.
     effective_safety_policy_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )

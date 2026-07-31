@@ -13,11 +13,6 @@ weight is positive without exceeding the total limit. Experiment authoring is
 stricter: it requires 2–10 variants and every experiment weight is positive.
 
 The executable cross-runtime vectors are in
-`fixtures/gates/variant-weights.json`. Migration 042 applies the same bounds to
-`flags.variants` and `experiments.variants_json`. It does not leave an invalid
-configuration active: affected experiment bundles are stopped and disabled,
-their original and repaired rows are audited, and their flag/experiment outbox
-intents share one new project version. Invalid standalone flags are likewise
-disabled and audited. Repairs use explicit `control` and `treatment` variants
-with weight `1`; an invalid experiment without a backing flag aborts the
-migration instead of allowing an untracked repair.
+`fixtures/gates/variant-weights.json`. The PostgreSQL baseline applies the same
+bounds to `flags.variants` and `experiments.variants_json`, so invalid variant
+configurations cannot enter a fresh database.

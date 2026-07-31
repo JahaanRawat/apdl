@@ -7,22 +7,22 @@ SQL = (
     / "pipeline"
     / "postgres"
     / "migrations"
-    / "038_experiment_data_completeness.sql"
+    / "001_initial_schema.sql"
 ).read_text()
 
 
-def test_completeness_migration_has_strict_tenant_scoped_authorities():
-    assert "CREATE TABLE event_pipeline_watermarks" in SQL
-    assert "project_id TEXT PRIMARY KEY" in SQL
-    assert "stream_key = 'events:raw:' || project_id" in SQL
-    assert "CREATE TABLE experiment_analysis_boundaries" in SQL
-    assert "PRIMARY KEY (project_id, experiment_key, config_version)" in SQL
-    assert "CREATE TABLE experiment_analysis_snapshots" in SQL
-    assert "snapshot_payload ->> 'data_completeness' = 'verified'" in SQL
+def test_completeness_baseline_has_strict_tenant_scoped_authorities():
+    assert "CREATE TABLE public.event_pipeline_watermarks" in SQL
+    assert "event_pipeline_watermarks_pkey PRIMARY KEY (project_id)" in SQL
+    assert "stream_key = ('events:raw:'::text || project_id)" in SQL
+    assert "CREATE TABLE public.experiment_analysis_boundaries" in SQL
+    assert "experiment_analysis_boundaries_pkey PRIMARY KEY" in SQL
+    assert "CREATE TABLE public.experiment_analysis_snapshots" in SQL
+    assert "data_completeness'::text) = 'verified'::text" in SQL
 
 
 def test_completeness_authorities_fail_closed_and_snapshots_are_immutable():
-    assert "status = 'healthy' AND failure_reason IS NULL" in SQL
+    assert "status = 'healthy'::text" in SQL
     assert "status = 'degraded'" in SQL
     assert "legacy_state_unverifiable" in SQL
     assert "dead_lettered_event" in SQL
@@ -40,10 +40,13 @@ def test_completeness_authorities_fail_closed_and_snapshots_are_immutable():
 
 def test_snapshot_foreign_key_includes_the_exact_boundary_stream_id():
     assert "experiment_analysis_boundaries_marker_identity UNIQUE" in SQL
-    assert "config_version,\n        boundary_stream_id" in SQL
-    assert "config_version,\n            marker_stream_id" in SQL
+    assert (
+        "FOREIGN KEY (project_id, experiment_key, config_version, boundary_stream_id) "
+        "REFERENCES public.experiment_analysis_boundaries(project_id, experiment_key, "
+        "config_version, marker_stream_id)"
+    ) in SQL
 
 
 def test_stream_id_constraints_match_clickhouse_unsigned_components():
-    assert SQL.count("<= 18446744073709551615") == 8
+    assert SQL.count("<= '18446744073709551615'::numeric") == 10
     assert "event_pipeline_watermarks_range_check" in SQL

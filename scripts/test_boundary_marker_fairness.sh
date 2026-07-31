@@ -26,22 +26,18 @@ trap 'exit 143' TERM
 echo "==> Starting isolated Redis and PostgreSQL"
 compose up -d --wait --wait-timeout 90 redis postgres >/dev/null
 
-for migration in \
-    038_experiment_data_completeness.sql \
-    041_boundary_marker_retry_quarantine.sql
-do
-    compose exec -T \
-        -e PGPASSWORD=apdl_dev \
-        postgres \
-        psql -X -v ON_ERROR_STOP=1 -U apdl -d apdl \
-        < "$ROOT_DIR/pipeline/postgres/migrations/$migration" \
-        >/dev/null
-done
+baseline="$ROOT_DIR/pipeline/postgres/migrations/001_initial_schema.sql"
+compose exec -T \
+    -e PGPASSWORD=apdl_dev \
+    postgres \
+    psql -X -v ON_ERROR_STOP=1 -U apdl -d apdl \
+    < "$baseline" \
+    >/dev/null
 
 migration_checksum="$(
     "$PYTHON_BIN" -c \
         'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' \
-        "$ROOT_DIR/pipeline/postgres/migrations/041_boundary_marker_retry_quarantine.sql"
+        "$baseline"
 )"
 compose exec -T \
     -e PGPASSWORD=apdl_dev \
@@ -54,8 +50,8 @@ compose exec -T \
         );
         INSERT INTO public.apdl_schema_migrations (version, name, checksum)
         VALUES (
-            41,
-            '041_boundary_marker_retry_quarantine.sql',
+            1,
+            '001_initial_schema.sql',
             '$migration_checksum'
         );" \
     >/dev/null

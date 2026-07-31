@@ -153,8 +153,8 @@ default/control variant, variants, primary metric, statistical plan, and dates
 are immutable. Completing before the planned end is rejected; stopping
 truncates the observed window.
 The lifecycle worker validates the plan before activating scheduled traffic and
-atomically completes due experiments. Legacy rows without a plan can never be
-started. Stopping a draft or scheduled experiment clears its
+atomically completes due experiments. Rows without a plan can never be started.
+Stopping a draft or scheduled experiment clears its
 analysis end and remains non-analyzable (409), because it never started. If the
 scheduler misses an entire scheduled window, it takes that same fail-closed
 path instead of manufacturing a completed run.
@@ -182,8 +182,8 @@ of the cross-runtime contract. Identifiers, strings, rule counts, condition
 counts, and membership lists are bounded and malformed rules fail closed.
 Rollout percentages are finite JSON numbers from 0 through 100; strings,
 booleans, nulls, non-finite numbers, and out-of-range values are rejected before
-persistence. Migration 017 disables and audits any corrupt durable rollout,
-repairs its source experiment, and emits a versioned convergence update.
+persistence. The PostgreSQL baseline installs the same strict rollout checks;
+corrupt durable rollout shapes are never admitted by a fresh installation.
 
 Server evaluation bodies are capped at 65,536 UTF-8 bytes before JSON parsing.
 Context values have maximum depth 4, 100 aggregate object keys, 1,000 aggregate

@@ -355,18 +355,19 @@ def _proposal(
     return proposal
 
 
-def test_lease_migration_preserves_null_for_pre_upgrade_replicas() -> None:
+def test_baseline_keeps_lease_expiry_nullable_without_a_default() -> None:
     ddl = (
         Path(__file__).resolve().parents[3]
         / "pipeline"
         / "postgres"
         / "migrations"
-        / "004_agents_core.sql"
+        / "001_initial_schema.sql"
     ).read_text()
 
-    assert "ALTER COLUMN lease_expires_at" in ddl
-    assert "DROP DEFAULT" in ddl
-    assert "SET DEFAULT" not in ddl
+    runs_start = ddl.index("CREATE TABLE public.agent_runs (")
+    runs = ddl[runs_start : ddl.index("\n);", runs_start)]
+    assert "lease_expires_at timestamp with time zone" in runs
+    assert "lease_expires_at timestamp with time zone DEFAULT" not in runs
 
 
 @pytest.mark.asyncio

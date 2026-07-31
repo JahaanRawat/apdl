@@ -163,8 +163,8 @@ while an editor operation is already in flight, suspend or uninstall the GitHub
 App installation on GitHub as well; GitHub controls the validity of a token it
 already issued.
 
-Existing legacy repository/installation rows are not proof of ownership and
-must not be automatically promoted to active grants.
+Only an active repository grant is proof of ownership; repository or
+installation metadata alone must never be promoted into authority.
 
 ## Changeset lifecycle
 

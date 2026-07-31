@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 51
-MIGRATION_NAME = "051_agents_project_setup.sql"
+MIGRATION_VERSION = 1
+MIGRATION_NAME = "001_initial_schema.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -169,13 +169,11 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_provider_attempts", "completed_at"),
         ("llm_provider_attempts", "credential_id"),
         ("llm_provider_attempts", "credential_version"),
-        ("llm_provider_attempts", "legacy_unbound_credential"),
         ("llm_provider_attempts", "setup_version"),
         ("llm_provider_attempts", "model_tier"),
         ("llm_provider_attempts", "connection_version"),
         ("llm_provider_attempts", "inventory_version"),
         ("llm_provider_attempts", "model_catalog_version"),
-        ("llm_provider_attempts", "legacy_unbound_setup"),
         ("llm_project_model_assignments", "project_id"),
         ("llm_project_model_assignments", "tier"),
         ("llm_project_model_assignments", "provider"),

@@ -39,7 +39,7 @@ progress the process-local frontier did not finalize, so horizontal writer
 scaling requires a different shared-frontier design.
 
 Watermark degradation is deliberately irreversible. A dead-lettered event,
-lost pending entry, unverifiable stream reset, or legacy gap means APDL cannot
+lost pending entry, unverifiable stream reset, or provenance gap means APDL cannot
 prove what should have been analyzed. Resetting a flag in place would turn
 unknown data loss into a false verified claim. Boundary publication has a
 separate monotone `pending` → `published | quarantined` state machine; failed
@@ -53,7 +53,7 @@ tenants cannot starve later projects.
 | `awaiting_pipeline_boundary` | The marker is pending publication or the contiguous watermark has not covered it | Inspect writer, Redis, PostgreSQL, and ClickHouse health; repair the dependency and let normal retry continue |
 | `pipeline_boundary_failed` | Marker publication reached terminal quarantine | Preserve the row and evidence; the affected experiment/version cannot become verified in place |
 | `pipeline_degraded` | Project watermark recorded a known delivery-integrity failure | Treat the project completeness epoch as permanently unverified |
-| `pipeline_provenance_unavailable` | Legacy or current ClickHouse rows cannot be tied to the covered stream interval | Do not publish a decision snapshot; retain the non-final response |
+| `pipeline_provenance_unavailable` | ClickHouse rows cannot be tied to the covered stream interval | Do not publish a decision snapshot; retain the non-final response |
 | `data_completeness_unverified` | The authority or immutable snapshot could not be persisted/verified | Repair PostgreSQL/schema availability and retry the read; never synthesize a snapshot |
 | `unknown_variant_exposures` / `identity_alias_conflicts` | The analyzed population is not canonical | Investigate the source data; these are not queue-retry states |
 | `underpowered_arms` / `non_finite_statistics` | Statistical preconditions are not met | Keep the result non-final; pipeline recovery cannot fix the statistical contract |
@@ -117,7 +117,7 @@ statistics as explicitly named estimated counts, and checks the quarantine
 threshold by reading at most the configured limit plus one row. It does not
 run an unbounded exact outbox count on every probe.
 
-The migration-044-backed Config update adds project-scoped, keyset-paginated
+The Config operator function provides project-scoped, keyset-paginated
 recovery endpoints. They require an authenticated credential for the same
 project with `config:write`.
 
@@ -174,16 +174,14 @@ SHA-256, but not a duplicate payload. For exposure intents, the separate
 400-day receipt ledger remains the `message_id` idempotency/conflict authority.
 Never discard merely to make the degraded metric green.
 
-Migration `036_config_outbox_retention.sql` is the contract handoff that made
-outbox pruning safe: it moved durable exposure conflict authority from the
-outbox row to `config_exposure_receipts`. Migrations `033`, `036`, and `044`
-must therefore be reviewed and tested as one final delivery contract even
-though their immutable migration history remains in version order.
+The PostgreSQL baseline keeps durable exposure conflict authority in
+`config_exposure_receipts`, independently of prunable outbox rows. The receipt,
+quarantine, and operator-log objects are tested as one final delivery contract.
 
 ## Privacy purge for experiment change snapshots
 
 `experiment_audit_log` stores full before/after Config snapshots and has no
-automatic expiry. Migration `044` adds the database-operator-only function
+automatic expiry. The PostgreSQL baseline adds the database-operator-only function
 `public.apdl_purge_experiment_audit(...)`. `PUBLIC` and `apdl_runtime` have no
 execute privilege. The fresh-cluster bootstrap creates a `NOLOGIN`
 `apdl_audit_operator` caller role and a separate, ungranted `NOLOGIN`

@@ -138,7 +138,7 @@ async def test_operator_grant_fails_before_discovery_when_schema_is_not_ready(
         return pool
 
     async def reject_schema(conn: object) -> None:
-        raise RuntimeError("migration 009 is not applied")
+        raise RuntimeError("initial schema is not applied")
 
     async def unexpected(*args: object, **kwargs: object) -> object:
         raise AssertionError("repository discovery/store must not run")
@@ -148,7 +148,7 @@ async def test_operator_grant_fails_before_discovery_when_schema_is_not_ready(
     monkeypatch.setattr(grant_cli, "resolve_repository_target", unexpected)
     monkeypatch.setattr(grant_cli, "activate_operator_grant", unexpected)
 
-    with pytest.raises(RuntimeError, match="migration 009"):
+    with pytest.raises(RuntimeError, match="initial schema"):
         await grant_cli.activate_repository_grant(
             project_id="demo",
             repository="acme/widget",

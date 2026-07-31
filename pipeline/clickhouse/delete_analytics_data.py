@@ -18,10 +18,10 @@ from typing import Any
 import migrate as maintenance
 
 
-REQUIRED_CLICKHOUSE_MIGRATION = (16, "016_personal_data_retention.sql")
+REQUIRED_CLICKHOUSE_MIGRATION = (1, "001_initial_schema.sql")
 REQUIRED_POSTGRES_MIGRATION = (
-    40,
-    "040_analytics_data_deletion_audit.sql",
+    1,
+    "001_initial_schema.sql",
 )
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 TARGET_TABLES = (

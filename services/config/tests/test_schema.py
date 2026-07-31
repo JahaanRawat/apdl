@@ -78,7 +78,7 @@ async def test_rejects_missing_required_migration():
 async def test_rejects_previous_config_migration_as_not_release_ready():
     with pytest.raises(RuntimeError, match=MIGRATION_NAME):
         await assert_schema_ready(
-            FakeConn(migration_name="012_config_atomic_mutations.sql")
+            FakeConn(migration_name="000_missing_schema.sql")
         )
 
 

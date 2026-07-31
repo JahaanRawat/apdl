@@ -11,12 +11,12 @@ CONFIG_MIGRATION_SQL = (
     / "pipeline"
     / "postgres"
     / "migrations"
-    / "006_config.sql"
+    / "001_initial_schema.sql"
 ).read_text()
 
 
 def _table_definition(sql: str, table: str) -> str:
-    start = sql.index(f"CREATE TABLE IF NOT EXISTS {table} (")
+    start = sql.index(f"CREATE TABLE public.{table} (")
     return sql[start : sql.index("\n);", start) + 3]
 
 
@@ -96,31 +96,22 @@ def test_row_to_flag_omits_obsolete_columns_from_legacy_records():
 def test_create_flags_table_defines_only_canonical_variant_columns():
     create_sql = _table_definition(CONFIG_MIGRATION_SQL, "flags")
 
-    assert "default_variant TEXT NOT NULL DEFAULT 'control'" in create_sql
-    assert "variants JSONB NOT NULL DEFAULT" in create_sql
+    assert "default_variant text DEFAULT 'control'::text NOT NULL" in create_sql
+    assert "variants jsonb DEFAULT" in create_sql
     assert "default_value" not in create_sql
     assert "variant_type" not in create_sql
     assert "variants_json" not in create_sql
-    assert "fallthrough JSONB NOT NULL DEFAULT" in create_sql
+    assert "fallthrough jsonb DEFAULT" in create_sql
     assert '"value"' not in create_sql
     assert "flags_fallthrough_rollout_only_check" in create_sql
 
 
-def test_migration_rewrites_and_drops_legacy_boolean_flag_shape():
-    migrate_sql = CONFIG_MIGRATION_SQL
-
-    assert "ADD COLUMN IF NOT EXISTS default_variant" in migrate_sql
-    assert "ADD COLUMN IF NOT EXISTS variants" in migrate_sql
-    assert "ADD COLUMN IF NOT EXISTS default_value" not in migrate_sql
-    assert "DROP COLUMN IF EXISTS default_value" in migrate_sql
-    assert "DROP COLUMN IF EXISTS variant_type" in migrate_sql
-    assert "DROP COLUMN IF EXISTS variants_json" in migrate_sql
-    assert "DROP COLUMN IF EXISTS rollout_percentage" in migrate_sql
-    assert "DROP COLUMN IF EXISTS client_exposed" in migrate_sql
-    assert "RENAME TO feature_flags_legacy" in migrate_sql
-    assert "fallthrough - 'rollout'" in migrate_sql
-    assert "ALTER COLUMN default_variant SET NOT NULL" in migrate_sql
-    assert "flags_fallthrough_rollout_only_check" in migrate_sql
+def test_baseline_contains_no_obsolete_flag_shape_or_upgrade_rewrite():
+    assert "default_value" not in CONFIG_MIGRATION_SQL
+    assert "variant_type" not in CONFIG_MIGRATION_SQL
+    assert "feature_flags_legacy" not in CONFIG_MIGRATION_SQL
+    assert "DROP COLUMN" not in CONFIG_MIGRATION_SQL
+    assert "flags_fallthrough_rollout_only_check" in CONFIG_MIGRATION_SQL
 
 
 @pytest.mark.asyncio
@@ -211,23 +202,19 @@ def test_row_to_experiment_includes_canonical_columns():
 def test_create_experiments_table_defines_canonical_columns():
     create_sql = _table_definition(CONFIG_MIGRATION_SQL, "experiments")
 
-    assert "flag_key TEXT NOT NULL DEFAULT ''" in create_sql
-    assert "default_variant TEXT NOT NULL DEFAULT 'control'" in create_sql
-    assert "primary_metric_json TEXT NOT NULL DEFAULT '{}'" in create_sql
-    assert "status IN ('draft', 'running', 'completed', 'stopped')" in create_sql
+    assert "flag_key text DEFAULT ''::text NOT NULL" in create_sql
+    assert "default_variant text DEFAULT 'control'::text NOT NULL" in create_sql
+    assert "primary_metric_json text DEFAULT '{}'::text NOT NULL" in create_sql
+    assert "experiments_status_check" in create_sql
     assert "bucket_by" in postgres.EXPERIMENT_COLUMNS
 
 
-def test_migrate_experiments_table_adds_columns_and_normalizes_status():
-    migrate_sql = CONFIG_MIGRATION_SQL
-
-    assert "ADD COLUMN IF NOT EXISTS flag_key" in migrate_sql
-    assert "ADD COLUMN IF NOT EXISTS default_variant" in migrate_sql
-    assert "ADD COLUMN IF NOT EXISTS primary_metric_json" in migrate_sql
-    # Legacy status values are rewritten before the constraint is enforced.
-    assert "SET status = 'running' WHERE status = 'active'" in migrate_sql
-    assert "experiments_status_check" in migrate_sql
-    assert "SET flag_key = key WHERE flag_key = ''" in migrate_sql
+def test_baseline_installs_final_experiment_constraints_and_triggers():
+    assert "experiments_status_check" in CONFIG_MIGRATION_SQL
+    assert "experiments_variants_canonical_check" in CONFIG_MIGRATION_SQL
+    assert "experiments_targeting_rules_check" in CONFIG_MIGRATION_SQL
+    assert "experiments_enforce_enrollment_immutability" in CONFIG_MIGRATION_SQL
+    assert "experiments_enforce_archive_lifecycle" in CONFIG_MIGRATION_SQL
 
 
 class RecordingPool:

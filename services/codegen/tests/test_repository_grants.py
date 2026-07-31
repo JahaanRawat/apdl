@@ -142,17 +142,15 @@ async def test_operator_revocation_immediately_hides_active_connection():
     )
 
 
-def test_migration_quarantines_legacy_bindings_and_requires_snapshots():
-    migration = (
+def test_baseline_requires_verified_repository_snapshots_without_legacy_bindings():
+    baseline = (
         Path(__file__).parents[3]
-        / "pipeline/postgres/migrations/009_codegen_repository_authority.sql"
+        / "pipeline/postgres/migrations/001_initial_schema.sql"
     ).read_text()
 
-    assert "RENAME TO codegen_connections_legacy_unverified" in migration
-    assert "REFERENCES admin_projects (project_id)" in migration
-    assert "codegen_connections_require_active_grant" in migration
-    assert "github_repository_grants_prevent_delete" in migration
-    assert "repository_target_quarantined BOOLEAN NOT NULL DEFAULT true" in migration
-    assert "ALTER COLUMN repository_target_quarantined SET DEFAULT false" in migration
-    assert "A changeset repository target is immutable after creation" in migration
-    assert "INSERT INTO github_repository_grants" not in migration
+    assert "codegen_connections_legacy_unverified" not in baseline
+    assert "codegen_connections_authorized_grant_fkey" in baseline
+    assert "codegen_connections_require_active_grant" in baseline
+    assert "github_repository_grants_prevent_delete" in baseline
+    assert "repository_target_quarantined boolean DEFAULT false NOT NULL" in baseline
+    assert "A changeset repository target is immutable after creation" in baseline

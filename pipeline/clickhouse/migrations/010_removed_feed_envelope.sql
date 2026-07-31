@@ -1,2 +1,0 @@
--- Migration 010: reserved tombstone for removed prototype schema history.
--- Supported releases do not expose an external-feed persistence contract.

@@ -21,8 +21,8 @@ COMPOSE = (ROOT / "infra" / "docker" / "docker-compose.yml").read_text()
 DEPS_COMPOSE = (
     ROOT / "infra" / "docker" / "docker-compose.deps.yml"
 ).read_text()
-CLICKHOUSE_UPGRADE_COMPOSE = (
-    ROOT / "scripts" / "fixtures" / "docker-compose.clickhouse-upgrade.yml"
+DATABASE_BASELINE_COMPOSE = (
+    ROOT / "scripts" / "fixtures" / "docker-compose.database-baseline.yml"
 ).read_text()
 POSTGRES_MIGRATOR = (ROOT / "pipeline" / "postgres" / "migrate.py").read_text()
 CLICKHOUSE_MIGRATOR = (ROOT / "pipeline" / "clickhouse" / "migrate.py").read_text()
@@ -68,7 +68,7 @@ class MigrationQuiescenceTests(unittest.TestCase):
         for compose_source in (
             COMPOSE,
             DEPS_COMPOSE,
-            CLICKHOUSE_UPGRADE_COMPOSE,
+            DATABASE_BASELINE_COMPOSE,
         ):
             self.assertIn("/proc/1/cmdline", compose_source)
             self.assertIn(

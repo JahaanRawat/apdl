@@ -25,7 +25,7 @@ MIGRATION = (
     / "pipeline"
     / "postgres"
     / "migrations"
-    / "051_agents_project_setup.sql"
+    / "001_initial_schema.sql"
 )
 
 
@@ -434,15 +434,12 @@ async def test_get_preserves_catalog_stale_assignment_as_noncurrent() -> None:
     assert setup.analysis_ready is False
 
 
-def test_migration_splits_analysis_activation_from_operator_effect_authority() -> None:
+def test_baseline_splits_analysis_activation_from_operator_effect_authority() -> None:
     sql = MIGRATION.read_text(encoding="utf-8")
 
-    assert "ADD COLUMN state TEXT NOT NULL DEFAULT 'inactive'" in sql
-    assert "SET DEFAULT 20000000" in sql
-    assert "SET DEFAULT 2000000" in sql
-    assert "DELETE FROM llm_project_model_assignments;" in sql
-    assert "VALUES (NEW.project_id)" in sql
-    assert "'local'" not in sql
+    assert "state text DEFAULT 'inactive'::text NOT NULL" in sql
+    assert "project_daily_cost_limit_usd_micros bigint DEFAULT 20000000" in sql
+    assert "run_cost_limit_usd_micros bigint DEFAULT 2000000" in sql
     assert "'agents:approve' = ANY(NEW.roles)" in sql
     assert "'agents:run' = ANY(NEW.roles)" not in sql
     assert "'agents:manage' = ANY(NEW.roles)" not in sql
@@ -452,10 +449,14 @@ def test_migration_splits_analysis_activation_from_operator_effect_authority() -
         "public.llm_calls",
         "public.llm_provider_attempts",
     ):
-        assert f"'{table}'::regclass" in sql
-    assert "admin_project_execution_authorizations" not in sql[
-        sql.index("CREATE OR REPLACE FUNCTION apdl_assert_agents_project_active"):
-        sql.index("CREATE OR REPLACE FUNCTION apdl_enforce_analysis_table_project")
+        assert f"('{table}')" in sql
+    activation_function = sql[
+        sql.index("CREATE FUNCTION public.apdl_assert_agents_project_active"):
+        sql.index(
+            "$$;",
+            sql.index("CREATE FUNCTION public.apdl_assert_agents_project_active"),
+        )
     ]
+    assert "admin_project_execution_authorizations" not in activation_function
     assert "llm_project_setup_audit_no_update_delete" in sql
     assert "llm_project_setup_audit_no_truncate" in sql

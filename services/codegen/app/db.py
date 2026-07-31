@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 55
-MIGRATION_NAME = "055_codegen_tenant_publication.sql"
+MIGRATION_VERSION = 1
+MIGRATION_NAME = "001_initial_schema.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_project_execution_authorizations", "project_id"),
@@ -19,10 +19,6 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_connections", "grant_id"),
         ("codegen_connections", "default_base_branch"),
         ("codegen_connections", "tenant_policy"),
-        ("codegen_connections_legacy_unverified", "project_id"),
-        ("codegen_connections_legacy_unverified", "installation_id"),
-        ("codegen_connections_legacy_unverified", "repo"),
-        ("codegen_connections_legacy_unverified", "quarantined_at"),
         ("github_repository_grants", "grant_id"),
         ("github_repository_grants", "project_id"),
         ("github_repository_grants", "installation_id"),
@@ -58,19 +54,6 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "runtime_evidence_assessment"),
         ("codegen_changesets", "review_verdict"),
         ("codegen_changesets", "publication_authorization"),
-        ("codegen_changesets", "publication_authorization_legacy"),
-        (
-            "codegen_changesets",
-            "publication_authorization_segmentless_legacy",
-        ),
-        (
-            "codegen_changesets",
-            "publication_authorization_egress_unattested_legacy",
-        ),
-        (
-            "codegen_changesets",
-            "publication_authorization_pre_tenant_legacy",
-        ),
         ("codegen_changesets", "tenant_policy_snapshot"),
         ("codegen_changesets", "effective_safety_policy_sha256"),
         ("codegen_changesets", "external_ci_awaiting_since"),
@@ -79,7 +62,6 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "retry_of_changeset_id"),
         ("codegen_changesets", "control_metadata"),
         ("codegen_changesets", "llm_execution_snapshot"),
-        ("codegen_changesets", "llm_execution_snapshot_v1_legacy"),
         ("llm_vault_provider_credentials", "credential_id"),
         ("llm_vault_provider_credentials", "connection_id"),
         ("llm_vault_provider_credentials", "project_id"),

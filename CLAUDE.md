@@ -30,7 +30,7 @@ make status             # Container status + service health endpoints
 make smoke              # End-to-end smoke test against the running stack
 make smoke-fresh        # Hermetic fresh-install core proof (clean volumes)
 make smoke-experiment-fresh # Hermetic fresh-install experiment lifecycle proof
-make test-clickhouse-upgrade # Pinned-image ClickHouse upgrade smoke
+make test-database-baseline # Fresh PostgreSQL and ClickHouse baseline smoke
 make migrate-clickhouse # Apply ClickHouse SQL migrations
 make migrate-postgres   # Apply PostgreSQL SQL migrations
 ```
@@ -153,7 +153,7 @@ Admin Console (browser) ──same-origin /api──→ Admin API (Python/FastAP
 - **JS SDK linting:** `tsc --noEmit` (strict mode, no unused locals/params)
 - **JS SDK test pattern:** `__tests__/**/*.test.ts`
 - **Python test pattern:** `tests/` directory in each service and in `sdk/python/`
-- **CI runs on push/PR to main:** lint, tests, builds, package contracts, dependency audits, isolated core/experiment smokes for the declared developer-preview surface, and a pinned-image ClickHouse upgrade smoke
+- **CI runs on push/PR to main:** lint, tests, builds, package contracts, dependency audits, isolated core/experiment smokes for the declared developer-preview surface, and a fresh-database baseline smoke
 - **Dependency updates:** manual, per `docs/dependency-policy.md` — Dependabot version updates are not enabled on this repository
 - **Releases:** the tag must match the version declared in `release-manifest.json`; a release publishes the JavaScript SDK to npm, the Python SDK to PyPI, and source/checksum assets to GitHub Releases
 

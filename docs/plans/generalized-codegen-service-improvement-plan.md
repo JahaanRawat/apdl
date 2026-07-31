@@ -79,8 +79,8 @@ APDL principal
 
 Repository names are display/locator metadata, never authority. Installation
 IDs remain internal to the trusted grant and are neither accepted from nor
-returned to tenant callers. Legacy connections remain untrusted until an
-operator re-verifies their numeric repository identity.
+returned to tenant callers. Repository metadata remains untrusted until an
+operator verifies its numeric repository identity and creates an active grant.
 
 ### Exit Criteria
 

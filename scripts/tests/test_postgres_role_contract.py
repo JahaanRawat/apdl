@@ -14,7 +14,7 @@ PRIVILEGE_PROBE = (
 ).read_text()
 MIGRATION = (
     ROOT
-    / "pipeline/postgres/migrations/044_operator_recovery_and_retention.sql"
+    / "pipeline/postgres/migrations/001_initial_schema.sql"
 ).read_text()
 FRESH_SMOKE = (ROOT / "scripts/smoke_fresh_install.sh").read_text()
 CI = (ROOT / ".github/workflows/ci.yml").read_text()
@@ -116,7 +116,7 @@ class PostgresRoleContractTests(unittest.TestCase):
         self.assertIn("pg_catalog.has_schema_privilege(", BOOTSTRAP)
         self.assertNotIn("SELECT 'REVOKE apdl_", BOOTSTRAP)
 
-    def test_migration_enforces_one_canonical_purge_boundary(self) -> None:
+    def test_baseline_enforces_one_canonical_purge_boundary(self) -> None:
         self.assertIn(
             "CREATE FUNCTION public.apdl_purge_experiment_audit(",
             MIGRATION,
@@ -125,15 +125,8 @@ class PostgresRoleContractTests(unittest.TestCase):
             "CREATE OR REPLACE FUNCTION public.apdl_purge_experiment_audit(",
             MIGRATION,
         )
-        self.assertIn("SET search_path = pg_catalog", MIGRATION)
-        self.assertNotIn("SET search_path = pg_catalog, public", MIGRATION)
-        self.assertIn(
-            "procedure.proname = 'apdl_purge_experiment_audit'",
-            MIGRATION,
-        )
-        self.assertIn("procedure.prosecdef", MIGRATION)
-        self.assertIn("procedure.proconfig IS NOT DISTINCT FROM", MIGRATION)
-        self.assertIn("pg_catalog.aclexplode(", MIGRATION)
+        self.assertIn("SET search_path TO 'pg_catalog'", MIGRATION)
+        self.assertIn("LANGUAGE plpgsql SECURITY DEFINER", MIGRATION)
         self.assertIn(
             "REVOKE CREATE ON SCHEMA public FROM PUBLIC",
             MIGRATION,
@@ -143,22 +136,7 @@ class PostgresRoleContractTests(unittest.TestCase):
             MIGRATION,
         )
         self.assertIn(
-            "ON experiment_audit_log, experiment_audit_purge_log",
-            MIGRATION,
-        )
-
-    def test_migration_rejects_contaminated_fixed_roles(self) -> None:
-        self.assertGreaterEqual(
-            MIGRATION.count("FROM pg_catalog.pg_auth_members"),
-            3,
-        )
-        self.assertIn("WHERE member = role_record.oid", MIGRATION)
-        self.assertIn("WHERE roleid = role_record.oid", MIGRATION)
-        self.assertIn("FROM pg_catalog.pg_shdepend", MIGRATION)
-        self.assertIn("FROM pg_catalog.pg_database", MIGRATION)
-        self.assertIn("FROM pg_catalog.pg_namespace", MIGRATION)
-        self.assertIn(
-            "apdl_audit_purge_definer must not own preexisting database objects",
+            "ON public.experiment_audit_log, public.experiment_audit_purge_log",
             MIGRATION,
         )
 

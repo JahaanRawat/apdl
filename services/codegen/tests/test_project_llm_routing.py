@@ -523,15 +523,8 @@ async def test_routed_editor_rejects_request_snapshot_tenant_mismatch(
 
 
 def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
-    assignment_migration = (
-        ROOT
-        / "pipeline/postgres/migrations"
-        / "054_codegen_project_llm_routing.sql"
-    ).read_text(encoding="utf-8")
-    snapshot_migration = (
-        ROOT
-        / "pipeline/postgres/migrations"
-        / "055_codegen_tenant_publication.sql"
+    baseline = (
+        ROOT / "pipeline/postgres/migrations/001_initial_schema.sql"
     ).read_text(encoding="utf-8")
 
     for field in (
@@ -540,12 +533,12 @@ def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
         "inventory_version",
         "context_window_tokens",
     ):
-        assert f"->>'{field}' ~ '^[1-9][0-9]*$'" in assignment_migration
+        assert f"->>'{field}' ~ '^[1-9][0-9]*$'" in baseline
     for field in (
         "repository_id",
         "repository_installation_id",
     ):
-        assert f"->>'{field}' ~ '^[1-9][0-9]*$'" in snapshot_migration
+        assert f"->>'{field}' ~ '^[1-9][0-9]*$'" in baseline
     for field in (
         "input_cost_per_million_tokens_usd_micros",
         "output_cost_per_million_tokens_usd_micros",
@@ -553,7 +546,7 @@ def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
         assert (
             f"assignment->>'{field}'\n"
             "        ) ~ '^(0|[1-9][0-9]*)$'"
-        ) in assignment_migration
+        ) in baseline
 
 
 def test_snapshot_runtime_accepts_tenant_assignments_and_rejects_deployment_drift(

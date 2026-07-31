@@ -513,10 +513,10 @@ jobs:
           python-version: "3.12"
       - run: make smoke-experiment-fresh
 
-  clickhouse-upgrade-smoke:
-    name: ClickHouse Upgrade Smoke
+  database-baseline-smoke:
+    name: Database Baseline Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: make test-clickhouse-upgrade
+      - run: make test-database-baseline

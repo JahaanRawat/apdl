@@ -87,7 +87,7 @@ services — `ingestion`, `config`, `query`, `agents`, `codegen` (source-only
 checks), and `admin-api` — plus the Python SDK and the ClickHouse writer;
 lints, tests, and builds the JS SDK and the Admin Console; and runs release
 package contracts, a Python dependency audit, hermetic fresh-install
-core/experiment smokes, and a pinned-image ClickHouse upgrade smoke. Fix lint/test failures before
+core/experiment smokes, and a fresh-database baseline smoke. Fix lint/test failures before
 proceeding. Do not open a PR with a red diff unless the user explicitly
 instructs you to and the failure is documented in the PR.
 

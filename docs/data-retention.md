@@ -10,10 +10,10 @@ remains queryable but cannot extend or shorten retention.
 |---|---|---|
 | Raw behavior and delivery provenance | `events`, `experiment_event_deliveries` | 12 calendar months from the receipt date |
 | Derived experience and health analytics | `feature_flag_exposures`, `frontend_health_events` | 12 calendar months from the source event's receipt date |
-| Session analytics | `sessions` | 12 calendar months from the latest matching source receipt; a legacy session with no retained source is anchored to migration time |
+| Session analytics | `sessions` | 12 calendar months from the session's server-authoritative receipt date |
 | Identity linkage | `identity_alias_assertions` and the computed `resolved_identity_aliases` view | 12 calendar months from the assertion's receipt date |
 | Deletion evidence | PostgreSQL `analytics_data_deletion_audit` | No automatic expiry; append-only operator audit evidence |
-| Config experiment change snapshots | PostgreSQL `experiment_audit_log` | No automatic expiry; project/cutoff purge is available only through the audited migration-044 operator function |
+| Config experiment change snapshots | PostgreSQL `experiment_audit_log` | No automatic expiry; project/cutoff purge is available only through the audited operator function |
 | Delivery recovery evidence | PostgreSQL `config_outbox_operator_log` | No automatic expiry; immutable and payload-free |
 | Experiment snapshot purge evidence | PostgreSQL `experiment_audit_purge_log` | No automatic expiry; immutable and payload-free |
 
@@ -91,8 +91,7 @@ audit evidence are rejected by PostgreSQL triggers.
 
 Config's `experiment_audit_log` contains full before/after lifecycle snapshots
 and is deliberately outside the automatic ClickHouse TTL. When a privacy or
-retention policy requires removal, migration
-`044_operator_recovery_and_retention.sql` supplies the project-scoped
+retention policy requires removal, the PostgreSQL baseline supplies the project-scoped
 `public.apdl_purge_experiment_audit(...)` function and an immutable,
 payload-free `experiment_audit_purge_log`.
 

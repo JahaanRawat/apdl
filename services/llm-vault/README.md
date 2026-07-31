@@ -39,11 +39,10 @@ projection token.
   projection endpoints before opening its database transaction. Provider
   discovery or either requested projection failure leaves all state unchanged.
 
-Migration `056_project_llm_credential_vault.sql` is intentionally breaking when
-legacy Agents or Codegen secret tables contain rows, because their ciphertext
-was produced with independent keys. Revoke or export and reconnect those
-credentials before upgrading. The migration removes the legacy secret tables;
-there is no dual-schema compatibility mode.
+The canonical PostgreSQL baseline creates only the shared vault credential
+schema. Per-service Agents and Codegen secret tables are intentionally absent;
+there is no dual-schema compatibility mode. This fresh-install contract does
+not support databases created with the previous migration ledger.
 
 ## Local development
 

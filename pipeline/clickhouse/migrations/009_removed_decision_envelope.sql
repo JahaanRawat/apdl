@@ -1,2 +1,0 @@
--- Migration 009: reserved tombstone for removed prototype schema history.
--- Supported releases keep flag, experiment, and agent authority in live stores.

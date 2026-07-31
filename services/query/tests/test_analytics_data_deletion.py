@@ -18,7 +18,7 @@ POSTGRES_SQL = (
     / "pipeline"
     / "postgres"
     / "migrations"
-    / "040_analytics_data_deletion_audit.sql"
+    / "001_initial_schema.sql"
 ).read_text()
 sys.path.insert(0, str(MODULE_DIR))
 SPEC = importlib.util.spec_from_file_location("apdl_analytics_deletion", MODULE_PATH)
@@ -87,12 +87,12 @@ def test_deletion_targets_are_explicit_and_keep_alias_assertions_until_last():
         "identity_alias_assertions",
     )
     assert deletion.REQUIRED_POSTGRES_MIGRATION == (
-        40,
-        "040_analytics_data_deletion_audit.sql",
+        1,
+        "001_initial_schema.sql",
     )
     assert deletion.REQUIRED_CLICKHOUSE_MIGRATION == (
-        16,
-        "016_personal_data_retention.sql",
+        1,
+        "001_initial_schema.sql",
     )
 
 
@@ -134,24 +134,23 @@ def test_completed_request_is_idempotent_without_repeating_mutations(monkeypatch
 
 def test_audit_ledger_is_append_only_and_never_stores_raw_user_ids():
     table_definition = POSTGRES_SQL.split(
-        "CREATE TABLE analytics_data_deletion_audit (", 1
+        "CREATE TABLE public.analytics_data_deletion_audit (", 1
     )[1].split("\n);", 1)[0]
 
     assert "user_id" not in table_definition
-    assert "target_sha256  TEXT NOT NULL" in table_definition
-    assert "request_sha256 TEXT NOT NULL" in table_definition
-    assert "PRIMARY KEY (request_id, event_type)" in table_definition
-    assert "event_type IN ('requested', 'completed')" in table_definition
-    assert "scope IN ('project', 'user')" in table_definition
+    assert "target_sha256 text NOT NULL" in table_definition
+    assert "request_sha256 text NOT NULL" in table_definition
+    assert "analytics_data_deletion_event_type_check" in table_definition
+    assert "analytics_data_deletion_scope_check" in table_definition
     assert "details = '{}'::jsonb" in table_definition
     assert "details ?& ARRAY[" in table_definition
     for table in deletion.TARGET_TABLES:
         assert f"'{table}'" in table_definition
         assert f"{{matched_rows,{table}}}" in table_definition
     assert "NEW.recorded_at := clock_timestamp()" in POSTGRES_SQL
-    assert POSTGRES_SQL.count("SET search_path = pg_catalog, public") == 2
+    assert "SET search_path TO 'pg_catalog', 'public'" in POSTGRES_SQL
     assert "analytics deletion completion requires a requested event" in POSTGRES_SQL
     assert "analytics deletion completion does not match its request" in POSTGRES_SQL
-    assert "BEFORE UPDATE OR DELETE" in POSTGRES_SQL
+    assert "BEFORE DELETE OR UPDATE" in POSTGRES_SQL
     assert "BEFORE TRUNCATE" in POSTGRES_SQL
-    assert "REVOKE ALL ON analytics_data_deletion_audit FROM PUBLIC" in POSTGRES_SQL
+    assert "REVOKE ALL ON TABLE public.analytics_data_deletion_audit FROM PUBLIC" in POSTGRES_SQL

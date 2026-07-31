@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-database-baseline test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -454,8 +454,8 @@ smoke-fresh:
 smoke-experiment-fresh:
 	@bash scripts/smoke_fresh_install.sh experiment
 
-test-clickhouse-upgrade:
-	@bash scripts/test_clickhouse_upgrade.sh
+test-database-baseline:
+	@bash scripts/test_database_baseline.sh
 
 # Container status + service health endpoints.
 status:

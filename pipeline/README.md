@@ -80,8 +80,8 @@ from every `events:raw:*` stream — discovered via `SCAN`, or pinned with
   stealing that ID, while genuine post-XADD observations remain mandatory.
   Redis insertion remains token-idempotent, and the original project,
   experiment, version, window, stream, token, and observed identity never
-  changes. Startup holds the migration guards while proving the exact migration
-  041 ledger checksum, columns, canonical constraint definitions, and exact
+  changes. Startup holds the migration guards while proving the exact baseline
+  ledger checksum, columns, canonical constraint definitions, and exact
   monotone/terminal trigger function before taking singleton writer authority.
 - **Shutdown:** SIGINT/SIGTERM trigger a bounded final flush and stats log.
   Cancellation never marks a still-running synchronous insert as complete. If
@@ -106,23 +106,10 @@ The boundary/watermark decision record, non-final reason mapping, and response
 to pending, quarantined, or irreversibly degraded authority are documented in
 [Experiment finality and delivery recovery](../docs/experiment-finality-and-delivery-recovery.md).
 
-Persistent pre-policy streams are reconciled by the writer before consumption:
-an exact `XTRIM MINID` removes only legacy entries proven acknowledged before
-the earliest pending delivery. This makes old acknowledged history stop
-consuming the new outstanding-entry capacity. The writer performs this trim
-before attempting consumer-group creation and avoids group-creation writes for
-groups that already exist, so an existing group can recover when Redis starts
-above its new memory ceiling. Before the first rollout of `maxmemory`, verify
-that the configured ceiling exceeds current `used_memory` plus operating
-headroom. If it does not, temporarily start above current usage, confirm writer
-reconciliation has completed, and only then lower the ceiling; a stream with no
-consumer group cannot be trimmed safely to manufacture that headroom.
-
-An upgrade must be coordinated:
-stop every Ingestion and Config outbox producer that can still issue legacy
-`XADD MAXLEN`, start the new writer and confirm reconciliation, then start only
-bounded producers. Mixed old/new producers are unsupported because one legacy
-producer can still trim entries admitted by another process.
+Before starting producers, verify that Redis's configured memory ceiling leaves
+operating headroom. The writer safely trims only acknowledged history before
+the earliest pending delivery; a stream with no consumer group cannot be
+trimmed to manufacture headroom.
 
 Environment variables: `REDIS_URL` (default `redis://localhost:6379`),
 `POSTGRES_URL` (required; for local development use
@@ -143,148 +130,70 @@ query parameters and replaces conflicting values embedded in the URL.
 
 ## ClickHouse schema
 
-Migrations in `clickhouse/migrations/` are the only executable ClickHouse schema
-authority and are applied by `make migrate-clickhouse`. There is no second
-schema copy to update independently.
+`clickhouse/migrations/001_initial_schema.sql` is the canonical fresh-install
+schema. It creates the final tables and projections directly; it contains no
+shadow-table exchanges, legacy upgrades, data copies, or prototype retirement
+steps. Future ClickHouse schema changes start at `002_*.sql`.
 
-The migrator validates one contiguous `001...N` filename sequence, records the
-exact SHA-256 and name of every applied file in
-`apdl_schema_migrations`, and rejects missing, reordered, renamed, or modified
-history. Applied migration files are immutable; schema changes require a new
-numbered migration. SQL is written to be restart-safe because ClickHouse DDL is
-not transactional and a process can stop after the DDL succeeds but before its
-ledger row is recorded.
+The migrator validates a contiguous `001...N` filename sequence, records each
+file's exact SHA-256 and name in `apdl_schema_migrations`, and rejects missing,
+reordered, renamed, or modified history. ClickHouse DDL remains restart-safe,
+so baseline objects use `IF NOT EXISTS` in case a process stops after DDL
+succeeds but before its ledger row is recorded.
 
-Migration 005 upgrades the known pre-ledger `events` and `sessions` shapes
-without resetting the volume: legacy-only event columns receive deterministic
-defaults, rows move through canonical shadow tables, and `EXCHANGE TABLES`
-installs the required string project identifiers plus the event
-`ReplacingMergeTree(received_at)` engine and `(project_id, message_id)` sorting
-key. Migrations 006 and 007 then rebuild their derived projections from
-`events FINAL`. Stop the writer and Query service while applying an upgrade so
-no process observes the short projection-rebuild window.
+The baseline creates these retained analytics tables:
 
-Migration 016 gives every personally attributable base and derived analytics
-table the same 12-month server-receipt retention boundary and removes the
-irreversible identity aggregate. The supported, fenced project/user purge
-workflow and its append-only completion evidence are documented in
-[Analytics data retention and deletion](../docs/data-retention.md).
+- `events` — the canonical raw event stream, deduplicated by
+  `(project_id, message_id)` using `ReplacingMergeTree(received_at)`.
+- `sessions` — session rollups anchored to server receipt time.
+- `experiment_event_deliveries` — stream-provenance projection used for
+  experiment completeness.
+- `feature_flag_exposures` — strict flag-evaluation projection.
+- `frontend_health_events` — frontend error and web-vital projection.
+- `identity_alias_assertions` — retained, append-only identify assertions.
 
-### Canonical developer-preview event contract
+Materialized views project those derived tables from `events`. The
+`resolved_identity_aliases` view resolves an alias only when all retained
+assertions agree; conflicting claims remain visible and unresolved. Every
+identity-bearing table uses the same 12-month server-receipt retention boundary.
+Supported Query Service reads use `FINAL` where retry deduplication is required.
 
-The release has one event contract and one analytical source of truth:
-
-1. SDKs send the strict flat event shape validated by
-   `services/ingestion/app/models/schemas.py`.
-2. Ingestion publishes that complete JSON record to
-   `events:raw:{project_id}`.
-3. The Redis writer validates the same field set and inserts into `events`.
-4. Query SQL and ClickHouse materialized views read `events` (using `FINAL`
-   where retry deduplication is required).
-
-There is no envelope alias, v2 dual-write, or fallback loader in the supported
-runtime. The unused service envelope models and prototype SQL were removed;
-migration 012 also drops their inert tables and views from older volumes. No
-reconciliation is performed because those objects never had a deployed writer
-or query path. In-place upgrades from the documented pre-ledger event shape are
-covered by `make test-clickhouse-upgrade`; unknown third-party ClickHouse
-schemas remain outside the developer-preview contract.
-
-**Tables**
-
-- `events` (001/005, ReplacingMergeTree) — raw event stream, idempotent on
-  `(project_id, message_id)`; the writer's insert target
-- `sessions` (002, MergeTree) — session-level rollups
-- `feature_flag_exposures` (006, ReplacingMergeTree) — idempotent flag
-  evaluation results projected from events
-- `frontend_health_events` (007, ReplacingMergeTree) — idempotent frontend
-  errors and web-vitals projected from events
-- `identity_alias_assertions` (011/016, ReplacingMergeTree) — retained
-  tenant-bound,
-  append-only `identify` assertions keyed by the complete claim; exact retries
-  collapse, but reusing a message ID cannot retract an accepted identity command
-
-**Materialized views**
-
-- `feature_flag_exposures_mv` (006) — extracts flag fields from `events.properties` into `feature_flag_exposures`
-- `frontend_health_events_mv` (007) — extracts error/web-vitals fields from `events.properties` into `frontend_health_events`
-- `identity_alias_assertions_mv` (011) — projects only `identify` events that
-  contain both canonical identity fields
-
-`resolved_identity_aliases` resolves only when the minimum and maximum claimed
-user IDs match. Conflicting claims stay visible with an empty resolved user and
-Query leaves those actors separate. Migration 016 computes resolution directly
-from retained assertions, so TTL or the supported deletion workflow cannot
-leave irreversible aggregate state behind. The alias becomes visible after
-writer durability and applies retroactively across retained event history. A
-user-only `identify` is a trait update, not an alias assertion.
-
-Historical recovery lives in `pipeline/clickhouse/backfills/`, outside the
-replayed schema migrations. The initializer records each backfill's name and
-SHA-256 checksum in `apdl_schema_backfills`, serializes runners with a local
-single-writer lock, and executes the exact temporary snapshot it hashed. It
-submits the retained-history scan only once and preserves distinct checksum
-evidence so drift fails closed. The migration can recover only the current
-`FINAL` form of identify events still inside the raw-event TTL; older or
-already-overwritten pre-migration assertions cannot be reconstructed. A
-missing backfill directory is an initialization error rather than an implicit
-opt-out.
-
-Supported Query Service analytics read each ReplacingMergeTree with `FINAL` so
-retries are deduplicated before aggregation. Migration 004 removes the legacy
-SummingMergeTree count views because materialized views process retried insert
-blocks before source-table replacement and would permanently double count them.
+`clickhouse/backfills/` is intentionally empty for the baseline. Future
+retained-data transformations belong there rather than in replayable DDL. The
+initializer records any future backfill's name and checksum in
+`apdl_schema_backfills` and executes it exactly once under the maintenance
+fence.
 
 Every file in `clickhouse/migrations/` must be executable ClickHouse SQL. The
-runner fails if a PostgreSQL marker is found there instead of silently skipping
-the misplaced migration.
+runner rejects PostgreSQL markers and removed prototype-schema operations.
 
 ## PostgreSQL schema
 
-PostgreSQL migrations live only in `postgres/migrations/` and are applied by
-`make migrate-postgres` in a strict, contiguous, zero-padded filename order.
-The runner records each file's version, exact name, and SHA-256 checksum in the
-immutable `apdl_schema_migrations` ledger. A file and its ledger insert commit
-in the same transaction under an advisory lock. Applied files run exactly once;
-renaming, editing, deleting, or inserting an older file fails closed.
+`postgres/migrations/001_initial_schema.sql` is the canonical fresh-install
+schema. It creates the final tables, indexes, constraints, functions, triggers,
+registry rows, and grants directly. Historical row repairs and compatibility
+archives are intentionally absent. Future PostgreSQL changes start at
+`002_*.sql`.
 
-- `001_auth_credentials.sql` -- project-scoped service credential registry
-- `002_admin_auth.sql` -- admin users, sessions, project grants, and proxy audit
-- `003_admin_projects.sql` -- self-service project registry and grant backfill
-- `004_agents_core.sql` -- the live Agents tables and pgvector memory shape
-- `005_agent_observability.sql` -- agent envelope metadata and `llm_calls`
-- `006_config.sql` -- flags, flag audit history, and Config experiments
-- `007_codegen.sql` -- connections, changesets, GitHub/CI observations, and claims
-- `008_codegen_safety_policy.sql` -- strict tenant preferences and effective safety-policy provenance
-- `009_codegen_repository_authority.sql` -- operator-verified repository grants, legacy binding quarantine, and immutable changeset targets
-- `010_codegen_publication_identity.sql` -- v1 publication audit archive and strict image/config-bound v2 authority
-- `011_codegen_development_publication.sql` -- schema support for a draft-only development authorization; the 0.3.0 runtime still keeps Codegen offline
-- `012_config_atomic_mutations.sql` -- transactional Config mutations and durable change outbox
-- `013_disable_automatic_guardrails.sql` -- release fence for automatic experiment decisions
-- `014_disable_self_registered_agents.sql` -- immutable project provenance and execution fence for self-registered projects
+The runner applies the strict, contiguous sequence under an advisory lock. Each
+migration and its immutable `apdl_schema_migrations` ledger entry commit in the
+same transaction. Renaming, editing, deleting, or inserting an older migration
+fails closed. An empty ledger beside existing public tables is rejected: this
+release supports fresh databases and exact ledger prefixes, not adoption of an
+unversioned schema.
 
-Config, Agents, and Codegen never create or alter tables at process startup.
-They verify the required ledger entry and schema columns, then fail with a
-`make migrate-postgres` instruction if the database is behind. Docker Compose
-gates all PostgreSQL consumers on the one-shot `postgres-migrate` service.
-That gives PostgreSQL consumers the same ordering within the full-stack file,
-but bare Compose is not a supported startup path because it does not sequence
-the independently coordinated ClickHouse migration. Use `make dev-core` or
-`make dev-all`.
+The cluster bootstrap creates the fixed migration, runtime, and audited-operator
+roles before the baseline runs. The baseline grants runtime access explicitly,
+keeps audit-purge authority separated behind a constrained `SECURITY DEFINER`
+function, and seeds the execution and analysis table registries before proving
+their triggers are installed.
 
-The obsolete PostgreSQL files formerly numbered 005 and 011 under the
-ClickHouse directory are not applied verbatim. Their UUID/`vector(1536)` Agent
-tables and integer project identifiers conflict with the running services.
-Migration 004 installs the live TEXT/BIGSERIAL/`vector(384)` contracts and, if
-someone previously ran the obsolete SQL manually, preserves incompatible rows
-in `*_legacy_005` tables. It also preserves embeddings from a non-canonical
-vector width in `agent_memory_legacy_vectors` before installing `vector(384)`.
-Migration 005 similarly preserves an incompatible `llm_calls` table as
-`llm_calls_legacy_011`. The deprecated `ui_configs` scaffold is not recreated;
-Config owns the one canonical `experiments` table. Migration 006 preserves an
-unprojectable `feature_flags` table as `feature_flags_legacy`, and migration 007
-preserves runtime-evidence rows without an exact CI binding in
-`codegen_runtime_evidence_observations_legacy_unbound`.
+Config, Agents, Codegen, Query, the ClickHouse writer, and the analytics deletion
+workflow all gate readiness on `001_initial_schema.sql` plus their required
+columns, constraints, or engines. Applications never create or alter tables at
+startup. Docker Compose gates PostgreSQL consumers on the one-shot
+`postgres-migrate` service; use `make dev-core` or `make dev-all` so the
+independently coordinated ClickHouse baseline is also applied.
 
 ## Running locally
 
@@ -302,6 +211,7 @@ outside the 0.3.0 support boundary.
 ## Tests
 
 ```bash
-make test-writer # pytest for the Redis ClickHouse writer
-make lint-writer # ruff for the writer and its tests
+make test-writer            # pytest for the Redis ClickHouse writer
+make lint-writer            # ruff for the writer and its tests
+make test-database-baseline # fresh PostgreSQL/ClickHouse baseline and drift proof
 ```

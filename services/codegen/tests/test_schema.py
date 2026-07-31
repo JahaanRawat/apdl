@@ -7,6 +7,10 @@ import pytest
 from app.db import MIGRATION_NAME, MIGRATION_VERSION, REQUIRED_COLUMNS, assert_schema_ready
 
 
+ROOT = Path(__file__).resolve().parents[3]
+BASELINE = (ROOT / "pipeline/postgres/migrations/001_initial_schema.sql").read_text()
+
+
 class FakeConn:
     def __init__(
         self,
@@ -35,17 +39,18 @@ class FakeConn:
 
 
 @pytest.mark.asyncio
-async def test_accepts_complete_migrated_schema():
+async def test_accepts_complete_baseline_schema():
     await assert_schema_ready(FakeConn())
 
 
-def test_startup_requires_tenant_publication_migration():
-    assert MIGRATION_VERSION == 55
-    assert MIGRATION_NAME == "055_codegen_tenant_publication.sql"
+def test_startup_requires_canonical_initial_schema():
+    assert MIGRATION_VERSION == 1
+    assert MIGRATION_NAME == "001_initial_schema.sql"
     assert (
         "admin_project_execution_authorizations",
         "authorization_source",
     ) in REQUIRED_COLUMNS
+    assert all("legacy" not in table and "legacy" not in column for table, column in REQUIRED_COLUMNS)
 
 
 @pytest.mark.asyncio
@@ -55,11 +60,9 @@ async def test_rejects_missing_migration_ledger():
 
 
 @pytest.mark.asyncio
-async def test_rejects_database_without_tenant_publication_migration():
-    with pytest.raises(RuntimeError, match="055_codegen_tenant_publication.sql"):
-        await assert_schema_ready(
-            FakeConn(migration_name="054_codegen_project_llm_routing.sql")
-        )
+async def test_rejects_database_without_initial_schema():
+    with pytest.raises(RuntimeError, match="001_initial_schema.sql"):
+        await assert_schema_ready(FakeConn(migration_name=None))
 
 
 @pytest.mark.asyncio
@@ -91,93 +94,55 @@ def test_codegen_startup_contains_no_postgres_ddl():
     assert "ALTER TABLE" not in db_source
 
 
-def test_durable_effects_migration_defines_strict_changeset_idempotency():
-    migration = (
-        Path(__file__).parents[3]
-        / "pipeline/postgres/migrations/022_agents_durable_effects.sql"
-    ).read_text()
+def test_baseline_defines_strict_codegen_authority_without_archives():
+    changesets_start = BASELINE.index("CREATE TABLE public.codegen_changesets (")
+    changesets = BASELINE[changesets_start : BASELINE.index("\n);", changesets_start)]
 
-    assert "ADD COLUMN IF NOT EXISTS idempotency_key TEXT" in migration
-    assert "ADD COLUMN IF NOT EXISTS idempotency_request_sha256 CHAR(64)" in migration
-    assert "ALTER COLUMN idempotency_key SET NOT NULL" in migration
-    assert "ALTER COLUMN idempotency_request_sha256 SET NOT NULL" in migration
-    assert "codegen_changesets_idempotency_key_check" in migration
-    assert "codegen_changesets_idempotency_request_sha256_check" in migration
-    assert "'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'" in migration
-    assert "ON codegen_changesets (project_id, idempotency_key)" in migration
-    assert "FOREIGN KEY (project_id, retry_of_changeset_id)" in migration
-    assert "REFERENCES codegen_changesets(project_id, changeset_id)" in migration
-    assert "'legacy:'\n        || md5(" in migration
+    assert "idempotency_key text NOT NULL" in changesets
+    assert "idempotency_request_sha256 character(64) NOT NULL" in changesets
+    assert "repository_grant_id text" in changesets
+    assert "control_metadata jsonb" in changesets
+    assert "publication_authorization jsonb" in changesets
+    assert "publication_authorization_legacy" not in changesets
+    assert "publication_authorization_segmentless_legacy" not in changesets
+    assert "publication_authorization_egress_unattested_legacy" not in changesets
+    assert "publication_authorization_pre_tenant_legacy" not in changesets
+    assert "llm_execution_snapshot_v1_legacy" not in changesets
+    assert "llm_execution_snapshot jsonb" in changesets
+    assert "codegen_changesets_publication_authorization_check" in changesets
+    assert "tenant_publication_authorization@1" in changesets
+    assert "codegen_llm_execution_snapshot@2" in BASELINE
+    assert "development_publication_authorization@1" in BASELINE
 
 
-def test_private_task_controls_migration_enforces_authority_boundary():
-    migration = (
-        Path(__file__).parents[3]
-        / "pipeline/postgres/migrations/025_codegen_private_task_controls.sql"
-    ).read_text()
-
-    assert "ADD COLUMN IF NOT EXISTS control_metadata JSONB NOT NULL" in migration
-    assert "changeset_controls@1" in migration
-    assert "codegen_changesets_public_task_context_check" in migration
-    assert "codegen_changesets_control_metadata_check" in migration
-    assert "codegen changeset control metadata is immutable" in migration
-    assert "private revert control requires a merged source" in migration
-    for key in (
-        "risk_level",
-        "revert_sha",
-        "reverts_changeset",
-        "reverts_pr_number",
-        "retry_of",
+def test_baseline_defines_project_scoped_codegen_llm_authority():
+    for table in (
+        "llm_vault_provider_credentials",
+        "llm_vault_connection_consumers",
+        "codegen_project_provider_connections",
+        "codegen_project_provider_models",
+        "codegen_project_model_assignments",
+        "codegen_llm_attempts",
     ):
-        assert key in migration
+        assert f"CREATE TABLE public.{table}" in BASELINE
+
+    assert "codegen_project_provider_credentials" not in BASELINE
+    assert "llm_project_provider_credentials" not in BASELINE
+    assert "llm_vault_provider_credentials_one_active_idx" in BASELINE
+    assert "codegen_project_provider_connections_vault_credential_fk" in BASELINE
+    assert "codegen_project_model_assignments_validate" in BASELINE
+    assert "codegen_llm_attempts_validate_snapshot" in BASELINE
+    assert "('public.codegen_llm_attempts')" in BASELINE
 
 
-def test_egress_publication_migration_retires_unattested_authority():
-    migration = (
-        Path(__file__).parents[3]
-        / "pipeline/postgres/migrations/026_codegen_egress_publication.sql"
-    ).read_text()
-
-    assert (
-        "ADD COLUMN IF NOT EXISTS\n"
-        "        publication_authorization_egress_unattested_legacy JSONB" in migration
-    )
-    assert "= 'publication_authorization@3'" in migration
-    assert "= 'publication_authorization@4'" in migration
-    assert "= 'publication_request@3'" in migration
-    assert "expected_egress_policy_sha256" in migration
-    assert (
-        "publication_authorization->'request'->>'egress_policy_sha256'\n"
-        "                = publication_authorization->>'expected_egress_policy_sha256'"
-        in migration
-    )
-    assert "= 'development_publication_authorization@1'" in migration
-
-
-def test_pr_publication_recovery_migration_is_strict_and_append_only():
-    migration = (
-        Path(__file__).parents[3]
-        / "pipeline/postgres/migrations/027_codegen_pr_publication_recovery.sql"
-    ).read_text()
-
-    assert (
-        "CREATE TABLE IF NOT EXISTS codegen_pull_request_publication_events"
-        in migration
-    )
-    assert "pull_request_publication_intent@1" in migration
-    assert "pull_request_create_accepted@1" in migration
-    assert "pull_request_identity_validated@1" in migration
-    assert "event_sequence BIGINT GENERATED ALWAYS AS IDENTITY UNIQUE" in migration
-    assert "cleanup_request_event_id TEXT" in migration
-    assert "uq_codegen_pr_publication_intent" in migration
-    assert "codegen_pr_publication_payload_identity_check" in migration
-    assert "IS NOT DISTINCT FROM event_id" in migration
-    assert "IS NOT DISTINCT FROM cleanup_request_event_id" in migration
-    assert "request.pr_number IS NOT DISTINCT FROM NEW.pr_number" in migration
-    assert "request.github_url IS NOT DISTINCT FROM NEW.github_url" in migration
-    assert "NEW.payload->>'next_action'" in migration
-    assert "codegen_pr_publication_events_require_intent" in migration
-    assert "BEFORE UPDATE OR DELETE" in migration
+def test_baseline_defines_append_only_pr_publication_recovery():
+    assert "CREATE TABLE public.codegen_pull_request_publication_events" in BASELINE
+    assert "pull_request_publication_intent@1" in BASELINE
+    assert "pull_request_create_accepted@1" in BASELINE
+    assert "pull_request_identity_validated@1" in BASELINE
+    assert "uq_codegen_pr_publication_intent" in BASELINE
+    assert "codegen_pr_publication_events_require_intent" in BASELINE
+    assert "codegen_pr_publication_events_append_only" in BASELINE
 
 
 def test_shutdown_awaits_requeued_jobs_before_closing_database():

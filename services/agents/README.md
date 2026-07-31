@@ -114,7 +114,7 @@ credential version, decrypts it just in time, and revalidates it at the egress
 boundary. It records provider/model, credential ID/version, prompt hash, usage,
 cost, latency, and outcome without storing prompt content or secret material.
 
-Migration 051 moves every fresh or migrated project to one explicit
+The PostgreSQL baseline gives every fresh project one explicit
 `inactive` setup with no fabricated model assignment. A current human owner, or
 an active delegated member holding both `agents:manage` and
 `credentials:manage`, connects one or more reviewed providers and activates the
@@ -177,11 +177,6 @@ experiment in 0.3.0. Actions that fail static validation halt.
 5. After implementation and review, an operator must explicitly activate the
    experiment through the Config/Admin lifecycle. Agents does not perform or
    infer that activation.
-
-When upgrading an existing deployment to migration 014, stop the Agents
-service before applying PostgreSQL migrations. The migration fails existing
-self-created-project work and reopens its exact proposal claims, but it cannot
-cancel an already in-flight provider HTTP call inside a still-running process.
 
 ## Memory
 

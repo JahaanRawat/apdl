@@ -108,7 +108,7 @@ def test_boundary_marker_schema_gate_requires_exact_ledger_columns_and_state(
 
         async def fetchrow(self, query, *args):
             if "apdl_schema_migrations" in query:
-                assert args == (41,)
+                assert args == (1,)
                 return {
                     "name": writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_NAME,
                     "checksum": (
@@ -363,7 +363,7 @@ def test_boundary_marker_schema_gate_rejects_wrong_ledger_checksum():
 
         async def fetchrow(self, query, version):
             assert "apdl_schema_migrations" in query
-            assert version == 41
+            assert version == 1
             return {
                 "name": writer_module.BOUNDARY_MARKER_POSTGRES_MIGRATION_NAME,
                 "checksum": "0" * 64,
@@ -410,7 +410,7 @@ def test_writer_schema_gate_failure_precedes_and_unwinds_runtime_locks(
             return pool
 
         async def fail_schema(_connection):
-            raise RuntimeError("migration 041 is absent")
+            raise RuntimeError("initial schema is absent")
 
         async def record_singleton(*_args, **_kwargs):
             singleton_calls.append(True)
@@ -435,7 +435,7 @@ def test_writer_schema_gate_failure_precedes_and_unwinds_runtime_locks(
             record_inhibitor,
         )
 
-        with pytest.raises(RuntimeError, match="migration 041 is absent"):
+        with pytest.raises(RuntimeError, match="initial schema is absent"):
             await writer_module.main()
 
         assert inhibitor_calls == [True]
