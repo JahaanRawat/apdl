@@ -48,6 +48,11 @@ projects with a canonical `admin_project_execution_authorizations` row.
 | `POST` | `/v1/agents/{run_id}/cancel` | Durably cancel an active run and fence further work |
 | `POST` | `/v1/agents/{run_id}/approve` | Validate exact per-item decisions and queue an approval command (`202`) |
 | `GET` | `/v1/agents/{run_id}/approvals/{command_id}` | Command and per-effect retry/manual-intervention status |
+| `GET` | `/v1/agents/llm-connections?project_id=...` | List project provider connections without secret metadata |
+| `PUT` | `/v1/agents/llm-connections/{provider}` | Validate, discover models, and atomically create or replace a connection |
+| `GET` | `/v1/agents/llm-connections/{provider}/models?project_id=...` | Read the last validated normalized model inventory |
+| `POST` | `/v1/agents/llm-connections/{provider}/refresh-models` | Revalidate a connection and atomically refresh its inventory |
+| `POST` | `/v1/agents/llm-connections/{provider}/revoke` | Revoke and crypto-shred an unassigned provider connection |
 | `GET` | `/health` | Liveness probe |
 | `GET` | `/ready` | Core readiness (runtime initialization and PostgreSQL) |
 | `GET` | `/ready/capabilities` | Non-blocking configured/reachable report for LLM, Query, Config, and Codegen |
@@ -76,6 +81,12 @@ envelope containing `command_id`, gate/count fields, timestamps, and an
 `manual_intervention`; each effect also exposes `retryable_failed` and its
 attempt/error/result fields. Config and Codegen calls run only in the durable
 effect worker with a persisted idempotency key and PostgreSQL quota reservation.
+
+Connection reads require `agents:read`. Mutations must use a human-bound
+credential and are authorized from live PostgreSQL state for either the current
+project owner or an active member holding both `agents:manage` and
+`credentials:manage`. Connection setup does not activate Agents or grant
+execution authority.
 
 ## Agent graphs
 

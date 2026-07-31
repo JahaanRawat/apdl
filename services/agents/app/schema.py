@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 49
-MIGRATION_NAME = "049_project_scoped_llm_routing.sql"
+MIGRATION_VERSION = 50
+MIGRATION_NAME = "050_llm_provider_connections.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -186,6 +186,24 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_project_provider_credential_audit", "action"),
         ("llm_project_provider_credential_audit", "actor"),
         ("llm_project_provider_credential_audit", "encryption_key_id"),
+        ("llm_project_provider_connections", "project_id"),
+        ("llm_project_provider_connections", "provider"),
+        ("llm_project_provider_connections", "version"),
+        ("llm_project_provider_connections", "state"),
+        ("llm_project_provider_connections", "credential_id"),
+        ("llm_project_provider_connections", "catalog_version"),
+        ("llm_project_provider_connections", "validated_at"),
+        ("llm_project_provider_models", "project_id"),
+        ("llm_project_provider_models", "provider"),
+        ("llm_project_provider_models", "connection_version"),
+        ("llm_project_provider_models", "schema_version"),
+        ("llm_project_provider_models", "model_id"),
+        ("llm_project_provider_models", "supported_tiers"),
+        ("llm_project_provider_connection_audit", "audit_id"),
+        ("llm_project_provider_connection_audit", "project_id"),
+        ("llm_project_provider_connection_audit", "provider"),
+        ("llm_project_provider_connection_audit", "action"),
+        ("llm_project_provider_connection_audit", "actor_user_id"),
         ("agent_mutation_quota_reservations", "project_id"),
         ("agent_mutation_quota_reservations", "action_type"),
         ("agent_mutation_quota_reservations", "idempotency_key"),

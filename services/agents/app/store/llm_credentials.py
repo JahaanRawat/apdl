@@ -240,6 +240,209 @@ class ProjectCredentialStore:
             f"apdl:llm-credential:{project_id}:{provider}",
         )
 
+    async def create_in_transaction(
+        self,
+        conn: Any,
+        project_id: str,
+        provider: str,
+        api_key: str,
+        *,
+        actor: str,
+    ) -> CredentialMetadata:
+        """Create through the caller's active transaction."""
+        canonical_provider = _validate_scope(project_id, provider)
+        actor = _validate_actor(actor)
+        await self._lock_pair(conn, project_id, canonical_provider)
+        version_row = await conn.fetchrow(
+            """
+            SELECT
+                COALESCE(MAX(credential_version), 0) + 1 AS next_version,
+                COALESCE(BOOL_OR(state = 'active'), FALSE) AS active_exists
+            FROM llm_project_provider_credentials
+            WHERE project_id = $1 AND provider = $2
+            """,
+            project_id,
+            canonical_provider,
+        )
+        if bool(version_row["active_exists"]):
+            raise CredentialConflictError(
+                "An active project provider credential already exists"
+            )
+        credential_id = uuid4()
+        encrypted = self._cipher.encrypt(
+            api_key,
+            credential_id=credential_id,
+            project_id=project_id,
+            provider=canonical_provider,
+        )
+        row = await conn.fetchrow(
+            """
+            INSERT INTO llm_project_provider_credentials (
+                credential_id, project_id, provider, credential_version,
+                state, ciphertext, nonce, algorithm, schema_version,
+                encryption_key_id, created_by_actor
+            ) VALUES (
+                $1, $2, $3, $4, 'active', $5, $6,
+                'AES-256-GCM', 'llm_provider_credential@1', $7, $8
+            )
+            RETURNING *
+            """,
+            credential_id,
+            project_id,
+            canonical_provider,
+            int(version_row["next_version"]),
+            encrypted.ciphertext,
+            encrypted.nonce,
+            self._cipher.key_id,
+            actor,
+        )
+        await self._append_audit(
+            conn,
+            project_id=project_id,
+            provider=canonical_provider,
+            credential_id=credential_id,
+            predecessor_credential_id=None,
+            action="create",
+            actor=actor,
+            encryption_key_id=self._cipher.key_id,
+        )
+        return _metadata(row)
+
+    async def replace_in_transaction(
+        self,
+        conn: Any,
+        project_id: str,
+        provider: str,
+        api_key: str,
+        *,
+        expected_credential_id: UUID,
+        actor: str,
+        reason: str,
+    ) -> CredentialMetadata:
+        """Replace and crypto-shred through the caller's active transaction."""
+        canonical_provider = _validate_scope(project_id, provider)
+        actor = _validate_actor(actor)
+        reason = _validate_reason(reason)
+        await self._lock_pair(conn, project_id, canonical_provider)
+        current = await conn.fetchrow(
+            """
+            SELECT credential_id, credential_version
+            FROM llm_project_provider_credentials
+            WHERE project_id = $1 AND provider = $2 AND state = 'active'
+            FOR UPDATE
+            """,
+            project_id,
+            canonical_provider,
+        )
+        if (
+            current is None
+            or UUID(str(current["credential_id"])) != expected_credential_id
+        ):
+            raise CredentialConflictError(
+                "The project provider credential version changed"
+            )
+        successor_id = uuid4()
+        encrypted = self._cipher.encrypt(
+            api_key,
+            credential_id=successor_id,
+            project_id=project_id,
+            provider=canonical_provider,
+        )
+        await conn.execute(
+            """
+            UPDATE llm_project_provider_credentials
+            SET state = 'replaced', ciphertext = NULL, nonce = NULL,
+                successor_credential_id = $4, retired_by_actor = $5,
+                retirement_reason = $6, retired_at = NOW()
+            WHERE credential_id = $3 AND project_id = $1 AND provider = $2
+            """,
+            project_id,
+            canonical_provider,
+            expected_credential_id,
+            successor_id,
+            actor,
+            reason,
+        )
+        row = await conn.fetchrow(
+            """
+            INSERT INTO llm_project_provider_credentials (
+                credential_id, project_id, provider, credential_version,
+                state, ciphertext, nonce, algorithm, schema_version,
+                encryption_key_id, created_by_actor
+            ) VALUES (
+                $1, $2, $3, $4, 'active', $5, $6,
+                'AES-256-GCM', 'llm_provider_credential@1', $7, $8
+            )
+            RETURNING *
+            """,
+            successor_id,
+            project_id,
+            canonical_provider,
+            int(current["credential_version"]) + 1,
+            encrypted.ciphertext,
+            encrypted.nonce,
+            self._cipher.key_id,
+            actor,
+        )
+        await self._append_audit(
+            conn,
+            project_id=project_id,
+            provider=canonical_provider,
+            credential_id=successor_id,
+            predecessor_credential_id=expected_credential_id,
+            action="replace",
+            actor=actor,
+            encryption_key_id=self._cipher.key_id,
+        )
+        return _metadata(row)
+
+    async def revoke_in_transaction(
+        self,
+        conn: Any,
+        project_id: str,
+        provider: str,
+        *,
+        expected_credential_id: UUID,
+        actor: str,
+        reason: str,
+    ) -> CredentialMetadata:
+        """Revoke and crypto-shred through the caller's active transaction."""
+        canonical_provider = _validate_scope(project_id, provider)
+        actor = _validate_actor(actor)
+        reason = _validate_reason(reason)
+        await self._lock_pair(conn, project_id, canonical_provider)
+        row = await conn.fetchrow(
+            """
+            UPDATE llm_project_provider_credentials
+            SET state = 'revoked', ciphertext = NULL, nonce = NULL,
+                retired_by_actor = $4, retirement_reason = $5,
+                retired_at = NOW()
+            WHERE credential_id = $3 AND project_id = $1
+              AND provider = $2 AND state = 'active'
+            RETURNING *
+            """,
+            project_id,
+            canonical_provider,
+            expected_credential_id,
+            actor,
+            reason,
+        )
+        if row is None:
+            raise CredentialConflictError(
+                "The project provider credential version changed"
+            )
+        await self._append_audit(
+            conn,
+            project_id=project_id,
+            provider=canonical_provider,
+            credential_id=expected_credential_id,
+            predecessor_credential_id=None,
+            action="revoke",
+            actor=actor,
+            encryption_key_id=str(row["encryption_key_id"]),
+        )
+        return _metadata(row)
+
     async def create(
         self,
         project_id: str,
@@ -248,65 +451,15 @@ class ProjectCredentialStore:
         *,
         actor: str,
     ) -> CredentialMetadata:
-        canonical_provider = _validate_scope(project_id, provider)
-        actor = _validate_actor(actor)
-        credential_id = uuid4()
-        encrypted = self._cipher.encrypt(
-            api_key,
-            credential_id=credential_id,
-            project_id=project_id,
-            provider=canonical_provider,
-        )
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                await self._lock_pair(conn, project_id, canonical_provider)
-                exists = await conn.fetchval(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM llm_project_provider_credentials
-                        WHERE project_id = $1 AND provider = $2
-                          AND state = 'active'
-                    )
-                    """,
-                    project_id,
-                    canonical_provider,
-                )
-                if exists:
-                    raise CredentialConflictError(
-                        "An active project provider credential already exists"
-                    )
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO llm_project_provider_credentials (
-                        credential_id, project_id, provider, credential_version,
-                        state, ciphertext, nonce, algorithm, schema_version,
-                        encryption_key_id, created_by_actor
-                    ) VALUES (
-                        $1, $2, $3, 1, 'active', $4, $5,
-                        'AES-256-GCM', 'llm_provider_credential@1', $6, $7
-                    )
-                    RETURNING *
-                    """,
-                    credential_id,
-                    project_id,
-                    canonical_provider,
-                    encrypted.ciphertext,
-                    encrypted.nonce,
-                    self._cipher.key_id,
-                    actor,
-                )
-                await self._append_audit(
+                return await self.create_in_transaction(
                     conn,
-                    project_id=project_id,
-                    provider=canonical_provider,
-                    credential_id=credential_id,
-                    predecessor_credential_id=None,
-                    action="create",
+                    project_id,
+                    provider,
+                    api_key,
                     actor=actor,
-                    encryption_key_id=self._cipher.key_id,
                 )
-        return _metadata(row)
 
     async def replace(
         self,

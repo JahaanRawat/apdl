@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,7 +12,9 @@ import pytest
 from app.store.llm_credentials import (
     CredentialCipher,
     CredentialConfigurationError,
+    CredentialConflictError,
     CredentialDecryptionError,
+    ProjectCredentialStore,
 )
 
 
@@ -133,3 +136,79 @@ def test_migration_enforces_one_active_crypto_shreddable_credential():
     assert "llm_project_provider_credential_audit_no_update_delete" in MIGRATION
     assert "llm_project_provider_credential_audit_no_truncate" in MIGRATION
     assert "plaintext" not in MIGRATION.lower()
+
+
+class _CreateConnection:
+    def __init__(self, *, active_exists: bool) -> None:
+        self.active_exists = active_exists
+        self.insert_args: tuple[object, ...] | None = None
+
+    async def execute(self, query: str, *args):
+        return "OK"
+
+    async def fetchrow(self, query: str, *args):
+        if "AS next_version" in query:
+            return {
+                "next_version": 3,
+                "active_exists": self.active_exists,
+            }
+        if "INSERT INTO llm_project_provider_credentials" in query:
+            self.insert_args = args
+            return {
+                "credential_id": args[0],
+                "project_id": args[1],
+                "provider": args[2],
+                "credential_version": args[3],
+                "state": "active",
+                "encryption_key_id": args[6],
+                "created_by_actor": args[7],
+                "created_at": datetime(2026, 7, 30, tzinfo=timezone.utc),
+                "retired_by_actor": None,
+                "retirement_reason": None,
+                "retired_at": None,
+            }
+        raise AssertionError(query)
+
+
+@pytest.mark.asyncio
+async def test_create_after_revocation_advances_historical_version() -> None:
+    conn = _CreateConnection(active_exists=False)
+    store = ProjectCredentialStore(
+        pool=None,
+        cipher=CredentialCipher.from_base64(_encoded_key()),
+    )
+
+    metadata = await store.create_in_transaction(
+        conn,
+        "demo",
+        "openai",
+        "new-secret",
+        actor="operator:test",
+    )
+
+    assert metadata.credential_version == 3
+    assert conn.insert_args is not None
+    assert conn.insert_args[3] == 3
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_existing_active_version() -> None:
+    conn = _CreateConnection(active_exists=True)
+    store = ProjectCredentialStore(
+        pool=None,
+        cipher=CredentialCipher.from_base64(_encoded_key()),
+    )
+
+    with pytest.raises(
+        CredentialConflictError,
+        match="already exists",
+    ):
+        await store.create_in_transaction(
+            conn,
+            "demo",
+            "openai",
+            "new-secret",
+            actor="operator:test",
+        )
+
+    assert conn.insert_args is None
