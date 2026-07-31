@@ -287,7 +287,12 @@ async def readiness_check(request: Request):
 
     runtime_objects_ready = all(
         getattr(state, attribute, None) is not None
-        for attribute in ("pg_pool", "authenticator", "vector_store")
+        for attribute in (
+            "pg_pool",
+            "authenticator",
+            "vector_store",
+            "llm_credential_store",
+        )
     )
     runtime_tasks = (
         getattr(state, "run_dispatcher_task", None),

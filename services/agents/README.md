@@ -93,14 +93,15 @@ Scaffold a new agent with `scripts/new_agent.py`.
 
 ## LLM router
 
-`app/llm/router.py` routes by tier (`fast` for cheap tasks, `reasoning` for
-analysis/design), but environment variables only define candidate models; they
-do not authorize tenant data egress. Every call carries an explicit project,
-run, purpose, execution kind, and data classification. Before network egress,
-the router loads the project's exact provider/model/residency policy, reserves
-the worst-case run and daily cost atomically, and persists the logical call and
-provider attempt. It then records provider/model, prompt hash, usage, cost,
-latency, outcome, and retry classification without storing prompt content.
+`app/llm/router.py` routes each tier (`fast` for cheap tasks, `reasoning` for
+analysis/design) through one exact project model assignment. Every call carries
+an explicit project, run, purpose, execution kind, and data classification.
+Before network egress, the router loads the project's exact
+provider/model/residency policy, reserves the worst-case run and daily cost
+atomically, binds the provider attempt to that project's active encrypted
+credential version, decrypts it just in time, and revalidates it at the egress
+boundary. It records provider/model, credential ID/version, prompt hash, usage,
+cost, latency, and outcome without storing prompt content or secret material.
 
 Migration 023 creates one safe default policy for every project: only the exact
 local model `gemma4` at `http://localhost:11434/v1`, local residency, zero paid
@@ -108,22 +109,23 @@ spend, and no cross-vendor retry. Enabling OpenAI, Anthropic, Google, or xAI
 requires an operator to update `llm_project_policies` and insert the exact
 provider/model row in `llm_project_provider_policies`, including allowed data
 classifications, residency, current input/output prices, and positive
-project-daily and per-run ceilings. A provider failure crosses to another vendor
-only when the project policy explicitly permits it and the failure is classified
-as retryable.
+project-daily and per-run ceilings. Each tier has one exact primary assignment;
+provider failures do not trigger an implicit same-vendor or cross-vendor
+fallback.
 
 ### Connect xAI/Grok
 
 1. Apply PostgreSQL migrations with `make migrate-postgres`.
-2. Set `XAI_API_KEY` in `.env`. The default candidates are
-   `grok-4.20-0309-non-reasoning` for `fast` and `grok-4.5` for `reasoning`;
-   override them only with `LLM_FAST_XAI` and `LLM_REASONING_XAI`.
+2. Add the project's xAI connection through the authenticated
+   `/v1/agents/llm-connections/xai` API. The key is validated, encrypted, and
+   never returned to the browser.
 3. Run `make provision-agents-llm-policy ARGS="--help"` and provision the
    project with `--provider xai`, the exact current token prices, residency,
-   classifications, and positive spend ceilings.
-4. Confirm process-level configuration and reachability at
-   `GET /ready/capabilities`. Project authorization remains a separate,
-   fail-closed policy check on every request.
+   classifications, positive spend ceilings, and exact fast/reasoning model
+   assignments.
+4. Confirm the generic credential-store subsystem at
+   `GET /ready/capabilities`; connection presence is visible only through the
+   authenticated project API.
 
 xAI is integrated through its OpenAI-compatible Chat Completions endpoint. That
 supports APDL's client-side function-calling loop; xAI-hosted search, code, and
@@ -206,22 +208,17 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |
 | `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
 | `AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64` | — | Required standard Base64 encoding of exactly 32 random bytes; encrypts project provider credentials inside Agents only |
-| `OPENAI_API_KEY` | — | OpenAI provider |
-| `ANTHROPIC_API_KEY` | — | Anthropic provider |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Shared OpenAI-compatible provider endpoint |
-| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Shared Anthropic provider endpoint |
-| `GOOGLE_API_KEY` | — | Google provider |
-| `XAI_API_KEY` | — | xAI Grok provider at `https://api.x.ai/v1` |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
 | `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Candidate model names, including `LLM_FAST_XAI` (`grok-4.20-0309-non-reasoning`) and `LLM_REASONING_XAI` (`grok-4.5`); each exact provider/model must also be authorized by project policy |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
 | `APDL_SERVICE_API_KEYS` | — | Canonical project-to-key JSON for scoped Config/Query/Codegen calls |
 
-At least one policy-authorized provider must also be configured and reachable
-to execute an LLM-backed run. API keys alone grant no project permission.
-`/ready/capabilities` reports process-level provider and service availability,
-but its degraded state does not make the core `/ready` endpoint fail and does
-not assert that any particular project's policy permits egress.
+Each remote provider key is stored through the project connection API; Agents
+does not read cloud-provider API keys from its environment. A run requires one
+exact policy-authorized model assignment backed by that project's active
+provider connection. `/ready/capabilities` reports only the generic encrypted
+credential-store subsystem and service dependencies, never tenant connection
+presence.
 
 Generate the credential-encryption key offline and place the single-line value
 in the Agents deployment secret store:
@@ -254,7 +251,8 @@ make dev          # start Redis, ClickHouse, PostgreSQL
 make run-agents   # uvicorn with hot-reload → localhost:8083
 ```
 
-Set at least one LLM key in `.env` (created by `make setup`).
+Set the credential-encryption key in `.env` (created by `make setup`), then add
+project provider connections through the authenticated Agents API.
 
 ## Tests
 

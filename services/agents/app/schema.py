@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 48
-MIGRATION_NAME = "048_llm_project_provider_credentials.sql"
+MIGRATION_VERSION = 49
+MIGRATION_NAME = "049_project_scoped_llm_routing.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -160,6 +160,14 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_provider_attempts", "prepared_at"),
         ("llm_provider_attempts", "egress_started_at"),
         ("llm_provider_attempts", "completed_at"),
+        ("llm_provider_attempts", "credential_id"),
+        ("llm_provider_attempts", "credential_version"),
+        ("llm_provider_attempts", "legacy_unbound_credential"),
+        ("llm_project_model_assignments", "project_id"),
+        ("llm_project_model_assignments", "tier"),
+        ("llm_project_model_assignments", "provider"),
+        ("llm_project_model_assignments", "model"),
+        ("llm_project_model_assignments", "endpoint_url"),
         ("llm_project_provider_credentials", "credential_id"),
         ("llm_project_provider_credentials", "project_id"),
         ("llm_project_provider_credentials", "provider"),

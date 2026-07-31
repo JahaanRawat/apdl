@@ -50,8 +50,8 @@ async def test_accepts_complete_migrated_schema():
 
 
 def test_startup_requires_current_agents_contract_migration():
-    assert MIGRATION_VERSION == 48
-    assert MIGRATION_NAME == "048_llm_project_provider_credentials.sql"
+    assert MIGRATION_VERSION == 49
+    assert MIGRATION_NAME == "049_project_scoped_llm_routing.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
     assert (
         "admin_project_execution_authorizations",
