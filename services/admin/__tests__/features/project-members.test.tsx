@@ -101,7 +101,7 @@ test('shows ownership, creator, and read-only execution authorization separately
   renderMembers()
 
   expect(await screen.findByText('Authorized')).toBeInTheDocument()
-  expect(screen.getByText('Project authority')).toBeInTheDocument()
+  expect(screen.getByText('Project Authority')).toBeInTheDocument()
   expect(screen.getByText('Owner')).toBeInTheDocument()
   expect(screen.getByText('Created by')).toBeInTheDocument()
   expect(screen.getByText('Agent execution')).toBeInTheDocument()

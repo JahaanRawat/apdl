@@ -202,7 +202,7 @@ test.each([
   }
 })
 
-test('creates a project from a zero-project workspace and associates it with the profile', async () => {
+test('creates a project and opens its grouped project-management sections', async () => {
   let submitted: unknown = null
   let csrfHeader: string | null = null
   const withProject = {
@@ -269,13 +269,20 @@ test('creates a project from a zero-project workspace and associates it with the
   await userEvent.type(screen.getByLabelText('Project ID'), 'firstproject')
   await userEvent.click(screen.getByRole('button', { name: 'Create project' }))
 
-  expect((await screen.findAllByText('firstproject')).length).toBeGreaterThanOrEqual(1)
+  const projectPanel = await screen.findByRole('button', { expanded: true })
+  expect(projectPanel).toHaveAttribute('aria-expanded', 'true')
+  expect(projectPanel).toHaveTextContent('firstproject')
+  expect(projectPanel).toHaveTextContent('8 permissions · new-admin@example.com')
+  expect(screen.getByText('Your Access')).toBeInTheDocument()
+  expect(await screen.findByText('Project Authority')).toBeInTheDocument()
+  expect(screen.getByText('Members')).toBeInTheDocument()
+  expect(screen.getByText('SDK Credentials')).toBeInTheDocument()
   expect(screen.queryByText('No project access yet')).not.toBeInTheDocument()
   expect(submitted).toEqual({ project_id: 'firstproject' })
   expect(csrfHeader).toBe('project-csrf')
 })
 
-test('reports the canonical project quota error in workspace settings', async () => {
+test('reports the canonical project quota error in project management', async () => {
   server.use(
     http.get('*/api/auth/me', () => HttpResponse.json(IDENTITY)),
     http.post('*/api/projects', () =>

@@ -342,7 +342,7 @@ export function ProjectMembersCard() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <ShieldCheck className="h-5 w-5" />
-            Project authority
+            Project Authority
           </CardTitle>
           <CardDescription>
             Human ownership and creator provenance are separate from operator-controlled execution
