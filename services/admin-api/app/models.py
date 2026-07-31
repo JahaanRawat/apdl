@@ -21,6 +21,26 @@ CredentialRole = Literal[
 CredentialAuditAction = Literal["create", "rotate", "revoke"]
 SecurityNotificationKind = Literal["suspicious_login_activity"]
 SecurityNotificationStatus = Literal["unread", "acknowledged"]
+HumanRole = Literal[
+    "events:write",
+    "config:read",
+    "config:write",
+    "config:evaluate",
+    "query:read",
+    "agents:read",
+    "agents:run",
+    "agents:manage",
+    "agents:approve",
+    "credentials:manage",
+    "members:manage",
+]
+MembershipAuditAction = Literal[
+    "invitation_create",
+    "invitation_revoke",
+    "invitation_accept",
+    "roles_replace",
+    "member_remove",
+]
 ExecutionAuthorizationSource = Literal[
     "operator_provisioned", "self_registered_override"
 ]
@@ -34,6 +54,19 @@ MANAGED_CREDENTIAL_ROLE_ORDER: tuple[CredentialRole, ...] = (
 BROWSER_CREDENTIAL_ROLES: tuple[CredentialRole, ...] = (
     "events:write",
     "config:read",
+)
+HUMAN_ROLE_ORDER: tuple[HumanRole, ...] = (
+    "events:write",
+    "config:read",
+    "config:write",
+    "config:evaluate",
+    "query:read",
+    "agents:read",
+    "agents:run",
+    "agents:manage",
+    "agents:approve",
+    "credentials:manage",
+    "members:manage",
 )
 
 
@@ -131,6 +164,126 @@ class OwnershipTransferRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     target_user_id: UUID
+
+
+def _roles_are_canonical(roles: list[HumanRole]) -> bool:
+    selected = set(roles)
+    return roles == [role for role in HUMAN_ROLE_ORDER if role in selected]
+
+
+class InvitationCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    roles: list[HumanRole] = Field(min_length=1, max_length=11)
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> "InvitationCreateRequest":
+        if not _roles_are_canonical(self.roles):
+            raise ValueError("roles must be unique and use canonical order")
+        return self
+
+
+class MemberRolesReplaceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    roles: list[HumanRole] = Field(min_length=1, max_length=11)
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> "MemberRolesReplaceRequest":
+        if not _roles_are_canonical(self.roles):
+            raise ValueError("roles must be unique and use canonical order")
+        return self
+
+
+class InvitationRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    password: str = Field(min_length=12, max_length=1024)
+
+
+class ProjectMember(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: UUID
+    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    roles: list[HumanRole] = Field(min_length=1, max_length=11)
+    active: bool
+    is_owner: bool
+    joined_at: datetime
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> "ProjectMember":
+        if not _roles_are_canonical(self.roles):
+            raise ValueError("roles must be unique and use canonical order")
+        return self
+
+
+class PendingProjectInvitation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    invitation_id: UUID
+    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    roles: list[HumanRole] = Field(min_length=1, max_length=11)
+    inviter_email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    expires_at: datetime
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> "PendingProjectInvitation":
+        if not _roles_are_canonical(self.roles):
+            raise ValueError("roles must be unique and use canonical order")
+        return self
+
+
+class ProjectInvitationReveal(PendingProjectInvitation):
+    invitation_url: str = Field(min_length=1, max_length=2048)
+
+
+class ProjectMembers(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    members: list[ProjectMember]
+    pending_invitations: list[PendingProjectInvitation]
+
+
+class InvitationInspection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["valid"] = "valid"
+    project_id: str = Field(pattern=PROJECT_ID_PATTERN)
+    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    roles: list[HumanRole] = Field(min_length=1, max_length=11)
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_roles(self) -> "InvitationInspection":
+        if not _roles_are_canonical(self.roles):
+            raise ValueError("roles must be unique and use canonical order")
+        return self
+
+
+class MembershipAuditEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: UUID
+    project_id: str = Field(pattern=PROJECT_ID_PATTERN)
+    action: MembershipAuditAction
+    actor_user_id: UUID
+    actor_email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    subject_user_id: UUID | None
+    subject_email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    invitation_id: UUID | None
+    previous_roles: list[HumanRole] | None
+    new_roles: list[HumanRole] | None
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def validate_role_snapshots(self) -> "MembershipAuditEntry":
+        for roles in (self.previous_roles, self.new_roles):
+            if roles is not None and not _roles_are_canonical(roles):
+                raise ValueError("role snapshots must use canonical order")
+        return self
 
 
 class CredentialCreateRequest(BaseModel):
