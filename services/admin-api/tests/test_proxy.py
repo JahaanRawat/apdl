@@ -188,6 +188,89 @@ async def test_agents_mutation_uses_human_bound_ephemeral_credential(
 
 
 @pytest.mark.asyncio
+async def test_llm_connection_read_uses_live_management_authority_without_agents_read(
+    admin_session: AdminSession,
+) -> None:
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "projects": {"demo": frozenset({"config:read"})},
+        }
+    )
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "llm_provider_connection_list@1",
+                "project_id": "demo",
+                "connections": [],
+            },
+        )
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        response = client.get(
+            "/api/projects/demo/agents/v1/agents/llm-connections",
+            params={"project_id": "demo"},
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen_key != TEST_API_KEY
+    authority = next(
+        statement
+        for statement in statements
+        if "AS llm_connection_authorized" in statement[0]
+    )
+    assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
+    credential_insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert credential_insert[1][4] == ["agents:read"]
+    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
+    removal = next(
+        statement
+        for statement in statements
+        if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
+    )
+    assert removal[1] == (credential_insert[1][0],)
+
+
+@pytest.mark.asyncio
+async def test_llm_connection_read_fails_without_role_or_live_management_authority(
+    admin_session: AdminSession,
+) -> None:
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "projects": {"demo": frozenset({"config:read"})},
+        }
+    )
+    called = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200)
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        client.app.state.pg_pool.connection.llm_connection_authorized = False
+        response = client.get(
+            "/api/projects/demo/agents/v1/agents/llm-connections",
+            params={"project_id": "demo"},
+        )
+
+    assert response.status_code == 403
+    assert "agents:read" in response.json()["detail"]
+    assert not called
+
+
+@pytest.mark.asyncio
 async def test_llm_connection_mutation_uses_live_dual_role_authority(
     admin_session: AdminSession,
 ) -> None:
@@ -309,7 +392,7 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
             "GET",
             "/v1/agents/llm-connections/xai/models",
         )
-        == "agents:read"
+        == "llm-connections:read"
     )
     assert (
         proxy.required_role(

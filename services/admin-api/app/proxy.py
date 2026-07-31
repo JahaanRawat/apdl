@@ -39,6 +39,7 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
 )
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
+_LLM_CONNECTION_READER = "llm-connections:read"
 _LLM_CONNECTION_MANAGER = "llm-connections:manage"
 _SERVICE_CREDENTIAL_ROLES = frozenset(
     {
@@ -373,7 +374,7 @@ def required_role(service: str, method: str, path: str) -> str | None:
                 path == "/v1/agents/llm-connections"
                 or re.fullmatch(provider_path + r"/models", path) is not None
             ):
-                return "agents:read"
+                return _LLM_CONNECTION_READER
             if method == "PUT" and re.fullmatch(provider_path, path) is not None:
                 return _LLM_CONNECTION_MANAGER
             if (
@@ -563,19 +564,31 @@ async def proxy_service(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Route not available"
         )
-    if role == _LLM_CONNECTION_MANAGER:
-        if not await _has_llm_connection_authority(
-            request,
-            project_id,
-            session.user_id,
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
+    elevated_llm_connection_read = False
+    if role in {_LLM_CONNECTION_READER, _LLM_CONNECTION_MANAGER}:
+        if role == _LLM_CONNECTION_READER and "agents:read" in roles:
+            pass
+        else:
+            has_connection_authority = await _has_llm_connection_authority(
+                request,
+                project_id,
+                session.user_id,
+            )
+            if not has_connection_authority:
+                detail = (
                     "Connection management requires project ownership or "
                     "delegated agents:manage and credentials:manage roles"
-                ),
-            )
+                    if role == _LLM_CONNECTION_MANAGER
+                    else (
+                        "LLM connection access requires agents:read, project ownership, "
+                        "or delegated agents:manage and credentials:manage roles"
+                    )
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=detail,
+                )
+            elevated_llm_connection_read = role == _LLM_CONNECTION_READER
     elif role is not None and role not in roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role"
@@ -602,17 +615,21 @@ async def proxy_service(
     ephemeral_credential_id: str | None = None
     require_human_actor = service == "agents" and request.method not in _SAFE_METHODS
     credential_roles = roles
-    if role == _LLM_CONNECTION_MANAGER:
-        # The credential authenticates the human-bound request only. Agents
-        # rechecks live ownership/delegation inside the mutation transaction.
-        credential_roles = roles | {"agents:read"}
+    if role == _LLM_CONNECTION_MANAGER or elevated_llm_connection_read:
+        # Grant only the upstream read capability needed by this management
+        # surface. Agents rechecks live authority inside mutation transactions.
+        credential_roles = frozenset({"agents:read"})
     api_key, ephemeral_credential_id = await _service_credential(
         request,
         project_id,
         credential_roles,
         settings,
-        actor_user_id=session.user_id if require_human_actor else None,
-        force_ephemeral=require_human_actor,
+        actor_user_id=(
+            session.user_id
+            if require_human_actor or elevated_llm_connection_read
+            else None
+        ),
+        force_ephemeral=require_human_actor or elevated_llm_connection_read,
     )
     try:
         if service == "codegen":
