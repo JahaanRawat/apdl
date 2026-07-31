@@ -13,6 +13,7 @@ import { Label } from '@/components/ui/label'
 import { useAuth } from '@/core/auth'
 import { useWorkspace } from '@/core/workspace'
 import { ProjectCredentialsCard } from '@/features/settings/ProjectCredentialsCard'
+import { ProjectMembersCard } from '@/features/settings/ProjectMembersCard'
 
 export function WorkspaceSettingsPage() {
   const { identity, createProject } = useAuth()
@@ -54,7 +55,7 @@ export function WorkspaceSettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Workspace settings"
-        description="Project access, roles, and reveal-once SDK credentials."
+        description="Project ownership, members, roles, and reveal-once access credentials."
       />
 
       <Card>
@@ -145,6 +146,8 @@ export function WorkspaceSettingsPage() {
           </Card>
         ))}
       </div>
+
+      <ProjectMembersCard />
 
       <ProjectCredentialsCard />
     </div>

@@ -218,6 +218,7 @@ test('creates a project from a zero-project workspace and associates it with the
           'query:read',
           'agents:read',
           'credentials:manage',
+          'members:manage',
         ],
       },
     ],
@@ -231,6 +232,23 @@ test('creates a project from a zero-project workspace and associates it with the
       return HttpResponse.json(withProject, { status: 201 })
     }),
     http.get('*/api/projects/firstproject/credentials', () => HttpResponse.json([])),
+    http.get('*/api/projects/firstproject/authorization', () =>
+      HttpResponse.json({
+        project_id: 'firstproject',
+        creator: { user_id: IDENTITY.user_id, email: IDENTITY.email },
+        ownership: {
+          kind: 'human',
+          owner_user_id: IDENTITY.user_id,
+          owner_email: IDENTITY.email,
+        },
+        execution_authorization: { authorized: false, source: null },
+      }),
+    ),
+    http.get('*/api/projects/firstproject/members', () =>
+      HttpResponse.json({ members: [], pending_invitations: [] }),
+    ),
+    http.get('*/api/projects/firstproject/members/audit', () => HttpResponse.json([])),
+    http.get('*/api/projects/firstproject/ownership/audit', () => HttpResponse.json([])),
   )
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(

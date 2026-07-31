@@ -12,6 +12,7 @@ from app.models import (
     ExecutionAuthorizationSummary,
     HumanProjectOwnership,
     OperatorManagedProjectOwnership,
+    OwnershipAuditEntry,
     OwnershipTransferRequest,
     ProjectAccess,
     ProjectAuthorizationSummary,
@@ -342,3 +343,58 @@ async def transfer_project_ownership(
             project_id=project_id,
             actor_user_id=actor_user_id,
         )
+
+
+@router.get(
+    "/{project_id}/ownership/audit",
+    response_model=list[OwnershipAuditEntry],
+)
+async def project_ownership_audit(
+    project_id: str,
+    request: Request,
+    session: AdminSession = Depends(require_session),
+) -> list[OwnershipAuditEntry]:
+    async with request.app.state.pg_pool.acquire() as conn:
+        authorized = await conn.fetchval(
+            """
+            SELECT membership.user_id
+            FROM admin_user_projects AS membership
+            JOIN admin_users AS account
+              ON account.user_id = membership.user_id
+             AND account.active
+            WHERE membership.project_id = $1
+              AND membership.user_id = $2
+              AND 'members:manage' = ANY(membership.roles)
+            """,
+            project_id,
+            uuid.UUID(session.user_id),
+        )
+        if authorized is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Current members:manage authority is required",
+            )
+        rows = await conn.fetch(
+            """
+            SELECT
+                audit.audit_id,
+                audit.project_id,
+                audit.previous_owner_user_id,
+                previous_owner.email AS previous_owner_email,
+                audit.new_owner_user_id,
+                new_owner.email AS new_owner_email,
+                audit.actor,
+                audit.reason,
+                audit.created_at
+            FROM admin_project_ownership_audit AS audit
+            LEFT JOIN admin_users AS previous_owner
+              ON previous_owner.user_id = audit.previous_owner_user_id
+            JOIN admin_users AS new_owner
+              ON new_owner.user_id = audit.new_owner_user_id
+            WHERE audit.project_id = $1
+            ORDER BY audit.created_at DESC, audit.audit_id DESC
+            LIMIT 200
+            """,
+            project_id,
+        )
+    return [OwnershipAuditEntry(**dict(row)) for row in rows]

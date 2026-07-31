@@ -166,6 +166,32 @@ class OwnershipTransferRequest(BaseModel):
     target_user_id: UUID
 
 
+class OwnershipAuditEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    audit_id: UUID
+    project_id: str = Field(pattern=PROJECT_ID_PATTERN)
+    previous_owner_user_id: UUID | None
+    previous_owner_email: str | None = Field(
+        default=None,
+        pattern=EMAIL_PATTERN,
+        max_length=320,
+    )
+    new_owner_user_id: UUID
+    new_owner_email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    actor: str = Field(min_length=1, max_length=512)
+    reason: str = Field(min_length=1, max_length=2000)
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def validate_previous_owner(self) -> "OwnershipAuditEntry":
+        if (self.previous_owner_user_id is None) != (
+            self.previous_owner_email is None
+        ):
+            raise ValueError("previous owner ID and email must be present together")
+        return self
+
+
 def _roles_are_canonical(roles: list[HumanRole]) -> bool:
     selected = set(roles)
     return roles == [role for role in HUMAN_ROLE_ORDER if role in selected]

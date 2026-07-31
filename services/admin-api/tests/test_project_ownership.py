@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import FastAPI
@@ -55,6 +56,22 @@ class OwnershipConnection:
 
     async def fetch(self, query: str, *args):
         self.statements.append((query, args))
+        if "FROM admin_project_ownership_audit" in query:
+            return [
+                {
+                    "audit_id": UUID(
+                        "60000000-0000-4000-8000-000000000006"
+                    ),
+                    "project_id": "demo",
+                    "previous_owner_user_id": OWNER_ID,
+                    "previous_owner_email": "owner@example.com",
+                    "new_owner_user_id": TARGET_ID,
+                    "new_owner_email": "target@example.com",
+                    "actor": str(OWNER_ID),
+                    "reason": "Human owner transfer",
+                    "created_at": datetime(2026, 7, 30, tzinfo=timezone.utc),
+                }
+            ]
         assert "FOR UPDATE OF membership, account" in query
         return [
             {
@@ -68,6 +85,11 @@ class OwnershipConnection:
                 "active": True,
             },
         ]
+
+    async def fetchval(self, query: str, *args):
+        self.statements.append((query, args))
+        assert "'members:manage' = ANY(membership.roles)" in query
+        return self.actor_id
 
     async def execute(self, query: str, *args):
         self.statements.append((query, args))
@@ -180,6 +202,28 @@ def test_operator_managed_project_cannot_be_claimed_from_human_api() -> None:
     assert response.status_code == 409
     assert "cannot be claimed" in response.json()["detail"]
     assert connection.audits == []
+
+
+def test_manager_can_read_immutable_ownership_history() -> None:
+    csrf = "ownership-csrf"
+    connection = OwnershipConnection()
+    with _client(connection, _session(csrf)) as client:
+        response = client.get("/api/projects/demo/ownership/audit")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "audit_id": "60000000-0000-4000-8000-000000000006",
+            "project_id": "demo",
+            "previous_owner_user_id": str(OWNER_ID),
+            "previous_owner_email": "owner@example.com",
+            "new_owner_user_id": str(TARGET_ID),
+            "new_owner_email": "target@example.com",
+            "actor": str(OWNER_ID),
+            "reason": "Human owner transfer",
+            "created_at": "2026-07-30T00:00:00Z",
+        }
+    ]
 
 
 def test_non_owner_and_ineligible_target_cannot_transfer() -> None:
