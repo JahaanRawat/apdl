@@ -196,6 +196,7 @@ services:
     ports:
       - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_AGENTS_HOST_PORT:-8083}:8083"
     environment:
+      AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64: ${AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:-}
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       REDIS_URL: redis://redis:6379
       CLICKHOUSE_URL: http://clickhouse:8123

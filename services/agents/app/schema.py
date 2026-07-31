@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 45
-MIGRATION_NAME = "045_xai_llm_provider.sql"
+MIGRATION_VERSION = 48
+MIGRATION_NAME = "048_llm_project_provider_credentials.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -160,6 +160,24 @@ REQUIRED_COLUMNS = frozenset(
         ("llm_provider_attempts", "prepared_at"),
         ("llm_provider_attempts", "egress_started_at"),
         ("llm_provider_attempts", "completed_at"),
+        ("llm_project_provider_credentials", "credential_id"),
+        ("llm_project_provider_credentials", "project_id"),
+        ("llm_project_provider_credentials", "provider"),
+        ("llm_project_provider_credentials", "credential_version"),
+        ("llm_project_provider_credentials", "state"),
+        ("llm_project_provider_credentials", "ciphertext"),
+        ("llm_project_provider_credentials", "nonce"),
+        ("llm_project_provider_credentials", "algorithm"),
+        ("llm_project_provider_credentials", "schema_version"),
+        ("llm_project_provider_credentials", "encryption_key_id"),
+        ("llm_project_provider_credentials", "successor_credential_id"),
+        ("llm_project_provider_credential_audit", "audit_id"),
+        ("llm_project_provider_credential_audit", "project_id"),
+        ("llm_project_provider_credential_audit", "provider"),
+        ("llm_project_provider_credential_audit", "credential_id"),
+        ("llm_project_provider_credential_audit", "action"),
+        ("llm_project_provider_credential_audit", "actor"),
+        ("llm_project_provider_credential_audit", "encryption_key_id"),
         ("agent_mutation_quota_reservations", "project_id"),
         ("agent_mutation_quota_reservations", "action_type"),
         ("agent_mutation_quota_reservations", "idempotency_key"),

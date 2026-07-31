@@ -205,6 +205,7 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
 | `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |
 | `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
+| `AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64` | — | Required standard Base64 encoding of exactly 32 random bytes; encrypts project provider credentials inside Agents only |
 | `OPENAI_API_KEY` | — | OpenAI provider |
 | `ANTHROPIC_API_KEY` | — | Anthropic provider |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Shared OpenAI-compatible provider endpoint |
@@ -221,6 +222,30 @@ to execute an LLM-backed run. API keys alone grant no project permission.
 `/ready/capabilities` reports process-level provider and service availability,
 but its degraded state does not make the core `/ready` endpoint fail and does
 not assert that any particular project's policy permits egress.
+
+Generate the credential-encryption key offline and place the single-line value
+in the Agents deployment secret store:
+
+```bash
+openssl rand -base64 32
+```
+
+There is no development default. Base64 is transport encoding, not encryption;
+restrict access to the decoded platform key. To rotate it, stop every Agents
+replica, set `AGENTS_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64` and
+`AGENTS_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64`, then run:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/rotate_llm_credential_key.py \
+  --actor operator@example.com
+```
+
+The command takes the same exclusive maintenance barrier used by PostgreSQL
+migrations, verifies every active credential before mutation, commits the full
+re-encryption atomically, and prints counts and audit IDs only. Deploy
+`AGENTS_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64` with the new value after the
+command succeeds, then restart Agents. Keep the old key until the new deployment
+has passed readiness checks.
 
 ## Running locally
 

@@ -23,6 +23,7 @@ from app.store.llm_governance import (
     reconcile_orphaned_llm_attempts,
     reconcile_orphaned_llm_attempts_forever,
 )
+from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
 from app.store.run_leases import (
     requeue_expired_runs,
     requeue_expired_runs_forever,
@@ -159,6 +160,9 @@ async def lifespan(application: FastAPI):
     try:
         application.state.pg_pool = pool
         application.state.authenticator = PostgresAuthenticator(pool)
+        application.state.llm_credential_store = ProjectCredentialStore(
+            pool, CredentialCipher.from_environment()
+        )
         maintenance_connection = await pool.acquire()
         maintenance_task, maintenance_listener = await _start_maintenance_monitor(
             maintenance_connection
