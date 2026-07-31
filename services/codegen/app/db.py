@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 52
-MIGRATION_NAME = "052_codegen_project_provider_credentials.sql"
+MIGRATION_VERSION = 53
+MIGRATION_NAME = "053_codegen_llm_connections.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_project_execution_authorizations", "project_id"),
@@ -82,6 +82,16 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_project_provider_credentials", "ciphertext"),
         ("codegen_project_provider_credentials", "nonce"),
         ("codegen_project_provider_credentials", "encryption_key_id"),
+        ("codegen_project_provider_connections", "project_id"),
+        ("codegen_project_provider_connections", "provider"),
+        ("codegen_project_provider_connections", "version"),
+        ("codegen_project_provider_connections", "inventory_version"),
+        ("codegen_project_provider_connections", "state"),
+        ("codegen_project_provider_connections", "credential_id"),
+        ("codegen_project_provider_models", "project_id"),
+        ("codegen_project_provider_models", "provider"),
+        ("codegen_project_provider_models", "model_id"),
+        ("codegen_project_provider_models", "supported_roles"),
         ("codegen_pull_request_observations", "github_updated_at"),
         ("codegen_pull_request_publication_events", "event_id"),
         ("codegen_pull_request_publication_events", "event_sequence"),

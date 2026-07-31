@@ -15,6 +15,11 @@ from typing import Any
 import asyncpg
 import pytest
 
+from app.llm.provider_catalog import catalog_model
+from app.store.llm_connections import (
+    LlmConnectionConflictError,
+    ProjectConnectionStore,
+)
 from app.store.llm_credentials import (
     CredentialCipher,
     CredentialConflictError,
@@ -287,6 +292,146 @@ async def test_credential_lifecycle_serializes_and_never_stores_plaintext() -> N
                     """,
                     project_id,
                 )
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_connection_mutations_are_authorized_and_optimistic() -> None:
+    assert POSTGRES_URL is not None
+    pool = await asyncpg.create_pool(POSTGRES_URL, min_size=1, max_size=4)
+    project_id = _project_id("conn")
+    credentials = ProjectCredentialStore(pool, CIPHER)
+    connections = ProjectConnectionStore(pool, credentials)
+    model = catalog_model("openai", "gpt-5.4-mini")
+    assert model is not None
+    try:
+        async with pool.acquire() as conn:
+            owner_id = await _create_operator_project(
+                conn,
+                project_id,
+                with_owner=True,
+            )
+        assert owner_id is not None
+
+        results = await asyncio.gather(
+            connections.put(
+                project_id,
+                "openai",
+                f"connection-a-{uuid.uuid4().hex}",
+                (model,),
+                expected_version=0,
+                actor_user_id=owner_id,
+            ),
+            connections.put(
+                project_id,
+                "openai",
+                f"connection-b-{uuid.uuid4().hex}",
+                (model,),
+                expected_version=0,
+                actor_user_id=owner_id,
+            ),
+            return_exceptions=True,
+        )
+        connected = [
+            value
+            for value in results
+            if not isinstance(value, BaseException)
+        ]
+        conflicts = [
+            value
+            for value in results
+            if isinstance(value, LlmConnectionConflictError)
+        ]
+        assert len(connected) == 1
+        assert len(conflicts) == 1
+        assert connected[0].version == 1
+        assert connected[0].inventory_version == 1
+
+        metadata, inventory = await connections.get_active_with_models(
+            project_id,
+            "openai",
+        )
+        assert metadata.model_count == 1
+        assert inventory == (model,)
+        refreshed = await connections.refresh(
+            project_id,
+            "openai",
+            (model,),
+            expected_version=1,
+            expected_credential_id=metadata.credential_id,
+            actor_user_id=owner_id,
+        )
+        assert (refreshed.version, refreshed.inventory_version) == (2, 2)
+        with pytest.raises(LlmConnectionConflictError):
+            await connections.refresh(
+                project_id,
+                "openai",
+                (model,),
+                expected_version=1,
+                expected_credential_id=metadata.credential_id,
+                actor_user_id=owner_id,
+            )
+        revoked = await connections.revoke(
+            project_id,
+            "openai",
+            expected_version=2,
+            actor_user_id=owner_id,
+        )
+        assert (revoked.state, revoked.version, revoked.model_count) == (
+            "revoked",
+            3,
+            0,
+        )
+        reconnected = await connections.put(
+            project_id,
+            "openai",
+            f"connection-reconnected-{uuid.uuid4().hex}",
+            (model,),
+            expected_version=3,
+            actor_user_id=owner_id,
+        )
+        assert (reconnected.state, reconnected.version) == ("active", 4)
+        assert reconnected.credential_id != metadata.credential_id
+
+        async with pool.acquire() as conn:
+            credential = await conn.fetchrow(
+                """
+                SELECT state, ciphertext, nonce
+                FROM codegen_project_provider_credentials
+                WHERE credential_id = $1
+                """,
+                metadata.credential_id,
+            )
+            reconnected_credential_version = await conn.fetchval(
+                """
+                SELECT credential_version
+                FROM codegen_project_provider_credentials
+                WHERE credential_id = $1
+                """,
+                reconnected.credential_id,
+            )
+            actions = await conn.fetch(
+                """
+                SELECT action
+                FROM codegen_project_provider_connection_audit
+                WHERE project_id = $1
+                ORDER BY created_at, audit_id
+                """,
+                project_id,
+            )
+        assert dict(credential) == {
+            "state": "revoked",
+            "ciphertext": None,
+            "nonce": None,
+        }
+        assert reconnected_credential_version == 2
+        assert [row["action"] for row in actions] == [
+            "connect",
+            "refresh",
+            "revoke",
+            "connect",
+        ]
     finally:
         await pool.close()
 

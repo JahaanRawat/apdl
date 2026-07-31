@@ -65,6 +65,11 @@ active operator-verified grant can authorize GitHub access.
 | GET | `/v1/connections/{project_id}/tenant-policy` | Read the strict tenant-owned Codegen preferences |
 | PUT | `/v1/connections/{project_id}/tenant-policy` | Replace tenant preferences (tightening only) |
 | GET | `/v1/connections/{project_id}/repo-context` | Strict canonical `repo_profile@1` for planning agents |
+| GET | `/v1/llm-connections?project_id=…` | List the project's active provider connections without credential material |
+| PUT | `/v1/llm-connections/{provider}` | Owner-controlled create or credential replacement with live model discovery |
+| GET | `/v1/llm-connections/{provider}/models?project_id=…` | Read the validated current model inventory |
+| POST | `/v1/llm-connections/{provider}/refresh-models` | Owner-controlled credential revalidation and inventory refresh |
+| POST | `/v1/llm-connections/{provider}/revoke` | Owner-controlled terminal connection revocation |
 | GET | `/v1/capabilities/changeset-creation?project_id=…` | Authenticated project capability and exact blocking reasons |
 | POST | `/v1/changesets` | Enqueue a changeset during a PR publication stage |
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |
@@ -229,25 +234,39 @@ credential and keep it in the deployment secret manager:
 openssl rand -base64 32 | tr -d '\n'
 ```
 
-The secure worker does not accept arbitrary LiteLLM provider prefixes. The
-canonical resolver accepts `anthropic`, `azure`, `cohere`, `deepseek`,
-`fireworks`, `gemini`/`google`, `groq`, `mistral`, `ollama`, `openai`,
-`openrouter`, `together_ai`, and `xai`. Canonical bare Claude, GPT/o-series, and
-Gemini model names resolve to their corresponding providers. `CODEGEN_MODEL`
-and `CODEGEN_HELPER_MODEL` must both select one of those providers and supply
-exactly its required credential and routing variables; unrelated provider
-secrets are not forwarded to the worker.
+Codegen tenant serving supports one strict provider set: `anthropic`, `openai`,
+`google`, and `xai`. Model IDs must come from the current validated project
+inventory and the reviewed Codegen catalog. Provider API endpoints are fixed;
+custom base URLs, arbitrary LiteLLM prefixes, ambient provider credentials,
+Vertex AI, and Amazon Bedrock are not accepted. Supporting another provider
+requires an explicit credential, routing, isolation, egress, and evaluation
+contract.
 
-Vertex AI and Amazon Bedrock are intentionally unsupported. Vertex project and
-location values are routing metadata, not an executable credential contract,
-and AWS credentials are not part of the worker allowlist. Supporting either
-provider requires a reviewed credential, routing, isolation, egress, and
-evaluation-evidence contract; adding only a model prefix or ambient credential
-would fail closed.
+### Project LLM connections and assignments
 
-Project provider credentials managed by Codegen are encrypted at rest with
-AES-256-GCM and scope-bound authenticated data. Their lifecycle is append-only:
-replacement and revocation retire ciphertext without retaining plaintext.
+Project LLM credentials are created and replaced through the
+owner-controlled Admin proxy to `PUT /v1/llm-connections/{provider}`. The
+canonical create body uses `version: 0`; a replacement uses the current
+connection version:
+
+```json
+{
+  "project_id": "demo",
+  "api_key": "provider-secret-from-your-secret-manager",
+  "version": 0
+}
+```
+
+Codegen validates the key against the provider's fixed model-list endpoint,
+keeps only reviewed supported models, encrypts the credential at rest, and
+returns no credential identifiers or secret material. Use the list and
+`/{provider}/models` endpoints above to read the resulting non-secret
+inventory. Refresh and revoke mutations also require the current project owner,
+or an active delegated member holding both `agents:manage` and
+`credentials:manage`, plus the exact current connection version.
+The revoke request's required human reason is validated as request intent but is
+never logged or persisted; lifecycle storage records only the canonical
+non-secret `provider_connection_revoked` category.
 
 Platform-key rotation is an offline maintenance operation. Drain and stop every
 APDL runtime that holds the shared PostgreSQL maintenance locks—not only Codegen

@@ -19,6 +19,9 @@ from typing import Literal
 
 import asyncpg
 from fastapi import Depends, FastAPI
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.requests import Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -67,12 +70,20 @@ from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.models.observations import CIVerificationObservation
 from app.publication import ConfiguredPublicationGate
 from app.request_body_limit import RequestBodyLimitMiddleware
-from app.routers import capabilities, changesets, connections, webhooks
+from app.routers import (
+    capabilities,
+    changesets,
+    connections,
+    llm_connections,
+    webhooks,
+)
 from app.runtime.collector import collect_runtime_evidence
 from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
 from app.store import pr_publication as publication_store
+from app.store.llm_connections import ProjectConnectionStore
 from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
+from app.strict_json import StrictConnectionJsonMiddleware
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
 _ORPHAN_ERROR = (
@@ -365,6 +376,9 @@ async def lifespan(application: FastAPI):
             pool, CredentialCipher.from_environment()
         )
         application.state.llm_credential_store = credential_store
+        application.state.llm_connection_store = ProjectConnectionStore(
+            pool, credential_store
+        )
         token_broker = GitHubTokenBroker(pool)
         application.state.github_token_broker = token_broker
         maintenance_connection = await pool.acquire()
@@ -578,9 +592,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(RequestBodyLimitMiddleware)
+app.add_middleware(StrictConnectionJsonMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def sanitized_request_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    """Return validation locations without reflecting submitted values."""
+    if not request.url.path.startswith("/v1/llm-connections"):
+        return await request_validation_exception_handler(request, exc)
+    return JSONResponse(
+        status_code=422,
+        headers={"Cache-Control": "no-store"},
+        content={
+            "detail": [
+                {
+                    "type": error["type"],
+                    "loc": list(error["loc"]),
+                    "msg": error["msg"],
+                }
+                for error in exc.errors()
+            ]
+        },
+    )
 
 auth_dependencies = [Depends(authenticate_request)]
 app.include_router(connections.router, dependencies=auth_dependencies)
+app.include_router(llm_connections.router, dependencies=auth_dependencies)
 app.include_router(capabilities.router, dependencies=auth_dependencies)
 app.include_router(changesets.router, dependencies=auth_dependencies)
 app.include_router(webhooks.router)
