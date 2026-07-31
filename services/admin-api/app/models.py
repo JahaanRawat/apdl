@@ -2,7 +2,7 @@
 
 from datetime import datetime
 import re
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,6 +21,9 @@ CredentialRole = Literal[
 CredentialAuditAction = Literal["create", "rotate", "revoke"]
 SecurityNotificationKind = Literal["suspicious_login_activity"]
 SecurityNotificationStatus = Literal["unread", "acknowledged"]
+ExecutionAuthorizationSource = Literal[
+    "operator_provisioned", "self_registered_override"
+]
 
 MANAGED_CREDENTIAL_ROLE_ORDER: tuple[CredentialRole, ...] = (
     "events:write",
@@ -73,6 +76,61 @@ class UserIdentity(BaseModel):
     user_id: str
     email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
     projects: list[ProjectAccess]
+
+
+class ProjectCreator(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: UUID
+    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+
+
+class HumanProjectOwnership(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["human"] = "human"
+    owner_user_id: UUID
+    owner_email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+
+
+class OperatorManagedProjectOwnership(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["operator_managed"] = "operator_managed"
+
+
+ProjectOwnership = Annotated[
+    HumanProjectOwnership | OperatorManagedProjectOwnership,
+    Field(discriminator="kind"),
+]
+
+
+class ExecutionAuthorizationSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    authorized: bool
+    source: ExecutionAuthorizationSource | None
+
+    @model_validator(mode="after")
+    def validate_authorization_source(self) -> "ExecutionAuthorizationSummary":
+        if self.authorized != (self.source is not None):
+            raise ValueError("source must be present exactly when execution is authorized")
+        return self
+
+
+class ProjectAuthorizationSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(pattern=PROJECT_ID_PATTERN)
+    creator: ProjectCreator | None
+    ownership: ProjectOwnership
+    execution_authorization: ExecutionAuthorizationSummary
+
+
+class OwnershipTransferRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_user_id: UUID
 
 
 class CredentialCreateRequest(BaseModel):
