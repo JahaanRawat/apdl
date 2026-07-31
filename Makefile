@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime evaluate-codegen codegen-development-prepare codegen-reviewed-config codegen-reviewed-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -17,26 +17,20 @@ DEPS_COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(DEPS
 HOST_SERVICE_RUNNER := python3 scripts/run_host_service.py
 HOST_SERVICE_ENV_FILE := $(if $(wildcard .env),--env-file .env,)
 
-# One immutable identity binds the evaluation controller, production candidate,
-# evidence bundle, and reviewed-PR deployment. Environment values may override
-# these defaults, but the evaluation script rejects development-unversioned.
+# Build tags are convenient local handles. Tenant deployment resolves and checks
+# each tag's exact local image ID before Compose receives it.
 CODEGEN_REVISION ?= $(shell git rev-parse HEAD 2>/dev/null)
-CODEGEN_EVALUATION_MODEL ?= anthropic/claude-opus-5
-CODEGEN_EVALUATION_CONTROLLER_IMAGE ?= apdl-codegen-evaluation-controller:$(CODEGEN_REVISION)
-CODEGEN_SANDBOX_IMAGE ?= apdl-codegen-sandbox:$(CODEGEN_REVISION)
-CODEGEN_EVALUATION_ARTIFACT_DIR ?= $(CURDIR)/local-files/codegen-rollouts/$(CODEGEN_REVISION)
-CODEGEN_ROLLOUT_POLICY ?= $(CURDIR)/services/codegen/app/evaluations/rollout_policy_v4.json
-CODEGEN_ROLLOUT_BUNDLE_PATH ?= $(CODEGEN_EVALUATION_ARTIFACT_DIR)/publication-bundle.json
-CODEGEN_EVALUATED_CONTROLLER_IMAGE ?= $(shell test -s "$(CODEGEN_EVALUATION_ARTIFACT_DIR)/controller-image-id.txt" && cat "$(CODEGEN_EVALUATION_ARTIFACT_DIR)/controller-image-id.txt")
-CODEGEN_EVALUATED_SANDBOX_IMAGE ?= $(shell test -s "$(CODEGEN_EVALUATION_ARTIFACT_DIR)/candidate-image-id.txt" && cat "$(CODEGEN_EVALUATION_ARTIFACT_DIR)/candidate-image-id.txt")
+CODEGEN_CONTROLLER_BUILD_IMAGE ?= apdl-codegen-controller:$(CODEGEN_REVISION)
+CODEGEN_SANDBOX_BUILD_IMAGE ?= apdl-codegen-worker:$(CODEGEN_REVISION)
 CODEGEN_SHIPPED_EGRESS_POLICY_SHA256 := $(shell python3 scripts/codegen-egress-policy-digest.py 2>/dev/null)
 CODEGEN_EGRESS_POLICY_SHA256 ?= $(CODEGEN_SHIPPED_EGRESS_POLICY_SHA256)
-CODEGEN_EGRESS_PROXY_IMAGE ?= apdl-codegen-egress-proxy:$(CODEGEN_EGRESS_POLICY_SHA256)
-CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE ?= $(shell test -s "$(CODEGEN_EVALUATION_ARTIFACT_DIR)/egress-proxy-image-id.txt" && cat "$(CODEGEN_EVALUATION_ARTIFACT_DIR)/egress-proxy-image-id.txt")
+CODEGEN_EGRESS_PROXY_BUILD_IMAGE ?= apdl-codegen-egress-proxy:$(CODEGEN_EGRESS_POLICY_SHA256)
+CODEGEN_CONTROLLER_IMAGE_ID ?= $(shell docker image inspect --format '{{.Id}}' "$(CODEGEN_CONTROLLER_BUILD_IMAGE)" 2>/dev/null)
+CODEGEN_SANDBOX_IMAGE ?= $(shell docker image inspect --format '{{.Id}}' "$(CODEGEN_SANDBOX_BUILD_IMAGE)" 2>/dev/null)
+CODEGEN_EGRESS_PROXY_IMAGE_ID ?= $(shell docker image inspect --format '{{.Id}}' "$(CODEGEN_EGRESS_PROXY_BUILD_IMAGE)" 2>/dev/null)
 CODEGEN_EGRESS_COMPOSE_FILE ?= infra/docker/docker-compose.codegen-egress.yml
-CODEGEN_ROLLOUT_COMPOSE_FILE ?= infra/docker/docker-compose.codegen-rollout.yml
-CODEGEN_EVALUATION_SOCKET_VOLUME ?=
-CODEGEN_EGRESS_SOCKET_VOLUME ?= apdl-codegen-reviewed-egress-$(CODEGEN_EGRESS_POLICY_SHA256)
+CODEGEN_TENANT_RUNTIME_COMPOSE_FILE ?= infra/docker/docker-compose.codegen-tenant-runtime.yml
+CODEGEN_EGRESS_SOCKET_VOLUME ?= apdl-codegen-tenant-egress-$(CODEGEN_EGRESS_POLICY_SHA256)
 CODEGEN_DOCKER_SOCKET ?= $(if $(wildcard $(HOME)/.docker/run/docker.sock),$(HOME)/.docker/run/docker.sock,/var/run/docker.sock)
 CODEGEN_DOCKER_UID ?= $(shell id -u)
 CODEGEN_DOCKER_GID ?= $(shell id -g)
@@ -45,9 +39,9 @@ CODEGEN_LLM_BROKER_DIR ?= /tmp/apdl-codegen-llm-broker
 
 # Explicit Codegen development-publication tooling is separate from the normal
 # core and dev-all paths. The supported stacks never mount the Docker socket or
-# enable development_pr; reviewed publication uses its own evaluated overlay.
+# enable development_pr; tenant publication uses its hardened runtime overlay.
 CODEGEN_DEVELOPMENT_REVISION := local-development
-CODEGEN_DEVELOPMENT_SANDBOX_IMAGE := apdl-codegen-sandbox:$(CODEGEN_DEVELOPMENT_REVISION)
+CODEGEN_DEVELOPMENT_SANDBOX_IMAGE := apdl-codegen-worker:$(CODEGEN_DEVELOPMENT_REVISION)
 CODEGEN_DEVELOPMENT_SANDBOX_NETWORK := apdl-codegen-development
 CODEGEN_DEVELOPMENT_COMPOSE_FILE := infra/docker/docker-compose.codegen-development.yml
 CODEGEN_DEVELOPMENT_DOCKER_ENDPOINT := $(or $(strip $(DOCKER_HOST)),$(shell docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null))
@@ -264,23 +258,23 @@ build-codegen-controller:
 	docker build \
 		--label "org.opencontainers.image.revision=$(CODEGEN_REVISION)" \
 		--label "dev.apdl.codegen.revision=$(CODEGEN_REVISION)" \
-		--label "dev.apdl.codegen.role=evaluation-controller" \
+		--label "dev.apdl.codegen.role=controller" \
 		-f services/codegen/Dockerfile \
-		-t "$(CODEGEN_EVALUATION_CONTROLLER_IMAGE)" \
+		-t "$(CODEGEN_CONTROLLER_BUILD_IMAGE)" \
 		services/codegen
 
 build-codegen-sandbox:
 	docker build \
 		--build-arg "CODEGEN_REVISION=$(CODEGEN_REVISION)" \
 		-f services/codegen/Dockerfile.worker \
-		-t "$(CODEGEN_SANDBOX_IMAGE)" \
+		-t "$(CODEGEN_SANDBOX_BUILD_IMAGE)" \
 		services/codegen
 
 build-codegen-egress-proxy:
 	docker build \
 		--build-arg "CODEGEN_EGRESS_POLICY_SHA256=$(CODEGEN_EGRESS_POLICY_SHA256)" \
 		-f infra/docker/codegen-egress/Dockerfile \
-		-t "$(CODEGEN_EGRESS_PROXY_IMAGE)" \
+		-t "$(CODEGEN_EGRESS_PROXY_BUILD_IMAGE)" \
 		infra/docker/codegen-egress
 
 build-codegen-runtime: build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy
@@ -303,7 +297,7 @@ codegen-development-prepare:
 	@echo "==> Codegen sandbox network: $(CODEGEN_DEVELOPMENT_SANDBOX_NETWORK) (development-only; not egress-filtered)"
 	@$(MAKE) --no-print-directory build-codegen-sandbox \
 		CODEGEN_REVISION="$(CODEGEN_DEVELOPMENT_REVISION)" \
-		CODEGEN_SANDBOX_IMAGE="$(CODEGEN_DEVELOPMENT_SANDBOX_IMAGE)"
+		CODEGEN_SANDBOX_BUILD_IMAGE="$(CODEGEN_DEVELOPMENT_SANDBOX_IMAGE)"
 	CODEGEN_DEVELOPMENT_DOCKER_SOCKET="$(CODEGEN_DEVELOPMENT_DOCKER_SOCKET)" \
 	CODEGEN_DEVELOPMENT_DOCKER_UID="$(CODEGEN_DEVELOPMENT_DOCKER_UID)" \
 	CODEGEN_DEVELOPMENT_DOCKER_GID="$(CODEGEN_DEVELOPMENT_DOCKER_GID)" \
@@ -313,91 +307,67 @@ codegen-development-prepare:
 	CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" \
 	$(COMPOSE) -f $(CODEGEN_DEVELOPMENT_COMPOSE_FILE) config --quiet
 
-evaluate-codegen:
-	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
-	CODEGEN_EVALUATION_MODEL="$(CODEGEN_EVALUATION_MODEL)" \
-	CODEGEN_EVALUATION_HELPER_MODEL="$(CODEGEN_EVALUATION_HELPER_MODEL)" \
-	CODEGEN_EVALUATION_CONTROLLER_IMAGE="$(CODEGEN_EVALUATION_CONTROLLER_IMAGE)" \
-	CODEGEN_SANDBOX_IMAGE="$(CODEGEN_SANDBOX_IMAGE)" \
-	CODEGEN_EVALUATION_ARTIFACT_DIR="$(CODEGEN_EVALUATION_ARTIFACT_DIR)" \
-	CODEGEN_ROLLOUT_POLICY="$(CODEGEN_ROLLOUT_POLICY)" \
-	CODEGEN_DOCKER_SOCKET="$(CODEGEN_DOCKER_SOCKET)" \
-	CODEGEN_EGRESS_POLICY_SHA256="$(CODEGEN_EGRESS_POLICY_SHA256)" \
-	CODEGEN_EGRESS_PROXY_IMAGE="$(CODEGEN_EGRESS_PROXY_IMAGE)" \
-	CODEGEN_EVALUATION_SOCKET_VOLUME="$(CODEGEN_EVALUATION_SOCKET_VOLUME)" \
-	./scripts/evaluate-codegen.sh
-
-codegen-reviewed-config:
+codegen-tenant-config:
 	@cd services/codegen && CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" .venv/bin/python -m scripts.prepare_llm_broker_dir
 	@test "$(CODEGEN_EGRESS_POLICY_SHA256)" = "$(CODEGEN_SHIPPED_EGRESS_POLICY_SHA256)" || (echo "CODEGEN_EGRESS_POLICY_SHA256 does not match the checked-in egress policy sources" >&2; exit 1)
-	@test -s "$(CODEGEN_ROLLOUT_BUNDLE_PATH)" || (echo "Missing rollout bundle: $(CODEGEN_ROLLOUT_BUNDLE_PATH)" >&2; exit 1)
-	@test -n "$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" || (echo "Missing evaluated controller identity: $(CODEGEN_EVALUATION_ARTIFACT_DIR)/controller-image-id.txt" >&2; exit 1)
-	@docker image inspect "$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" >/dev/null || (echo "Missing evaluated controller image: $(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{.Id}}' "$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)")" = "$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" || (echo "Controller reference is not its immutable local image ID" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.revision" }}' "$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)")" = "$(CODEGEN_REVISION)" || (echo "Evaluated controller image does not match CODEGEN_REVISION=$(CODEGEN_REVISION)" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.role" }}' "$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)")" = "evaluation-controller" || (echo "Evaluated controller image has the wrong role" >&2; exit 1)
-	@test -n "$(CODEGEN_EVALUATED_SANDBOX_IMAGE)" || (echo "Missing evaluated candidate identity: $(CODEGEN_EVALUATION_ARTIFACT_DIR)/candidate-image-id.txt" >&2; exit 1)
-	@docker image inspect "$(CODEGEN_EVALUATED_SANDBOX_IMAGE)" >/dev/null || (echo "Missing evaluated candidate image: $(CODEGEN_EVALUATED_SANDBOX_IMAGE)" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{.Id}}' "$(CODEGEN_EVALUATED_SANDBOX_IMAGE)")" = "$(CODEGEN_EVALUATED_SANDBOX_IMAGE)" || (echo "Candidate reference is not its immutable local image ID" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.revision" }}' "$(CODEGEN_EVALUATED_SANDBOX_IMAGE)")" = "$(CODEGEN_REVISION)" || (echo "Evaluated candidate image does not match CODEGEN_REVISION=$(CODEGEN_REVISION)" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.role" }}' "$(CODEGEN_EVALUATED_SANDBOX_IMAGE)")" = "candidate" || (echo "Evaluated candidate image has the wrong role" >&2; exit 1)
-	@test -n "$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)" || (echo "Missing evaluated egress proxy identity: $(CODEGEN_EVALUATION_ARTIFACT_DIR)/egress-proxy-image-id.txt" >&2; exit 1)
-	@docker image inspect "$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)" >/dev/null || (echo "Missing evaluated egress proxy image: $(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{.Id}}' "$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)")" = "$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)" || (echo "Egress proxy reference is not its immutable local image ID" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.egress.role" }}' "$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)")" = "proxy" || (echo "Evaluated egress proxy image has the wrong role" >&2; exit 1)
-	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.egress.policy-sha256" }}' "$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)")" = "$(CODEGEN_EGRESS_POLICY_SHA256)" || (echo "Evaluated egress proxy image does not match the shipped policy" >&2; exit 1)
-	@test -n "$(CODEGEN_EGRESS_SOCKET_VOLUME)" || (echo "CODEGEN_EGRESS_SOCKET_VOLUME must name the reviewed proxy socket volume" >&2; exit 1)
+	@test -n "$(CODEGEN_CONTROLLER_IMAGE_ID)" || (echo "Missing immutable controller image ID; build the runtime or set CODEGEN_CONTROLLER_IMAGE_ID" >&2; exit 1)
+	@docker image inspect "$(CODEGEN_CONTROLLER_IMAGE_ID)" >/dev/null || (echo "Missing controller image: $(CODEGEN_CONTROLLER_IMAGE_ID)" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{.Id}}' "$(CODEGEN_CONTROLLER_IMAGE_ID)")" = "$(CODEGEN_CONTROLLER_IMAGE_ID)" || (echo "Controller reference is not its immutable local image ID" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.revision" }}' "$(CODEGEN_CONTROLLER_IMAGE_ID)")" = "$(CODEGEN_REVISION)" || (echo "Controller image does not match CODEGEN_REVISION=$(CODEGEN_REVISION)" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.role" }}' "$(CODEGEN_CONTROLLER_IMAGE_ID)")" = "controller" || (echo "Controller image has the wrong role" >&2; exit 1)
+	@test -n "$(CODEGEN_SANDBOX_IMAGE)" || (echo "Missing immutable worker image ID; build the runtime or set CODEGEN_SANDBOX_IMAGE" >&2; exit 1)
+	@docker image inspect "$(CODEGEN_SANDBOX_IMAGE)" >/dev/null || (echo "Missing worker image: $(CODEGEN_SANDBOX_IMAGE)" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{.Id}}' "$(CODEGEN_SANDBOX_IMAGE)")" = "$(CODEGEN_SANDBOX_IMAGE)" || (echo "Worker reference is not its immutable local image ID" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.revision" }}' "$(CODEGEN_SANDBOX_IMAGE)")" = "$(CODEGEN_REVISION)" || (echo "Worker image does not match CODEGEN_REVISION=$(CODEGEN_REVISION)" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.role" }}' "$(CODEGEN_SANDBOX_IMAGE)")" = "worker" || (echo "Worker image has the wrong role" >&2; exit 1)
+	@test -n "$(CODEGEN_EGRESS_PROXY_IMAGE_ID)" || (echo "Missing immutable egress proxy image ID; build the runtime or set CODEGEN_EGRESS_PROXY_IMAGE_ID" >&2; exit 1)
+	@docker image inspect "$(CODEGEN_EGRESS_PROXY_IMAGE_ID)" >/dev/null || (echo "Missing egress proxy image: $(CODEGEN_EGRESS_PROXY_IMAGE_ID)" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{.Id}}' "$(CODEGEN_EGRESS_PROXY_IMAGE_ID)")" = "$(CODEGEN_EGRESS_PROXY_IMAGE_ID)" || (echo "Egress proxy reference is not its immutable local image ID" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.egress.role" }}' "$(CODEGEN_EGRESS_PROXY_IMAGE_ID)")" = "proxy" || (echo "Egress proxy image has the wrong role" >&2; exit 1)
+	@test "$$(docker image inspect --format '{{ index .Config.Labels "dev.apdl.codegen.egress.policy-sha256" }}' "$(CODEGEN_EGRESS_PROXY_IMAGE_ID)")" = "$(CODEGEN_EGRESS_POLICY_SHA256)" || (echo "Egress proxy image does not match the shipped policy" >&2; exit 1)
+	@test -n "$(CODEGEN_EGRESS_SOCKET_VOLUME)" || (echo "CODEGEN_EGRESS_SOCKET_VOLUME must name the tenant proxy socket volume" >&2; exit 1)
 	@case "$(CODEGEN_EGRESS_SOCKET_VOLUME)" in *[!A-Za-z0-9_.-]*|'') echo "CODEGEN_EGRESS_SOCKET_VOLUME is not a canonical Docker volume name" >&2; exit 1;; esac
+	@case "$(CODEGEN_DOCKER_SOCKET)" in /*) ;; *) echo "Docker unix socket path must be absolute: $(CODEGEN_DOCKER_SOCKET)" >&2; exit 1;; esac
+	@test -S "$(CODEGEN_DOCKER_SOCKET)" || (echo "Docker unix socket not found: $(CODEGEN_DOCKER_SOCKET)" >&2; exit 1)
+	@test -n "$(CODEGEN_DOCKER_SOCKET_GID)" || (echo "Could not determine Docker socket group: $(CODEGEN_DOCKER_SOCKET)" >&2; exit 1)
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
-	CODEGEN_EVALUATION_MODEL="$(CODEGEN_EVALUATION_MODEL)" \
-	CODEGEN_EVALUATION_HELPER_MODEL="$(CODEGEN_EVALUATION_HELPER_MODEL)" \
-	CODEGEN_ROLLOUT_STAGE=reviewed_pr \
-	CODEGEN_ROLLOUT_BUNDLE_PATH="$(CODEGEN_ROLLOUT_BUNDLE_PATH)" \
-	CODEGEN_CONTROLLER_IMAGE="$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" \
-	CODEGEN_SANDBOX_IMAGE="$(CODEGEN_EVALUATED_SANDBOX_IMAGE)" \
+	CODEGEN_CONTROLLER_IMAGE_ID="$(CODEGEN_CONTROLLER_IMAGE_ID)" \
+	CODEGEN_SANDBOX_IMAGE="$(CODEGEN_SANDBOX_IMAGE)" \
 	CODEGEN_EGRESS_SOCKET_VOLUME="$(CODEGEN_EGRESS_SOCKET_VOLUME)" \
 	CODEGEN_EGRESS_POLICY_SHA256="$(CODEGEN_EGRESS_POLICY_SHA256)" \
-	CODEGEN_EGRESS_PROXY_IMAGE="$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)" \
+	CODEGEN_EGRESS_PROXY_IMAGE_ID="$(CODEGEN_EGRESS_PROXY_IMAGE_ID)" \
 	CODEGEN_DOCKER_SOCKET="$(CODEGEN_DOCKER_SOCKET)" \
 	CODEGEN_DOCKER_UID="$(CODEGEN_DOCKER_UID)" \
 	CODEGEN_DOCKER_GID="$(CODEGEN_DOCKER_GID)" \
 	CODEGEN_DOCKER_SOCKET_GID="$(CODEGEN_DOCKER_SOCKET_GID)" \
 	CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" \
-	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_ROLLOUT_COMPOSE_FILE) config --quiet
+	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_TENANT_RUNTIME_COMPOSE_FILE) config --quiet
 
-codegen-reviewed-up: codegen-reviewed-config
+codegen-tenant-up: codegen-tenant-config
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
-	CODEGEN_EVALUATION_MODEL="$(CODEGEN_EVALUATION_MODEL)" \
-	CODEGEN_EVALUATION_HELPER_MODEL="$(CODEGEN_EVALUATION_HELPER_MODEL)" \
-	CODEGEN_ROLLOUT_STAGE=reviewed_pr \
-	CODEGEN_ROLLOUT_BUNDLE_PATH="$(CODEGEN_ROLLOUT_BUNDLE_PATH)" \
-	CODEGEN_CONTROLLER_IMAGE="$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" \
-	CODEGEN_SANDBOX_IMAGE="$(CODEGEN_EVALUATED_SANDBOX_IMAGE)" \
+	CODEGEN_CONTROLLER_IMAGE_ID="$(CODEGEN_CONTROLLER_IMAGE_ID)" \
+	CODEGEN_SANDBOX_IMAGE="$(CODEGEN_SANDBOX_IMAGE)" \
 	CODEGEN_EGRESS_SOCKET_VOLUME="$(CODEGEN_EGRESS_SOCKET_VOLUME)" \
 	CODEGEN_EGRESS_POLICY_SHA256="$(CODEGEN_EGRESS_POLICY_SHA256)" \
-	CODEGEN_EGRESS_PROXY_IMAGE="$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)" \
+	CODEGEN_EGRESS_PROXY_IMAGE_ID="$(CODEGEN_EGRESS_PROXY_IMAGE_ID)" \
 	CODEGEN_DOCKER_SOCKET="$(CODEGEN_DOCKER_SOCKET)" \
 	CODEGEN_DOCKER_UID="$(CODEGEN_DOCKER_UID)" \
 	CODEGEN_DOCKER_GID="$(CODEGEN_DOCKER_GID)" \
 	CODEGEN_DOCKER_SOCKET_GID="$(CODEGEN_DOCKER_SOCKET_GID)" \
 	CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" \
-	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_ROLLOUT_COMPOSE_FILE) up -d --no-build --no-deps --force-recreate --wait codegen-egress-proxy
+	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_TENANT_RUNTIME_COMPOSE_FILE) up -d --no-build --no-deps --force-recreate --wait codegen-egress-proxy
 	CODEGEN_REVISION="$(CODEGEN_REVISION)" \
-	CODEGEN_EVALUATION_MODEL="$(CODEGEN_EVALUATION_MODEL)" \
-	CODEGEN_EVALUATION_HELPER_MODEL="$(CODEGEN_EVALUATION_HELPER_MODEL)" \
-	CODEGEN_ROLLOUT_STAGE=reviewed_pr \
-	CODEGEN_ROLLOUT_BUNDLE_PATH="$(CODEGEN_ROLLOUT_BUNDLE_PATH)" \
-	CODEGEN_CONTROLLER_IMAGE="$(CODEGEN_EVALUATED_CONTROLLER_IMAGE)" \
-	CODEGEN_SANDBOX_IMAGE="$(CODEGEN_EVALUATED_SANDBOX_IMAGE)" \
+	CODEGEN_CONTROLLER_IMAGE_ID="$(CODEGEN_CONTROLLER_IMAGE_ID)" \
+	CODEGEN_SANDBOX_IMAGE="$(CODEGEN_SANDBOX_IMAGE)" \
 	CODEGEN_EGRESS_SOCKET_VOLUME="$(CODEGEN_EGRESS_SOCKET_VOLUME)" \
 	CODEGEN_EGRESS_POLICY_SHA256="$(CODEGEN_EGRESS_POLICY_SHA256)" \
-	CODEGEN_EGRESS_PROXY_IMAGE="$(CODEGEN_EVALUATED_EGRESS_PROXY_IMAGE)" \
+	CODEGEN_EGRESS_PROXY_IMAGE_ID="$(CODEGEN_EGRESS_PROXY_IMAGE_ID)" \
 	CODEGEN_DOCKER_SOCKET="$(CODEGEN_DOCKER_SOCKET)" \
 	CODEGEN_DOCKER_UID="$(CODEGEN_DOCKER_UID)" \
 	CODEGEN_DOCKER_GID="$(CODEGEN_DOCKER_GID)" \
 	CODEGEN_DOCKER_SOCKET_GID="$(CODEGEN_DOCKER_SOCKET_GID)" \
 	CODEGEN_LLM_BROKER_DIR="$(CODEGEN_LLM_BROKER_DIR)" \
-	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_ROLLOUT_COMPOSE_FILE) up -d --no-build --no-deps --force-recreate codegen
+	$(COMPOSE) -f $(CODEGEN_EGRESS_COMPOSE_FILE) -f $(CODEGEN_TENANT_RUNTIME_COMPOSE_FILE) up -d --no-build --no-deps --force-recreate codegen
 
 grant-codegen-repository:
 	cd services/codegen && .venv/bin/python -m app.github.grant_cli $(ARGS)

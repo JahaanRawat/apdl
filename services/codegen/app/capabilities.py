@@ -15,7 +15,7 @@ from app.config import (
     github_app_id,
     github_app_private_key,
 )
-from app.evaluations.models import RolloutStage
+from app.models.execution import PublicationStage
 from app.github.app_auth import build_app_jwt
 from app.safety.killswitch import automation_enabled
 from app.store import connections as connections_store
@@ -23,7 +23,6 @@ from app.store.llm_credentials import (
     CredentialCipher,
     CredentialConfigurationError,
 )
-from app.store.llm_routing import project_model_pair_matches_rollout_evidence
 
 CapabilityState = Literal["available", "disabled"]
 CheckState = Literal["ready", "blocked"]
@@ -39,9 +38,8 @@ CapabilityReason = Literal[
 
 _PUBLICATION_STAGES = frozenset(
     {
-        RolloutStage.development_pr,
-        RolloutStage.reviewed_pr,
-        RolloutStage.low_risk_canary,
+        PublicationStage.development_pr,
+        PublicationStage.tenant_draft_pr,
     }
 )
 _RUNTIME_PROBE_TTL_SECONDS = 5.0
@@ -101,7 +99,7 @@ class _RuntimeProbeKey:
     # before trusting an entry, so an unexpected collision re-probes instead
     # of answering for the wrong runtime.
     editor_identity: int
-    stage: RolloutStage
+    stage: PublicationStage
     revision: str
 
 
@@ -141,8 +139,18 @@ def _provider_configured() -> bool:
     return True
 
 
+def _provider_encryption_key_id() -> str | None:
+    """Return the non-secret identity of the active credential key."""
+    try:
+        return CredentialCipher.from_environment().key_id
+    except CredentialConfigurationError:
+        return None
+
+
 async def _project_llm_assignments(
-    pool: Any, project_id: str
+    pool: Any,
+    project_id: str,
+    encryption_key_id: str | None,
 ) -> list[ProjectLlmAssignmentCapability]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -155,6 +163,7 @@ async def _project_llm_assignments(
              AND connection.provider = assignment.provider
              AND connection.version = assignment.connection_version
              AND connection.inventory_version = assignment.inventory_version
+             AND connection.catalog_version = assignment.catalog_version
              AND connection.state = 'active'
             JOIN codegen_project_provider_models AS model
               ON model.project_id = assignment.project_id
@@ -162,16 +171,19 @@ async def _project_llm_assignments(
              AND model.model_id = assignment.model_id
              AND model.connection_version = connection.version
              AND model.inventory_version = connection.inventory_version
+             AND model.catalog_version = connection.catalog_version
              AND assignment.role = ANY(model.supported_roles)
             JOIN codegen_project_provider_credentials AS credential
               ON credential.credential_id = connection.credential_id
              AND credential.project_id = connection.project_id
              AND credential.provider = connection.provider
              AND credential.state = 'active'
+             AND credential.encryption_key_id = $2
             WHERE assignment.project_id = $1
             ORDER BY CASE assignment.role WHEN 'editor' THEN 0 ELSE 1 END
             """,
             project_id,
+            encryption_key_id,
         )
     return [
         ProjectLlmAssignmentCapability(
@@ -218,10 +230,10 @@ def _worker_dependencies(app: Any) -> dict[str, Any] | None:
 
 def _assert_runtime_ready(
     editor: Any,
-    stage: RolloutStage,
+    stage: PublicationStage,
     revision: str,
 ) -> None:
-    if stage is RolloutStage.development_pr:
+    if stage is PublicationStage.development_pr:
         editor.assert_runtime_ready(
             expected_revision=revision,
             require_immutable_image=False,
@@ -272,7 +284,7 @@ async def _run_runtime_probe(
 async def _runtime_ready(
     app: Any,
     editor: Any,
-    stage: RolloutStage,
+    stage: PublicationStage,
     revision: str,
 ) -> bool:
     """Return a short-lived, single-flight probe result for one exact runtime."""
@@ -310,30 +322,26 @@ async def evaluate_changeset_creation(
 ) -> CapabilityEvaluation:
     """Re-evaluate every prerequisite for one project without optimistic fallbacks."""
     stage = getattr(app.state, "codegen_rollout_stage", None)
-    stage_ready = isinstance(stage, RolloutStage) and stage in _PUBLICATION_STAGES
+    stage_ready = (
+        isinstance(stage, PublicationStage) and stage in _PUBLICATION_STAGES
+    )
     automation_ready = automation_enabled(project_id)
     connection = await connections_store.get_connection(pool, project_id)
     github_ready = _github_app_configured()
-    credential_store_ready = _provider_configured()
-    assignments = await _project_llm_assignments(pool, project_id)
+    encryption_key_id = _provider_encryption_key_id()
+    credential_store_ready = (
+        _provider_configured() and encryption_key_id is not None
+    )
+    assignments = await _project_llm_assignments(
+        pool,
+        project_id,
+        encryption_key_id,
+    )
     assignments_ready = [item.role for item in assignments] == [
         "editor",
         "helper",
     ]
-    model_pair_ready = assignments_ready and (
-        project_model_pair_matches_rollout_evidence(
-            stage=stage,
-            editor_provider=assignments[0].provider,
-            editor_model_id=assignments[0].model_id,
-            helper_provider=assignments[1].provider,
-            helper_model_id=assignments[1].model_id,
-        )
-    )
-    provider_ready = (
-        credential_store_ready
-        and assignments_ready
-        and model_pair_ready
-    )
+    provider_ready = credential_store_ready and assignments_ready
     dependencies = _worker_dependencies(app)
     worker_ready = dependencies is not None
     runtime_ready = False

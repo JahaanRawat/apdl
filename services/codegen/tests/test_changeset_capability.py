@@ -15,10 +15,10 @@ from httpx import ASGITransport, AsyncClient
 
 from app import capabilities
 from app.auth import Principal, authenticate_request
-from app.evaluations.models import RolloutStage
 from app.main import app
+from app.models.execution import PublicationStage
 from app.store.llm_credentials import ENCRYPTION_KEY_ENV
-from tests.fakes import FakePool
+from tests.fakes import FakePool, TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_ID
 
 
 def _rsa_private_pem() -> str:
@@ -70,10 +70,15 @@ def test_github_app_capability_rejects_invalid_base64_without_leaking_it(
 
 @pytest.fixture
 def executable_runtime(monkeypatch):
-    app.state.codegen_rollout_stage = RolloutStage.development_pr
+    app.state.codegen_rollout_stage = PublicationStage.development_pr
     app.state.job_deps = _runtime_dependencies()
     monkeypatch.setattr(capabilities, "_github_app_configured", lambda: True)
     monkeypatch.setattr(capabilities, "_provider_configured", lambda: True)
+    monkeypatch.setattr(
+        capabilities,
+        "_provider_encryption_key_id",
+        lambda: TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_ID,
+    )
     monkeypatch.setattr(capabilities, "_assert_runtime_ready", lambda *_: None)
     monkeypatch.delenv("CODEGEN_KILL_SWITCH", raising=False)
     monkeypatch.delenv("CODEGEN_DISABLED_PROJECTS", raising=False)
@@ -138,7 +143,7 @@ async def test_capability_reports_every_blocking_prerequisite(
 ) -> None:
     pool = FakePool()
     app.state.pg_pool = pool
-    app.state.codegen_rollout_stage = RolloutStage.shadow
+    app.state.codegen_rollout_stage = PublicationStage.offline
     if hasattr(app.state, "job_deps"):
         del app.state.job_deps
     monkeypatch.setenv("CODEGEN_KILL_SWITCH", "true")
@@ -170,37 +175,32 @@ async def test_capability_reports_every_blocking_prerequisite(
 
 
 @pytest.mark.asyncio
-async def test_reviewed_capability_rejects_helper_model_evidence_drift(
+async def test_tenant_capability_uses_the_projects_exact_model_assignments(
     executable_runtime,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     del executable_runtime
     pool = FakePool()
     pool.add_connection("demo")
+    pool.add_llm_connection(
+        "demo",
+        helper_model_id="claude-haiku-4-5-20251001",
+    )
     app.state.pg_pool = pool
-    app.state.codegen_rollout_stage = RolloutStage.reviewed_pr
-    monkeypatch.setenv(
-        "CODEGEN_EVALUATION_MODEL",
-        "anthropic/claude-sonnet-5",
-    )
-    monkeypatch.setenv(
-        "CODEGEN_EVALUATION_HELPER_MODEL",
-        "anthropic/claude-haiku-4-5-20251001",
-    )
+    app.state.codegen_rollout_stage = PublicationStage.tenant_draft_pr
 
-    evaluation = await capabilities.evaluate_changeset_creation(
+    capability = await capabilities.evaluate_changeset_creation(
         app,
         pool,
         "demo",
     )
 
-    assert [item.model_id for item in evaluation.report.llm_assignments] == [
+    assert [item.model_id for item in capability.report.llm_assignments] == [
         "claude-sonnet-5",
-        "claude-sonnet-5",
+        "claude-haiku-4-5-20251001",
     ]
-    assert evaluation.report.changeset_creation == "disabled"
-    assert evaluation.report.checks.provider == "blocked"
-    assert evaluation.report.reasons == ["provider_unconfigured"]
+    assert capability.report.changeset_creation == "available"
+    assert capability.report.checks.provider == "ready"
+    assert capability.report.reasons == []
 
 
 @pytest.mark.asyncio
@@ -314,11 +314,11 @@ async def test_runtime_probe_cache_key_binds_stage_editor_and_revision(
     pool.add_connection("demo")
     original_editor = app.state.job_deps["editor"]
     revision = ["revision-a"]
-    calls: list[tuple[object, RolloutStage, str]] = []
+    calls: list[tuple[object, PublicationStage, str]] = []
 
     def ready_runtime(
         editor: object,
-        stage: RolloutStage,
+        stage: PublicationStage,
         expected_revision: str,
     ) -> None:
         calls.append((editor, stage, expected_revision))
@@ -330,7 +330,7 @@ async def test_runtime_probe_cache_key_binds_stage_editor_and_revision(
     await capabilities.evaluate_changeset_creation(app, pool, "demo")
     await capabilities.evaluate_changeset_creation(app, pool, "demo")
 
-    app.state.codegen_rollout_stage = RolloutStage.reviewed_pr
+    app.state.codegen_rollout_stage = PublicationStage.tenant_draft_pr
     await capabilities.evaluate_changeset_creation(app, pool, "demo")
 
     replacement_editor = object()
@@ -341,10 +341,10 @@ async def test_runtime_probe_cache_key_binds_stage_editor_and_revision(
     await capabilities.evaluate_changeset_creation(app, pool, "demo")
 
     assert calls == [
-        (original_editor, RolloutStage.development_pr, "revision-a"),
-        (original_editor, RolloutStage.reviewed_pr, "revision-a"),
-        (replacement_editor, RolloutStage.reviewed_pr, "revision-a"),
-        (replacement_editor, RolloutStage.reviewed_pr, "revision-b"),
+        (original_editor, PublicationStage.development_pr, "revision-a"),
+        (original_editor, PublicationStage.tenant_draft_pr, "revision-a"),
+        (replacement_editor, PublicationStage.tenant_draft_pr, "revision-a"),
+        (replacement_editor, PublicationStage.tenant_draft_pr, "revision-b"),
     ]
 
 

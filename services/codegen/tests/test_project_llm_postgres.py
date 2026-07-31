@@ -17,8 +17,8 @@ import asyncpg
 import pytest
 
 from app.editor.environment import codegen_tenant_behavior_configuration_sha256
-from app.evaluations.models import RiskLevel
 from app.llm.provider_catalog import catalog_model
+from app.models.execution import PublicationStage, RiskLevel
 from app.publication import (
     DEVELOPMENT_CODEGEN_REVISION,
     build_development_publication_authorization,
@@ -869,7 +869,7 @@ def _snapshot(
     repository_full_name: str,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "codegen_llm_execution_snapshot@1",
+        "schema_version": "codegen_llm_execution_snapshot@2",
         "project_id": project_id,
         "repository_grant_id": grant_id,
         "repository_id": repository_id,
@@ -877,7 +877,7 @@ def _snapshot(
         "repository_full_name": repository_full_name,
         "codegen_revision": "live-postgres-test",
         "behavior_configuration_sha256": "a" * 64,
-        "rollout_stage": "shadow",
+        "rollout_stage": PublicationStage.offline.value,
         "assignments": [_assignment("editor"), _assignment("helper")],
     }
 
@@ -1021,6 +1021,53 @@ async def test_snapshot_and_attempt_constraints_are_enforced_by_postgres() -> No
                 repository_full_name=repository_full_name,
                 snapshot=malformed_top_level,
             )
+        unnormalized_revision = json.loads(json.dumps(snapshot))
+        unnormalized_revision["codegen_revision"] = " live-postgres-test"
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_changeset(
+                conn,
+                changeset_id=f"unnormalized-revision-{uuid.uuid4().hex}",
+                project_id=project_id,
+                grant_id=grant_id,
+                repository_id=repository_id,
+                installation_id=installation_id,
+                repository_full_name=repository_full_name,
+                snapshot=unnormalized_revision,
+            )
+        numeric_digest = json.loads(json.dumps(snapshot))
+        numeric_digest["behavior_configuration_sha256"] = int("1" * 64)
+        with pytest.raises(asyncpg.CheckViolationError):
+            await _insert_changeset(
+                conn,
+                changeset_id=f"numeric-digest-{uuid.uuid4().hex}",
+                project_id=project_id,
+                grant_id=grant_id,
+                repository_id=repository_id,
+                installation_id=installation_id,
+                repository_full_name=repository_full_name,
+                snapshot=numeric_digest,
+            )
+        with pytest.raises(asyncpg.CheckViolationError):
+            async with conn.transaction():
+                await conn.execute("SET LOCAL session_replication_role = replica")
+                await conn.execute(
+                    """
+                    INSERT INTO codegen_changesets (
+                        changeset_id, project_id, status, task,
+                        repository_target_quarantined,
+                        idempotency_key, idempotency_request_sha256,
+                        llm_execution_snapshot
+                    ) VALUES (
+                        $1, $2, 'error', '{"context":{}}'::JSONB, TRUE,
+                        $3, $4, $5::JSONB
+                    )
+                    """,
+                    f"null-target-{uuid.uuid4().hex}",
+                    project_id,
+                    f"live:null-target-{uuid.uuid4().hex}",
+                    uuid.uuid4().hex + uuid.uuid4().hex,
+                    json.dumps(snapshot),
+                )
         for number in ("1.2", "1.2e0"):
             encoded = json.dumps(
                 snapshot,
@@ -1278,9 +1325,9 @@ async def test_prepare_attempt_audits_execution_authority_loss(
     snapshot["behavior_configuration_sha256"] = (
         codegen_tenant_behavior_configuration_sha256()
     )
-    snapshot["rollout_stage"] = "development_pr"
+    snapshot["rollout_stage"] = PublicationStage.development_pr.value
     authorization = build_development_publication_authorization(
-        risk=RiskLevel.low,
+        risk=RiskLevel.high,
         model="openai/gpt-5.4-mini",
         codegen_revision=DEVELOPMENT_CODEGEN_REVISION,
     )
@@ -1302,6 +1349,9 @@ async def test_prepare_attempt_audits_execution_authority_loss(
                     repository_full_name=repository_full_name,
                     snapshot=snapshot,
                 )
+            invalid_model = authorization.model_dump(mode="json")
+            invalid_model["request"]["model"] = "openai/gpt-4.1"
+            with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute(
                     """
                     UPDATE codegen_changesets
@@ -1309,8 +1359,31 @@ async def test_prepare_attempt_audits_execution_authority_loss(
                     WHERE changeset_id = $1
                     """,
                     changeset_id,
-                    authorization.model_dump_json(),
+                    json.dumps(invalid_model),
                 )
+
+            numeric_digest = authorization.model_dump(mode="json")
+            numeric_digest["authorization_sha256"] = int("1" * 64)
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(
+                    """
+                    UPDATE codegen_changesets
+                    SET publication_authorization = $2::JSONB
+                    WHERE changeset_id = $1
+                    """,
+                    changeset_id,
+                    json.dumps(numeric_digest),
+                )
+
+            await conn.execute(
+                """
+                UPDATE codegen_changesets
+                SET publication_authorization = $2::JSONB
+                WHERE changeset_id = $1
+                """,
+                changeset_id,
+                authorization.model_dump_json(),
+            )
 
         with pytest.raises(
             LlmRoutingUnavailableError,

@@ -37,8 +37,11 @@ FILE_SECRETS = {
     ),
     "OPENAI_API_KEY": "file-openai-provider-secret-sentinel",
     "GEMINI_API_KEY": "file-gemini-provider-secret-sentinel",
-    "CODEGEN_EVALUATION_ANTHROPIC_API_KEY": (
-        "file-codegen-evaluation-provider-secret-sentinel"
+    "CODEGEN_EVALUATION_OPENAI_API_KEY": (
+        "file-retired-scoped-provider-secret-sentinel"
+    ),
+    "AGENTS_RETIRED_GEMINI_API_KEY": (
+        "file-other-scoped-provider-secret-sentinel"
     ),
     GITHUB_PRIVATE_KEY: "file-github-private-secret-sentinel",
 }
@@ -49,9 +52,6 @@ INHERITED_SECRETS = {
     ),
     "ANTHROPIC_API_KEY": "inherited-anthropic-provider-secret-sentinel",
     "XAI_API_KEY": "inherited-xai-provider-secret-sentinel",
-    "CODEGEN_EVALUATION_OPENAI_API_KEY": (
-        "inherited-codegen-evaluation-provider-secret-sentinel"
-    ),
     GITHUB_WEBHOOK_SECRET: "inherited-github-webhook-secret-sentinel",
 }
 ALL_SECRET_VALUES = tuple((*FILE_SECRETS.values(), *INHERITED_SECRETS.values()))

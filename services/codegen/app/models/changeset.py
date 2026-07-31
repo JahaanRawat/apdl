@@ -21,9 +21,9 @@ from pydantic import (
 )
 
 from app.contracts.models import ContractBundle
-from app.evaluations.models import RiskLevel
 from app.inspection.models import DependencySlice, InspectionSnapshot
 from app.llm.contracts import LlmExecutionSnapshot
+from app.models.execution import RiskLevel
 from app.models.observations import (
     CIRemediationStatus,
     ExternalCIStatus,

@@ -52,7 +52,8 @@ class EditRequest:
     title: str
     spec: str
     #: Durable controller identity used for project LLM attempt binding.
-    #: Production callers always provide it; evaluation-only callers may omit it.
+    #: Tenant production callers always provide it; direct trusted-local callers
+    #: may omit it.
     changeset_id: str = ""
     #: Tenant boundary for private dependency-contract caches. Legacy/custom
     #: callers may omit it; the editor then scopes evidence to ``repo``.
@@ -141,8 +142,8 @@ class EditResult:
     #: each pre-push diff review. Entries are
     #: ``{"stage", "label", "system", "user", "notes"}`` dicts; ``system`` is
     #: ``None`` for the edit stage (Aider supplies its own system prompt).
-    #: Populated on failure too — a failed run is exactly when an operator
-    #: needs to see what the model was told.
+    #: Populated on failure too, when maintainers most need to see what the model
+    #: was told.
     prompts: list[dict[str, Any]] = field(default_factory=list)
 
 

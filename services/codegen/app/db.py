@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 
-MIGRATION_VERSION = 54
-MIGRATION_NAME = "054_codegen_project_llm_routing.sql"
+MIGRATION_VERSION = 55
+MIGRATION_NAME = "055_codegen_tenant_publication.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_project_execution_authorizations", "project_id"),
@@ -67,6 +67,10 @@ REQUIRED_COLUMNS = frozenset(
             "codegen_changesets",
             "publication_authorization_egress_unattested_legacy",
         ),
+        (
+            "codegen_changesets",
+            "publication_authorization_pre_tenant_legacy",
+        ),
         ("codegen_changesets", "tenant_policy_snapshot"),
         ("codegen_changesets", "effective_safety_policy_sha256"),
         ("codegen_changesets", "external_ci_awaiting_since"),
@@ -75,6 +79,7 @@ REQUIRED_COLUMNS = frozenset(
         ("codegen_changesets", "retry_of_changeset_id"),
         ("codegen_changesets", "control_metadata"),
         ("codegen_changesets", "llm_execution_snapshot"),
+        ("codegen_changesets", "llm_execution_snapshot_v1_legacy"),
         ("codegen_project_provider_credentials", "credential_id"),
         ("codegen_project_provider_credentials", "project_id"),
         ("codegen_project_provider_credentials", "provider"),

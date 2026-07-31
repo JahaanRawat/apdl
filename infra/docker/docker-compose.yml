@@ -247,14 +247,11 @@ services:
       # provider credential and has no development default.
       CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64: ${CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64:-}
       CODEGEN_LLM_BROKER_DIR: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}
-      # Fail-closed rollout gate. Production PR stages require a read-only
-      # operator evidence bundle bound to this exact model + revision.
+      # Fail-closed deployment mode. The base stack cannot publish; the secure
+      # tenant runtime overlay selects tenant_draft_pr explicitly.
       CODEGEN_REVISION: ${CODEGEN_REVISION:-development-unversioned}
-      # The base stack is evaluation-only even if an old host .env still carries
-      # publication settings. PR stages are enabled exclusively by the reviewed
-      # rollout overlay, which also requires immutable evaluated image IDs.
+      # Ambient host settings cannot promote the base stack.
       CODEGEN_ROLLOUT_STAGE: offline
-      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ""
       CODEGEN_PLATFORM_SAFETY_POLICY_PATH: ${CODEGEN_PLATFORM_SAFETY_POLICY_PATH:-}
       # Aider prompt caching (default on): caches the static prefix (system + repo
       # map) so the auto-test retry loop re-reads it at ~0.1x input price. Set
@@ -277,14 +274,13 @@ services:
       CODEGEN_LLM_TIMEOUT: ${CODEGEN_LLM_TIMEOUT:-240}
       # May tighten but never exceed the 3000s GitHub write-token safety cap.
       CODEGEN_JOB_BUDGET: ${CODEGEN_JOB_BUDGET:-3000}
-      # The isolated worker is the fail-closed default. PR rollout stages also
-      # use Docker --network none plus an attested proxy Unix socket in the
-      # reviewed rollout overlay.
+      # The isolated worker is the fail-closed default. Tenant draft execution
+      # uses Docker --network none plus an attested proxy Unix socket.
       CODEGEN_SANDBOX: ${CODEGEN_SANDBOX:-docker}
-      CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-sandbox:latest}
+      CODEGEN_SANDBOX_IMAGE: ${CODEGEN_SANDBOX_IMAGE:-apdl-codegen-worker:latest}
       CODEGEN_SANDBOX_NETWORK: ${CODEGEN_SANDBOX_NETWORK:-}
-      # Egress attestation is enabled only by the reviewed rollout overlay.
-      # Clear ambient host values so the normal offline stack cannot claim it.
+      # Egress attestation is enabled only by the tenant runtime overlay. Clear
+      # ambient host values so the normal offline stack cannot claim it.
       CODEGEN_EGRESS_POLICY_SHA256: ""
       CODEGEN_EGRESS_PROXY_IMAGE_ID: ""
       CODEGEN_EGRESS_SOCKET_VOLUME: ""
@@ -303,8 +299,6 @@ services:
     # Optional bind mounts — uncomment `volumes:` and the line(s) you need:
     #  * Docker socket: lets codegen launch the sandbox container (Option B,
     #    CODEGEN_SANDBOX=docker). SECURITY: grants host-root-equivalent access.
-    #  * Rollout bundle: mount CODEGEN_ROLLOUT_AUTHORIZATION_PATH read-only for
-    #    reviewed_pr or low_risk_canary; offline/shadow need no bundle.
     #  * Platform safety policy: mount CODEGEN_PLATFORM_SAFETY_POLICY_PATH
     #    read-only at the same absolute path when overriding built-in defaults.
     # volumes:

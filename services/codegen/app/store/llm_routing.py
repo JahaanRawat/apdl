@@ -8,15 +8,12 @@ from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from app.config import (
-    codegen_evaluation_helper_model,
-    codegen_evaluation_model,
     codegen_revision,
     codegen_rollout_stage,
 )
 from app.editor.environment import (
     codegen_tenant_behavior_configuration_sha256,
 )
-from app.evaluations.models import RolloutStage
 from app.llm.contracts import (
     LlmAssignmentSnapshot,
     LlmExecutionSnapshot,
@@ -28,7 +25,15 @@ from app.llm.contracts import (
 )
 from app.llm.provider_catalog import CATALOG_VERSION, runtime_model
 from app.models.connection import RepositoryTarget
+from app.models.execution import PublicationStage
+from app.publication import (
+    DevelopmentPublicationAuthorization,
+    PUBLICATION_AUTHORIZATION_ADAPTER,
+    TenantPublicationAuthorization,
+)
 from app.store.llm_credentials import (
+    CredentialCipher,
+    CredentialConfigurationError,
     CredentialDecryptionError,
     CredentialNotFoundError,
     ProjectCredentialStore,
@@ -71,68 +76,6 @@ AttemptBlockClassification = Literal[
 ]
 
 
-def _json_object(value: object) -> dict[str, object] | None:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            decoded = json.loads(value)
-        except (TypeError, ValueError):
-            return None
-        return decoded if isinstance(decoded, dict) else None
-    return None
-
-
-def project_model_pair_matches_rollout_evidence(
-    *,
-    stage: RolloutStage | object,
-    editor_provider: str,
-    editor_model_id: str,
-    helper_provider: str,
-    helper_model_id: str,
-) -> bool:
-    """Bind reviewed tenant routing to the exact evaluated model pair."""
-    if stage not in {
-        RolloutStage.reviewed_pr,
-        RolloutStage.low_risk_canary,
-    }:
-        return True
-    expected_editor = codegen_evaluation_model()
-    expected_helper = codegen_evaluation_helper_model()
-    if not expected_editor or not expected_helper:
-        return False
-    try:
-        actual_editor = runtime_model(
-            editor_provider,
-            editor_model_id,
-        ).litellm_model
-        actual_helper = runtime_model(
-            helper_provider,
-            helper_model_id,
-        ).litellm_model
-    except ValueError:
-        return False
-    return (actual_editor, actual_helper) == (
-        expected_editor,
-        expected_helper,
-    )
-
-
-def _snapshot_model_pair_matches_rollout_evidence(
-    snapshot: LlmExecutionSnapshot,
-) -> bool:
-    stage = codegen_rollout_stage()
-    editor = snapshot.assignment("editor")
-    helper = snapshot.assignment("helper")
-    return project_model_pair_matches_rollout_evidence(
-        stage=stage,
-        editor_provider=editor.provider,
-        editor_model_id=editor.model_id,
-        helper_provider=helper.provider,
-        helper_model_id=helper.model_id,
-    )
-
-
 def _snapshot_runtime_is_current(snapshot: LlmExecutionSnapshot) -> bool:
     stage = codegen_rollout_stage()
     return (
@@ -140,7 +83,6 @@ def _snapshot_runtime_is_current(snapshot: LlmExecutionSnapshot) -> bool:
         and snapshot.behavior_configuration_sha256
         == codegen_tenant_behavior_configuration_sha256()
         and snapshot.rollout_stage == stage.value
-        and _snapshot_model_pair_matches_rollout_evidence(snapshot)
         and all(
             assignment.catalog_version == CATALOG_VERSION
             for assignment in snapshot.assignments
@@ -160,12 +102,24 @@ def _publication_authorizes_snapshot(
     value: object,
     snapshot: LlmExecutionSnapshot,
 ) -> bool:
-    publication = _json_object(value)
-    if publication is None:
+    try:
+        raw = (
+            value
+            if isinstance(value, (str, bytes, bytearray))
+            else json.dumps(value)
+        )
+        publication = PUBLICATION_AUTHORIZATION_ADAPTER.validate_json(raw)
+    except (TypeError, ValueError):
         return False
-    request = publication.get("request")
-    decision = publication.get("decision")
-    if not isinstance(request, dict) or not isinstance(decision, dict):
+    if isinstance(publication, TenantPublicationAuthorization):
+        return (
+            publication.decision.allowed
+            and publication.decision.publish_branch
+            and publication.request.execution_snapshot == snapshot
+            and publication.request.execution_snapshot_sha256
+            == snapshot.evidence_sha256()
+        )
+    if not isinstance(publication, DevelopmentPublicationAuthorization):
         return False
     try:
         editor_model = runtime_model(
@@ -175,11 +129,12 @@ def _publication_authorizes_snapshot(
     except ValueError:
         return False
     return (
-        decision.get("allowed") is True
-        and decision.get("publish_branch") is True
-        and request.get("requested_stage") == snapshot.rollout_stage
-        and request.get("codegen_revision") == snapshot.codegen_revision
-        and request.get("model") == editor_model
+        snapshot.rollout_stage == PublicationStage.development_pr.value
+        and publication.decision.allowed
+        and publication.decision.publish_branch
+        and publication.request.requested_stage.value == snapshot.rollout_stage
+        and publication.request.codegen_revision == snapshot.codegen_revision
+        and publication.request.model == editor_model
     )
 
 
@@ -366,6 +321,7 @@ async def _credential_failure_classification(
 
 def _assignment(row: Any) -> LlmAssignmentSnapshot:
     return LlmAssignmentSnapshot(
+        schema_version="codegen_llm_assignment_snapshot@1",
         role=str(row["role"]),
         provider=str(row["provider"]),
         model_id=str(row["model_id"]),
@@ -394,6 +350,12 @@ async def capture_execution_snapshot(
     """Read both current assignments in the caller's admission transaction."""
     if repository_target.project_id != project_id:
         raise ValueError("LLM snapshot project does not match repository grant")
+    try:
+        encryption_key_id = CredentialCipher.from_environment().key_id
+    except CredentialConfigurationError as exc:
+        raise LlmRoutingUnavailableError(
+            "Codegen credential encryption authority is unavailable"
+        ) from exc
     rows = await conn.fetch(
         """
         SELECT assignment.role, assignment.provider, assignment.model_id,
@@ -424,11 +386,13 @@ async def capture_execution_snapshot(
          AND credential.project_id = connection.project_id
          AND credential.provider = connection.provider
          AND credential.state = 'active'
+         AND credential.encryption_key_id = $2
         WHERE assignment.project_id = $1
         ORDER BY CASE assignment.role WHEN 'editor' THEN 0 ELSE 1 END
         FOR SHARE OF assignment, connection, model, credential
         """,
         project_id,
+        encryption_key_id,
     )
     assignments = tuple(_assignment(row) for row in rows)
     if len(assignments) != 2 or tuple(item.role for item in assignments) != (
@@ -439,6 +403,7 @@ async def capture_execution_snapshot(
             "Project requires active editor and helper Codegen model assignments"
         )
     snapshot = LlmExecutionSnapshot(
+        schema_version="codegen_llm_execution_snapshot@2",
         project_id=project_id,
         repository_grant_id=repository_target.grant_id,
         repository_id=repository_target.repository_id,
@@ -453,10 +418,6 @@ async def capture_execution_snapshot(
             tuple[LlmAssignmentSnapshot, LlmAssignmentSnapshot], assignments
         ),
     )
-    if not _snapshot_model_pair_matches_rollout_evidence(snapshot):
-        raise LlmRoutingUnavailableError(
-            "Project LLM assignments do not match evaluated rollout evidence"
-        )
     return snapshot
 
 
@@ -580,6 +541,7 @@ async def assign_project_models(
                 )
                 assignments.append(
                     LlmAssignmentSnapshot(
+                        schema_version="codegen_llm_assignment_snapshot@1",
                         role=role,
                         provider=provider,
                         model_id=model_id,

@@ -16,11 +16,10 @@ from app.editor.prompts import (
     PROMPT_TRANSCRIPT_MAX_BYTES,
     serialized_prompt_bytes,
 )
-from app.evaluations.models import RiskLevel, RolloutStage
-from app.evaluations.publication import PublicationAuthorization
 from app.github.publisher import UnsafeCandidateTreeError
 from app.jobs.repair import repair_failed_ci as _repair_failed_ci
 from app.models.changeset import ChangesetStatus
+from app.models.execution import RiskLevel
 from app.models.observations import (
     CIRemediationStatus,
     CISignal,
@@ -62,39 +61,26 @@ from app.store.observations import (
     list_ci_remediation_attempts,
 )
 from app.store.runtime_evidence import apply_runtime_evidence_observation
-from tests.fakes import FakePool
+from tests.fakes import (
+    TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
+    FakePool,
+)
 from tests.publisher_fakes import FakeBranchPublisher
-from tests.publication_fakes import FakePublicationGate
+from tests.publication_fakes import (
+    allowing_publication_gate,
+    denying_publication_gate,
+)
 
 
-class _ModelBoundPublicationGate(FakePublicationGate):
-    """Build fake evidence for the exact editor model frozen on the changeset."""
-
-    def authorize(
-        self,
-        *,
-        risk: RiskLevel,
-        model: str,
-        helper_model: str,
-        canary_identity: str,
-    ) -> PublicationAuthorization:
-        authorization = super().authorize(
-            risk=risk,
-            model=model,
-            helper_model=helper_model,
-            canary_identity=canary_identity,
-        )
-        return authorization
-
-
-def allowing_publication_gate(
-    stage: RolloutStage = RolloutStage.low_risk_canary,
-) -> _ModelBoundPublicationGate:
-    return _ModelBoundPublicationGate(stage=stage)
-
-
-def denying_publication_gate() -> _ModelBoundPublicationGate:
-    return _ModelBoundPublicationGate(allowed=False)
+@pytest.fixture(autouse=True)
+def tenant_publication_environment(monkeypatch):
+    """Capture tenant-draft execution snapshots for repair fixtures."""
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "tenant_draft_pr")
+    monkeypatch.setenv("CODEGEN_REVISION", "test-revision")
+    monkeypatch.setenv(
+        "CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64",
+        TEST_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64,
+    )
 
 
 async def repair_failed_ci(*args, publication_gate=None, **kwargs):
@@ -376,7 +362,7 @@ async def test_actionable_failure_repairs_same_branch_with_exact_head_lease(
     assert editor.last_request.expected_head_sha == "head-failed"
     assert failed.failure_summary in editor.last_request.spec
     assert editor.last_request.risk_level == "high"
-    assert gate.calls == [(RiskLevel.high, "demo:10")]
+    assert gate.calls == [(RiskLevel.high, final.llm_execution_snapshot)]
     assert final.status is ChangesetStatus.pr_open
     assert final.head_sha == "head-repaired"
     assert final.external_ci_status is ExternalCIStatus.pending
@@ -529,7 +515,7 @@ async def test_repair_reuses_changeset_tenant_policy_snapshot(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_repair_rollout_denial_never_mints_token_or_invokes_editor(
+async def test_repair_publication_rejection_never_mints_token_or_invokes_editor(
     monkeypatch,
 ):
     monkeypatch.setenv("CODEGEN_CI_REPAIR_RETRIES", "2")
@@ -543,19 +529,26 @@ async def test_repair_rollout_denial_never_mints_token_or_invokes_editor(
         minted.append(changeset_id)
         yield "must-not-be-returned"
 
+    gate = denying_publication_gate()
     await repair_failed_ci(
         pool,
         failed,
         editor=editor,
         mint_token=mint,
-        publication_gate=denying_publication_gate(),
+        publication_gate=gate,
     )
 
     final = await changeset_store.get_changeset(pool, "cs-repair")
     assert final is not None
     assert final.ci_remediation_status is CIRemediationStatus.exhausted
-    assert final.publication_authorization is not None
-    assert final.publication_authorization.decision.allowed is False
+    assert final.publication_authorization is None
+    assert gate.calls == [(RiskLevel.high, final.llm_execution_snapshot)]
+    attempts = await list_ci_remediation_attempts(pool, "cs-repair")
+    assert any(
+        "publication authorization failed before GitHub credential minting"
+        in (attempt.error or "")
+        for attempt in attempts
+    )
     assert minted == []
     assert editor.last_request is None
 

@@ -37,10 +37,7 @@ from app.config import (
     codegen_job_budget,
     codegen_llm_broker_dir,
     codegen_max_concurrent_jobs,
-    codegen_evaluation_model,
-    codegen_evaluation_helper_model,
     codegen_revision,
-    codegen_rollout_authorization_path,
     codegen_rollout_stage,
     codegen_sandbox_mode,
     codegen_sandbox_image,
@@ -54,9 +51,7 @@ from app.editor.aider_editor import AiderEditor
 from app.editor.base import Editor
 from app.editor.container_editor import ContainerAiderEditor
 from app.editor.routed import ProjectRoutedEditor
-from app.editor.environment import codegen_behavior_configuration_sha256
-from app.evaluations.models import CodegenCandidateIdentity, RolloutStage
-from app.evaluations.publication import load_publication_authorizer
+from app.editor.environment import codegen_tenant_behavior_configuration_sha256
 from app.github.checks import get_ci_evidence
 from app.github.publisher import GitBranchPublisher
 from app.github.pulls import (
@@ -71,8 +66,12 @@ from app.jobs.pr_publication import resume_pull_request_publication
 from app.jobs.repair import repair_failed_ci
 from app.jobs.runner import run_changeset_job, run_stale_sweeper
 from app.llm.broker_directory import prepare_broker_root
+from app.models.execution import PublicationStage
 from app.models.observations import CIVerificationObservation
-from app.publication import ConfiguredPublicationGate
+from app.publication import (
+    ConfiguredPublicationGate,
+    TenantPublicationRuntimeIdentity,
+)
 from app.request_body_limit import RequestBodyLimitMiddleware
 from app.routers import (
     capabilities,
@@ -203,7 +202,7 @@ async def _close_maintenance_monitor(connection, task, listener) -> None:
 ChangesetCreationCapability = Literal["tenant_scoped", "disabled"]
 
 
-def _make_editor(stage: RolloutStage | None = None) -> Editor:
+def _make_editor(stage: PublicationStage | None = None) -> Editor:
     """Pick the editor execution model from ``CODEGEN_SANDBOX``.
 
     The isolated Docker worker is the default. In-process execution is available
@@ -212,9 +211,8 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
     resolved_stage = stage or codegen_rollout_stage()
     mode = codegen_sandbox_mode()
     publication_stage = resolved_stage in {
-        RolloutStage.development_pr,
-        RolloutStage.reviewed_pr,
-        RolloutStage.low_risk_canary,
+        PublicationStage.development_pr,
+        PublicationStage.tenant_draft_pr,
     }
     if mode == "docker":
         network = codegen_sandbox_network()
@@ -225,24 +223,24 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
             "host",
             "none",
         }
-        if resolved_stage is RolloutStage.development_pr and invalid_network:
+        if resolved_stage is PublicationStage.development_pr and invalid_network:
             raise RuntimeError(
                 "development_pr requires CODEGEN_SANDBOX_NETWORK to name a "
                 "dedicated local sandbox network"
             )
         if (
-            resolved_stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}
+            resolved_stage is PublicationStage.tenant_draft_pr
             and network
         ):
             raise RuntimeError(
-                "evaluated PR rollout stages use Docker --network none; "
+                "tenant_draft_pr uses Docker --network none; "
                 "CODEGEN_SANDBOX_NETWORK must be empty"
             )
         logger.info(
             "Codegen editor: sandboxed container execution (CODEGEN_SANDBOX=docker)"
         )
         editor = ContainerAiderEditor()
-        if resolved_stage is RolloutStage.development_pr:
+        if resolved_stage is PublicationStage.development_pr:
             editor.assert_runtime_ready(
                 expected_revision=codegen_revision(),
                 require_immutable_image=False,
@@ -256,107 +254,62 @@ def _make_editor(stage: RolloutStage | None = None) -> Editor:
     if not codegen_trusted_repos_only():
         raise RuntimeError(
             "In-process codegen requires CODEGEN_TRUSTED_REPOS_ONLY=true and is "
-            "limited to offline/shadow development"
+            "limited to offline development"
         )
     logger.warning("Codegen editor: trusted-repository in-process development mode")
     return AiderEditor()
 
 
 def _make_publication_gate() -> ConfiguredPublicationGate:
-    """Build the explicit development gate or load evaluated rollout evidence."""
+    """Build a local or tenant-assignment-bound draft publication gate."""
     stage = codegen_rollout_stage()
-    evaluation_model = codegen_evaluation_model()
-    model = evaluation_model or "project-assigned"
     revision = codegen_revision()
+    behavior_configuration_sha256 = (
+        codegen_tenant_behavior_configuration_sha256()
+    )
     development_mode = codegen_development_mode()
-    evaluation_helper_model = None
-    provider = None
-    candidate_identity = None
-    egress_policy_sha256 = None
-    if stage in {RolloutStage.reviewed_pr, RolloutStage.low_risk_canary}:
-        if not evaluation_model:
-            raise RuntimeError(
-                "CODEGEN_EVALUATION_MODEL is required for evaluated PR rollout "
-                "evidence"
-            )
-        raw_path = codegen_rollout_authorization_path()
-        if not raw_path:
-            raise RuntimeError(
-                "CODEGEN_ROLLOUT_AUTHORIZATION_PATH is required for PR rollout stages"
-            )
-        artifact_path = Path(raw_path)
-        if not artifact_path.is_absolute():
-            raise RuntimeError(
-                "CODEGEN_ROLLOUT_AUTHORIZATION_PATH must be an absolute path"
-            )
+    runtime_identity = None
+    if stage is PublicationStage.tenant_draft_pr:
         egress_policy_sha256 = codegen_egress_policy_sha256()
         if not egress_policy_sha256:
             raise RuntimeError(
-                "CODEGEN_EGRESS_POLICY_SHA256 is required for PR rollout stages"
+                "CODEGEN_EGRESS_POLICY_SHA256 is required for tenant_draft_pr"
             )
         egress_proxy_image_id = codegen_egress_proxy_image_id()
         if not egress_proxy_image_id:
             raise RuntimeError(
-                "CODEGEN_EGRESS_PROXY_IMAGE_ID is required for PR rollout stages"
+                "CODEGEN_EGRESS_PROXY_IMAGE_ID is required for tenant_draft_pr"
             )
         if not codegen_egress_socket_volume():
             raise RuntimeError(
-                "CODEGEN_EGRESS_SOCKET_VOLUME is required for PR rollout stages"
+                "CODEGEN_EGRESS_SOCKET_VOLUME is required for tenant_draft_pr"
             )
-        reviewed_max_concurrent_jobs = codegen_max_concurrent_jobs()
-        if reviewed_max_concurrent_jobs != 1:
+        max_concurrent_jobs = codegen_max_concurrent_jobs()
+        if max_concurrent_jobs != 1:
             raise RuntimeError(
-                "evaluated PR rollout stages require CODEGEN_MAX_CONCURRENT_JOBS=1"
+                "tenant_draft_pr requires CODEGEN_MAX_CONCURRENT_JOBS=1"
             )
-        evaluation_behavior_environment = dict(os.environ)
-        evaluation_behavior_environment["CODEGEN_MODEL"] = evaluation_model
-        evaluation_helper_model = codegen_evaluation_helper_model()
-        evaluation_behavior_environment["CODEGEN_HELPER_MODEL"] = (
-            evaluation_helper_model
-        )
-        candidate_identity = CodegenCandidateIdentity.build(
+        runtime_identity = TenantPublicationRuntimeIdentity.build(
             controller_image_id=codegen_controller_image_id(),
-            candidate_image_id=codegen_sandbox_image(),
+            worker_image_id=codegen_sandbox_image(),
             codegen_revision=revision,
-            behavior_configuration_sha256=(
-                codegen_behavior_configuration_sha256(
-                    evaluation_behavior_environment
-                )
-            ),
+            behavior_configuration_sha256=behavior_configuration_sha256,
             egress_policy_sha256=egress_policy_sha256,
             egress_proxy_image_id=egress_proxy_image_id,
-            reviewed_max_concurrent_jobs=reviewed_max_concurrent_jobs,
+            max_concurrent_jobs=max_concurrent_jobs,
         )
-        provider = load_publication_authorizer(
-            artifact_path,
-            expected_model=model,
-            expected_codegen_revision=revision,
-            expected_candidate_identity_sha256=candidate_identity.identity_sha256,
-            expected_egress_policy_sha256=egress_policy_sha256,
-        )
-    elif stage is RolloutStage.development_pr:
+    elif stage is PublicationStage.development_pr:
         if not development_mode:
             raise RuntimeError("development_pr requires CODEGEN_DEVELOPMENT_MODE=true")
-        if codegen_rollout_authorization_path():
-            raise RuntimeError(
-                "development_pr must not receive an evaluated rollout bundle"
-            )
     elif development_mode:
         raise RuntimeError(
             "CODEGEN_DEVELOPMENT_MODE=true is valid only with development_pr"
         )
     return ConfiguredPublicationGate(
         stage=stage,
-        model=model,
         codegen_revision=revision,
-        helper_model=evaluation_helper_model,
-        candidate_identity_sha256=(
-            candidate_identity.identity_sha256
-            if candidate_identity is not None
-            else None
-        ),
-        egress_policy_sha256=egress_policy_sha256,
-        provider=provider,
+        behavior_configuration_sha256=behavior_configuration_sha256,
+        runtime_identity=runtime_identity,
         development_mode=development_mode,
     )
 
@@ -368,7 +321,7 @@ async def lifespan(application: FastAPI):
     application.state.platform_codegen_safety_policy = platform_safety_policy
     publication_gate = _make_publication_gate()
     application.state.codegen_rollout_stage = publication_gate.stage
-    # Attest the exact evaluated worker/proxy topology before opening database
+    # Attest the exact tenant worker/proxy topology before opening database
     # or GitHub-token lifecycle resources.
     editor = _make_editor(publication_gate.stage)
     # Every serving entry point (including direct `make run-codegen`) prepares
@@ -668,15 +621,15 @@ async def readiness_check():
 
     Returns 503 (not 200-with-a-sad-body) on failure: orchestrators and load
     balancers key on the status code, not the payload.  Process readiness and
-    publication authority are deliberately separate: offline/shadow Codegen is
+    publication authority are deliberately separate: offline Codegen is
     healthy, but callers must not offer or enqueue changeset mutations.
     """
     stage = getattr(app.state, "codegen_rollout_stage", None)
-    if not isinstance(stage, RolloutStage):
+    if not isinstance(stage, PublicationStage):
         stage = codegen_rollout_stage()
     changeset_creation: ChangesetCreationCapability = (
         "disabled"
-        if stage in {RolloutStage.offline, RolloutStage.shadow}
+        if stage is PublicationStage.offline
         else "tenant_scoped"
     )
     capabilities = {

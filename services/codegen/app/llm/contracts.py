@@ -13,6 +13,8 @@ from pydantic import (
     model_validator,
 )
 
+from app.models.execution import canonical_sha256
+
 
 Provider = Literal["anthropic", "openai", "google", "xai"]
 Role = Literal["editor", "helper"]
@@ -24,9 +26,7 @@ class LlmAssignmentSnapshot(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    schema_version: Literal["codegen_llm_assignment_snapshot@1"] = (
-        "codegen_llm_assignment_snapshot@1"
-    )
+    schema_version: Literal["codegen_llm_assignment_snapshot@1"]
     role: Role
     provider: Provider
     model_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
@@ -48,29 +48,32 @@ class LlmExecutionSnapshot(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
-    schema_version: Literal["codegen_llm_execution_snapshot@1"] = (
-        "codegen_llm_execution_snapshot@1"
-    )
+    schema_version: Literal["codegen_llm_execution_snapshot@2"]
     project_id: str = Field(pattern=r"^[A-Za-z0-9]{1,64}$")
-    repository_grant_id: str = Field(min_length=1, max_length=128)
+    repository_grant_id: str = Field(
+        min_length=5,
+        max_length=132,
+        pattern=r"^ghg_[A-Za-z0-9_-]+$",
+    )
     repository_id: int = Field(ge=1)
     repository_installation_id: int = Field(ge=1)
     repository_full_name: str = Field(
+        max_length=201,
         pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
     )
     codegen_revision: str = Field(min_length=1, max_length=200)
     behavior_configuration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     rollout_stage: Literal[
         "offline",
-        "shadow",
         "development_pr",
-        "reviewed_pr",
-        "low_risk_canary",
+        "tenant_draft_pr",
     ]
     assignments: tuple[LlmAssignmentSnapshot, LlmAssignmentSnapshot]
 
     @model_validator(mode="after")
     def require_exact_roles(self) -> LlmExecutionSnapshot:
+        if self.codegen_revision != self.codegen_revision.strip():
+            raise ValueError("codegen_revision must be normalized")
         if tuple(item.role for item in self.assignments) != ("editor", "helper"):
             raise ValueError(
                 "assignments must contain editor then helper exactly once"
@@ -79,6 +82,10 @@ class LlmExecutionSnapshot(BaseModel):
 
     def assignment(self, role: Role) -> LlmAssignmentSnapshot:
         return self.assignments[0 if role == "editor" else 1]
+
+    def evidence_sha256(self) -> str:
+        """Content-address the exact repository and assignment authority."""
+        return canonical_sha256(self)
 
 
 class LlmRuntimeBinding(BaseModel):

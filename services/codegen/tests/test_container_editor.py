@@ -190,7 +190,7 @@ def test_container_timeout_covers_the_full_job_budget(monkeypatch):
 def test_pr_runtime_preflight_accepts_exact_image_revision_and_socket_proxy(
     monkeypatch,
 ):
-    revision = "evaluated-revision"
+    revision = "tenant-revision"
     image = "sha256:" + "a" * 64
     policy = "b" * 64
     proxy_image = "sha256:" + "c" * 64
@@ -239,7 +239,7 @@ def test_pr_runtime_preflight_accepts_exact_image_revision_and_socket_proxy(
 
 def test_development_runtime_preflight_accepts_revision_labeled_tag(monkeypatch):
     revision = "local-development"
-    image = "apdl-codegen-sandbox:local-development"
+    image = "apdl-codegen-worker:local-development"
     monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", "codegen-development")
     calls: list[list[str]] = []
     responses = iter(["27.5.1", revision, "[]"])
@@ -297,7 +297,7 @@ def test_attested_worker_uses_network_none_socket_configuration(
 
 
 @pytest.mark.parametrize("network", ["bridge", "default", "host", "none", "custom"])
-def test_evaluated_runtime_rejects_any_configured_network(monkeypatch, network):
+def test_tenant_runtime_rejects_any_configured_network(monkeypatch, network):
     monkeypatch.setenv("CODEGEN_SANDBOX_NETWORK", network)
     monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
     monkeypatch.setenv(
@@ -314,7 +314,7 @@ def test_evaluated_runtime_rejects_any_configured_network(monkeypatch, network):
         ContainerAiderEditor(image="sha256:" + "a" * 64)
 
 
-def test_pr_runtime_preflight_rejects_mutable_candidate_image(monkeypatch):
+def test_pr_runtime_preflight_rejects_mutable_worker_image(monkeypatch):
     monkeypatch.setenv("CODEGEN_EGRESS_POLICY_SHA256", "b" * 64)
     monkeypatch.setenv(
         "CODEGEN_EGRESS_PROXY_IMAGE_ID",
@@ -327,8 +327,8 @@ def test_pr_runtime_preflight_rejects_mutable_candidate_image(monkeypatch):
     )
 
     with pytest.raises(RuntimeError, match="immutable sandbox image digest"):
-        ContainerAiderEditor(image="apdl-codegen-sandbox:latest").assert_runtime_ready(
-            expected_revision="evaluated-revision"
+        ContainerAiderEditor(image="apdl-codegen-worker:latest").assert_runtime_ready(
+            expected_revision="tenant-revision"
         )
 
 
@@ -352,7 +352,7 @@ def test_pr_runtime_preflight_rejects_mismatched_image_revision(monkeypatch):
 
     with pytest.raises(RuntimeError, match="does not match CODEGEN_REVISION"):
         ContainerAiderEditor(image="sha256:" + "a" * 64).assert_runtime_ready(
-            expected_revision="evaluated-revision"
+            expected_revision="tenant-revision"
         )
 
 

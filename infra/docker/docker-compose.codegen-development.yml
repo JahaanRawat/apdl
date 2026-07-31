@@ -1,8 +1,7 @@
 services:
   # Local full-stack publication overlay. This is an explicit developer-mode
-  # capability: it keeps draft-PR generation usable without representing the
-  # local worker as an evaluated rollout candidate. Reviewed deployments use
-  # docker-compose.codegen-rollout.yml instead.
+  # capability with a mutable local worker and an unfiltered development-only
+  # network. Tenant deployments use docker-compose.codegen-tenant-runtime.yml.
   codegen:
     user: "${CODEGEN_DEVELOPMENT_DOCKER_UID:?make dev-all must set the host Docker UID}:${CODEGEN_DEVELOPMENT_DOCKER_GID:?make dev-all must set the host Docker GID}"
     group_add:
@@ -11,9 +10,8 @@ services:
       CODEGEN_DEVELOPMENT_MODE: "true"
       CODEGEN_REVISION: local-development
       CODEGEN_ROLLOUT_STAGE: development_pr
-      CODEGEN_ROLLOUT_AUTHORIZATION_PATH: ""
       CODEGEN_SANDBOX: docker
-      CODEGEN_SANDBOX_IMAGE: ${CODEGEN_DEVELOPMENT_SANDBOX_IMAGE:-apdl-codegen-sandbox:local-development}
+      CODEGEN_SANDBOX_IMAGE: ${CODEGEN_DEVELOPMENT_SANDBOX_IMAGE:-apdl-codegen-worker:local-development}
       CODEGEN_SANDBOX_NETWORK: ${CODEGEN_DEVELOPMENT_SANDBOX_NETWORK:-apdl-codegen-development}
       DOCKER_HOST: unix:///var/run/docker.sock
       CODEGEN_LLM_BROKER_DIR: ${CODEGEN_LLM_BROKER_DIR:-/tmp/apdl-codegen-llm-broker}

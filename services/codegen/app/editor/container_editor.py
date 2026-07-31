@@ -24,10 +24,10 @@ verified-cleanup path has a daemon-backed smoke contract. A live model/repositor
 edit still requires deployment credentials and remains an external integration.
 
 Hardening applied here via ``docker run`` flags: ``--rm``, ``--network none``
-for evaluated work, a read-only root,
+for tenant publication work, a read-only root,
 writable no-exec tmpfs mounts, ``--cap-drop ALL``, ``--security-opt
 no-new-privileges``, and pids/memory/cpu caps; the image runs non-root.
-Evaluated stages mount only an attested proxy Unix-socket volume read-only and
+Tenant publication mounts only an attested proxy Unix-socket volume read-only and
 start a sealed loopback relay. Local development uses a separate
 development-only bridge.
 """
@@ -89,7 +89,7 @@ from app.verification.models import VerificationCoverage, VerificationPlan
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_IMAGE = "apdl-codegen-sandbox:latest"
+_DEFAULT_IMAGE = "apdl-codegen-worker:latest"
 _ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
 
 # Provider credentials are never forwarded through Docker environment or argv.
@@ -156,7 +156,7 @@ class ContainerAiderEditor:
             )
         if configured_egress and self._network:
             raise ValueError(
-                "evaluated workers use Docker --network none; "
+                "tenant publication workers use Docker --network none; "
                 "CODEGEN_SANDBOX_NETWORK must be empty"
             )
         self._proxy_environment = (
@@ -177,10 +177,10 @@ class ContainerAiderEditor:
     ) -> None:
         """Fail PR-stage startup unless Docker, image, and network are real.
 
-        Evaluated stages additionally require the exact immutable sandbox image
+        Tenant publication additionally requires the exact immutable sandbox image
         bound into their evidence. Local development may use a rebuilt tag, but
         it still validates the daemon, image revision label, and isolated named
-        network before the API accepts work. Offline/shadow can boot without a
+        network before the API accepts work. Offline/local use can boot without a
         Docker daemon because their changeset endpoints are disabled.
         """
         if not expected_revision or expected_revision == "development-unversioned":
@@ -226,7 +226,7 @@ class ContainerAiderEditor:
                 and self._controller_image_id
             ):
                 raise RuntimeError(
-                    "evaluated PR rollout requires an attested Codegen egress policy"
+                    "tenant draft publication requires an attested Codegen egress policy"
                 )
             self._egress_attestation = self._attest_egress_policy(
                 launch_id="codegen-runtime-startup"
@@ -250,7 +250,7 @@ class ContainerAiderEditor:
             and self._controller_image_id
         ):
             raise RuntimeError(
-                "evaluated worker launch requires an attested Codegen egress policy"
+                "tenant worker launch requires an attested Codegen egress policy"
             )
         return attest_docker_egress_policy(
             docker_bin=self._docker,

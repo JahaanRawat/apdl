@@ -23,6 +23,7 @@ from app.llm.contracts import (
     LlmRuntimeBinding,
     PreparedLlmAttempt,
 )
+from app.models.execution import PublicationStage
 from app.store import llm_routing
 
 
@@ -59,6 +60,7 @@ def _attempt() -> PreparedLlmAttempt:
 
 def _assignment(role: str) -> LlmAssignmentSnapshot:
     return LlmAssignmentSnapshot(
+        schema_version="codegen_llm_assignment_snapshot@1",
         role=role,
         provider="openai",
         model_id="gpt-5.4-mini",
@@ -76,6 +78,7 @@ def _assignment(role: str) -> LlmAssignmentSnapshot:
 
 def _execution_snapshot() -> LlmExecutionSnapshot:
     return LlmExecutionSnapshot(
+        schema_version="codegen_llm_execution_snapshot@2",
         project_id="demo",
         repository_grant_id="ghg_test",
         repository_id=1,
@@ -83,7 +86,7 @@ def _execution_snapshot() -> LlmExecutionSnapshot:
         repository_full_name="acme/widgets",
         codegen_revision="test-revision",
         behavior_configuration_sha256="a" * 64,
-        rollout_stage="shadow",
+        rollout_stage=PublicationStage.offline.value,
         assignments=(_assignment("editor"), _assignment("helper")),
     )
 
@@ -520,10 +523,15 @@ async def test_routed_editor_rejects_request_snapshot_tenant_mismatch(
 
 
 def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
-    migration = (
+    assignment_migration = (
         ROOT
         / "pipeline/postgres/migrations"
         / "054_codegen_project_llm_routing.sql"
+    ).read_text(encoding="utf-8")
+    snapshot_migration = (
+        ROOT
+        / "pipeline/postgres/migrations"
+        / "055_codegen_tenant_publication.sql"
     ).read_text(encoding="utf-8")
 
     for field in (
@@ -531,10 +539,13 @@ def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
         "connection_version",
         "inventory_version",
         "context_window_tokens",
+    ):
+        assert f"->>'{field}' ~ '^[1-9][0-9]*$'" in assignment_migration
+    for field in (
         "repository_id",
         "repository_installation_id",
     ):
-        assert f"->>'{field}' ~ '^[1-9][0-9]*$'" in migration
+        assert f"->>'{field}' ~ '^[1-9][0-9]*$'" in snapshot_migration
     for field in (
         "input_cost_per_million_tokens_usd_micros",
         "output_cost_per_million_tokens_usd_micros",
@@ -542,34 +553,29 @@ def test_snapshot_sql_requires_canonical_integer_json_numbers() -> None:
         assert (
             f"assignment->>'{field}'\n"
             "        ) ~ '^(0|[1-9][0-9]*)$'"
-        ) in migration
+        ) in assignment_migration
 
 
-def test_every_reviewed_phase_rejects_helper_model_evidence_drift(
+def test_snapshot_runtime_accepts_tenant_assignments_and_rejects_deployment_drift(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snapshot = _execution_snapshot().model_copy(
-        update={"rollout_stage": "reviewed_pr"}
+        update={"rollout_stage": PublicationStage.tenant_draft_pr.value}
     )
-    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", "reviewed_pr")
+    monkeypatch.setenv(
+        "CODEGEN_ROLLOUT_STAGE",
+        PublicationStage.tenant_draft_pr.value,
+    )
     monkeypatch.setenv("CODEGEN_REVISION", "test-revision")
-    monkeypatch.setenv(
-        "CODEGEN_EVALUATION_MODEL",
-        "openai/gpt-5.4-mini",
-    )
-    monkeypatch.setenv(
-        "CODEGEN_EVALUATION_HELPER_MODEL",
-        "openai/gpt-5.4-nano",
-    )
     monkeypatch.setattr(
         llm_routing,
         "codegen_tenant_behavior_configuration_sha256",
         lambda: "a" * 64,
     )
 
-    assert llm_routing._snapshot_runtime_is_current(snapshot) is False
+    assert llm_routing._snapshot_runtime_is_current(snapshot) is True
 
-    matched = snapshot.model_copy(
+    tenant_selected = snapshot.model_copy(
         update={
             "assignments": (
                 snapshot.assignment("editor"),
@@ -579,4 +585,11 @@ def test_every_reviewed_phase_rejects_helper_model_evidence_drift(
             )
         }
     )
-    assert llm_routing._snapshot_runtime_is_current(matched) is True
+    assert llm_routing._snapshot_runtime_is_current(tenant_selected) is True
+    stale_revision = tenant_selected.model_copy(
+        update={"codegen_revision": "previous-revision"}
+    )
+    assert llm_routing._snapshot_runtime_is_current(stale_revision) is False
+
+    monkeypatch.setenv("CODEGEN_ROLLOUT_STAGE", PublicationStage.offline.value)
+    assert llm_routing._snapshot_runtime_is_current(tenant_selected) is False

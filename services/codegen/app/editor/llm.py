@@ -53,12 +53,13 @@ def resolve_completer(
 
     if api_key is None:
         try:
-            # This branch belongs only to the explicit offline evaluation seam.
+            # This branch belongs only to an explicit trusted-local/custom
+            # editor; tenant execution supplies a phase-scoped key directly.
             if not litellm.validate_environment(model).get(
                 "keys_in_environment", False
             ):
                 logger.warning(
-                    "No explicit evaluation credential for helper model %s; "
+                    "No explicit local credential for helper model %s; "
                     "auxiliary LLM steps are disabled.",
                     model,
                 )

@@ -29,13 +29,13 @@ from app.jobs.pr_publication import (
     resume_pull_request_publication,
 )
 from app.models.changeset import ChangesetStatus, InvalidTransition, TaskSpec
-from app.llm.provider_catalog import runtime_model
 from app.models.observations import ExternalCIStatus
 from app.models.pr_publication import PublicationIntentRecorded
 from app.publication import (
     DevelopmentPublicationAuthorization,
     PublicationAuthorizationRecord,
     PublicationGate,
+    TenantPublicationAuthorization,
 )
 from app.requirements import compile_requirement_ledger, map_implementation_evidence
 from app.requirements.models import ImplementationStatus, RequirementLedger
@@ -152,21 +152,36 @@ def _pr_body(
             f"- Stage: `{publication.request.requested_stage.value}`\n"
             f"- Model: `{publication.request.model}`\n"
             f"- Codegen revision: `{publication.request.codegen_revision}`\n"
-            "- Authority: local development; no evaluation evidence is claimed.\n"
+            "- Authority: local development; no production runtime attestation "
+            "is claimed.\n"
             f"- Authorization SHA-256: `{publication.authorization_sha256}`\n"
             "- This authorization always creates a draft PR. GitHub CI, review, "
             "and merge remain authoritative."
         )
-    else:
+    elif isinstance(publication, TenantPublicationAuthorization):
+        snapshot = publication.request.execution_snapshot
+        editor_assignment = snapshot.assignment("editor")
+        helper_assignment = snapshot.assignment("helper")
         publication_text = (
             f"- Stage: `{publication.request.requested_stage.value}`\n"
-            f"- Model: `{publication.request.model}`\n"
-            f"- Codegen revision: `{publication.request.codegen_revision}`\n"
-            f"- Evaluation report SHA-256: `{publication.report_sha256}`\n"
+            f"- Editor assignment: `{editor_assignment.provider}/"
+            f"{editor_assignment.model_id}` (version "
+            f"`{editor_assignment.assignment_version}`)\n"
+            f"- Helper assignment: `{helper_assignment.provider}/"
+            f"{helper_assignment.model_id}` (version "
+            f"`{helper_assignment.assignment_version}`)\n"
+            f"- Codegen revision: `{snapshot.codegen_revision}`\n"
+            f"- Execution snapshot SHA-256: "
+            f"`{publication.request.execution_snapshot_sha256}`\n"
+            f"- Runtime identity SHA-256: "
+            f"`{publication.request.runtime_identity.identity_sha256}`\n"
+            "- Authority: exact tenant-owned editor/helper assignments.\n"
             f"- Authorization SHA-256: `{publication.authorization_sha256}`\n"
-            "- This authorizes PR publication only; GitHub CI, review, and merge "
-            "remain authoritative."
+            "- This authorization always creates a draft PR. GitHub CI, review, "
+            "and merge remain authoritative."
         )
+    else:  # pragma: no cover - the discriminated union is exhaustive
+        raise TypeError("unsupported publication authorization")
     return (
         f"## Summary\n\n- {task.title}\n\n{task.spec}\n\n"
         f"## Requirement ledger\n\n{ledger_text}\n\n"
@@ -296,19 +311,9 @@ async def _execute_changeset_job(
             raise RuntimeError(
                 "Changeset is missing immutable LLM execution authority"
             )
-        editor_assignment = llm_snapshot.assignment("editor")
-        helper_assignment = llm_snapshot.assignment("helper")
         authorization = publication_gate.authorize(
             risk=risk,
-            model=runtime_model(
-                editor_assignment.provider,
-                editor_assignment.model_id,
-            ).litellm_model,
-            helper_model=runtime_model(
-                helper_assignment.provider,
-                helper_assignment.model_id,
-            ).litellm_model,
-            canary_identity=f"{changeset.project_id}:{connection.repository_id}",
+            snapshot=llm_snapshot,
         )
         await store.set_publication_authorization(pool, changeset_id, authorization)
         if not authorization.decision.allowed:

@@ -7,8 +7,8 @@ PostgreSQL) does not run. /health does not touch any shared resources.
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.evaluations.models import RolloutStage
 from app.main import app
+from app.models.execution import PublicationStage
 from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
 
 
@@ -34,7 +34,7 @@ async def test_ready_returns_200_when_db_reachable():
     pool = FakePool()
     app.state.pg_pool = pool
     app.state.llm_credential_store = _credential_store(pool)
-    app.state.codegen_rollout_stage = RolloutStage.offline
+    app.state.codegen_rollout_stage = PublicationStage.offline
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/ready")
@@ -56,7 +56,7 @@ async def test_ready_requires_a_tenant_scoped_check_for_publication_stages():
     pool = FakePool()
     app.state.pg_pool = pool
     app.state.llm_credential_store = _credential_store(pool)
-    app.state.codegen_rollout_stage = RolloutStage.development_pr
+    app.state.codegen_rollout_stage = PublicationStage.development_pr
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/ready")
@@ -77,7 +77,7 @@ async def test_ready_returns_503_when_db_unreachable():
 
     app.state.pg_pool = _BrokenPool()
     app.state.llm_credential_store = _credential_store(app.state.pg_pool)
-    app.state.codegen_rollout_stage = RolloutStage.reviewed_pr
+    app.state.codegen_rollout_stage = PublicationStage.tenant_draft_pr
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/ready")

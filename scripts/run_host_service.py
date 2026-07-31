@@ -35,9 +35,10 @@ CODEGEN_GITHUB_SECRETS = frozenset(
     }
 )
 
-# Keep this synchronized with Codegen's model-provider credential allow-list. These
-# are explicit evaluation inputs only; a long-running service never receives an
-# ambient provider credential, including Agents and Codegen.
+# Keep this synchronized with the model-provider credential allow-lists. Provider
+# credentials are stored encrypted and released just in time; a long-running
+# service never receives an ambient provider credential, including Agents and
+# Codegen.
 AMBIENT_PROVIDER_KEYS = frozenset(
     {
         "ANTHROPIC_API_KEY",
@@ -61,8 +62,8 @@ _ROTATION_KEY = re.compile(
     r"^(?:AGENTS|CODEGEN)_LLM_CREDENTIAL_"
     r"(?:OLD|NEW)_ENCRYPTION_KEY_BASE64$"
 )
-_CODEGEN_EVALUATION_PROVIDER_KEY = re.compile(
-    r"^CODEGEN_EVALUATION_[A-Z0-9_]+_API_KEY$"
+_SCOPED_PROVIDER_KEY = re.compile(
+    r"^(?:AGENTS|CODEGEN)_[A-Z0-9_]+_API_KEY$"
 )
 
 
@@ -165,9 +166,9 @@ def _permitted(service: str, name: str) -> bool:
         return service == "codegen"
     if name in AMBIENT_PROVIDER_KEYS:
         return False
-    if _ROTATION_KEY.fullmatch(name) is not None:
+    if _SCOPED_PROVIDER_KEY.fullmatch(name) is not None:
         return False
-    if _CODEGEN_EVALUATION_PROVIDER_KEY.fullmatch(name) is not None:
+    if _ROTATION_KEY.fullmatch(name) is not None:
         return False
     return True
 

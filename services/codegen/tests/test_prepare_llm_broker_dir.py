@@ -19,7 +19,7 @@ MAIN = (ROOT / "services/codegen/app/main.py").read_text(encoding="utf-8")
 
 def test_make_targets_use_the_validated_broker_directory_preparer() -> None:
     invocation = ".venv/bin/python -m scripts.prepare_llm_broker_dir"
-    for target in ("codegen-development-prepare:", "codegen-reviewed-config:"):
+    for target in ("codegen-development-prepare:", "codegen-tenant-config:"):
         recipe = MAKEFILE.split(target, 1)[1].split("\n\n", 1)[0]
         assert invocation in recipe
         assert "chmod 0711" not in recipe
