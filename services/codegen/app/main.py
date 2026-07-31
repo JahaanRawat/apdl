@@ -72,6 +72,7 @@ from app.runtime.collector import collect_runtime_evidence
 from app.safety.policy import load_platform_safety_policy
 from app.store import changesets as changeset_store
 from app.store import pr_publication as publication_store
+from app.store.llm_credentials import CredentialCipher, ProjectCredentialStore
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
 _ORPHAN_ERROR = (
@@ -360,6 +361,10 @@ async def lifespan(application: FastAPI):
     try:
         application.state.pg_pool = pool
         application.state.authenticator = PostgresAuthenticator(pool)
+        credential_store = ProjectCredentialStore(
+            pool, CredentialCipher.from_environment()
+        )
+        application.state.llm_credential_store = credential_store
         token_broker = GitHubTokenBroker(pool)
         application.state.github_token_broker = token_broker
         maintenance_connection = await pool.acquire()
@@ -604,8 +609,16 @@ async def readiness_check():
         if stage in {RolloutStage.offline, RolloutStage.shadow}
         else "tenant_scoped"
     )
-    capabilities = {"changeset_creation": changeset_creation}
+    capabilities = {
+        "changeset_creation": changeset_creation,
+        "credential_store": "ready",
+    }
     try:
+        if not isinstance(
+            getattr(app.state, "llm_credential_store", None),
+            ProjectCredentialStore,
+        ):
+            raise RuntimeError("Codegen credential store is unavailable")
         pool: asyncpg.Pool = app.state.pg_pool
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -621,7 +634,10 @@ async def readiness_check():
             content={
                 "status": "not_ready",
                 "service": "apdl-codegen",
-                "capabilities": capabilities,
+                "capabilities": {
+                    **capabilities,
+                    "credential_store": "blocked",
+                },
                 "error": str(exc),
             },
         )

@@ -185,6 +185,7 @@ GITHUB_APP_ID=
 GITHUB_APP_PRIVATE_KEY_BASE64=     # standard Base64 of the UTF-8 PEM
 GITHUB_API_URL=https://api.github.com
 GITHUB_WEBHOOK_SECRET=             # required to enable /webhooks/github; empty returns 503
+CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64= # canonical Base64 of exactly 32 random bytes
 CODEGEN_MODEL=claude-opus-4-8      # canonical supported provider/model ID; see below
 CODEGEN_REVISION=                  # immutable candidate/deployment digest
 CODEGEN_ROLLOUT_STAGE=offline      # offline | shadow | reviewed_pr | low_risk_canary
@@ -221,6 +222,13 @@ breaking configuration change; deployments that previously supplied an inline
 PEM or a PEM file path must encode the file and migrate to the single setting
 above.
 
+Generate the Codegen credential-encryption key independently from every provider
+credential and keep it in the deployment secret manager:
+
+```bash
+openssl rand -base64 32 | tr -d '\n'
+```
+
 The secure worker does not accept arbitrary LiteLLM provider prefixes. The
 canonical resolver accepts `anthropic`, `azure`, `cohere`, `deepseek`,
 `fireworks`, `gemini`/`google`, `groq`, `mistral`, `ollama`, `openai`,
@@ -236,6 +244,30 @@ and AWS credentials are not part of the worker allowlist. Supporting either
 provider requires a reviewed credential, routing, isolation, egress, and
 evaluation-evidence contract; adding only a model prefix or ambient credential
 would fail closed.
+
+Project provider credentials managed by Codegen are encrypted at rest with
+AES-256-GCM and scope-bound authenticated data. Their lifecycle is append-only:
+replacement and revocation retire ciphertext without retaining plaintext.
+
+Platform-key rotation is an offline maintenance operation. Drain and stop every
+APDL runtime that holds the shared PostgreSQL maintenance locks—not only Codegen
+replicas—then supply the old and new independent 32-byte standard-Base64 keys
+only to the rotation process and run the exclusive-barrier command:
+
+```bash
+cd services/codegen
+export CODEGEN_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64='...'
+export CODEGEN_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64='...'
+.venv/bin/python -m scripts.rotate_llm_credential_key \
+  --actor operator@example.com
+unset CODEGEN_LLM_CREDENTIAL_OLD_ENCRYPTION_KEY_BASE64
+unset CODEGEN_LLM_CREDENTIAL_NEW_ENCRYPTION_KEY_BASE64
+```
+
+The command re-reads and verifies every active row before one atomic commit.
+Its output contains only the rotated count and non-secret audit IDs. Restart
+all drained APDL runtimes only after the command succeeds; every Codegen
+instance must use the new `CODEGEN_LLM_CREDENTIAL_ENCRYPTION_KEY_BASE64`.
 
 Optional editor tunables: `CODEGEN_AIDER_BIN` (default `aider`), `CODEGEN_WORKDIR`
 (throwaway-clone base), and the `CODEGEN_TIMEOUT` /

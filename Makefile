@@ -239,7 +239,7 @@ test-codegen:
 	cd services/codegen && .venv/bin/python -m pytest -v
 
 lint-codegen:
-	cd services/codegen && .venv/bin/ruff check app/
+	cd services/codegen && .venv/bin/ruff check app/ tests/ scripts/
 
 run-codegen:
 	cd services/codegen && .venv/bin/python -m uvicorn app.main:app --reload --port 8084 $(SERVICE_ENV_FILE)
