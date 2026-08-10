@@ -12,15 +12,18 @@ import pytest
 from app.llm import router
 from app.llm.contracts import (
     LlmBudgetExceededError,
+    LlmCredentialUnavailableError,
     LlmGovernanceUnavailableError,
     LlmRequestContext,
     LlmRunInactiveError,
     PreparedLlmAttempt,
+    ProjectModelAssignment,
     ProjectLlmPolicy,
     ProviderPolicy,
 )
 from app.store.llm_governance import (
     begin_llm_call,
+    mark_provider_egress,
     prepare_provider_attempt,
     reconcile_orphaned_llm_attempts,
 )
@@ -74,6 +77,8 @@ def _policy(
         project_daily_cost_limit_usd_micros=1_000_000,
         run_cost_limit_usd_micros=1_000_000,
         providers=providers,
+        state="active",
+        version=7,
     )
 
 
@@ -96,6 +101,25 @@ class _GovernanceRecorder:
             self.events.append("call:prepared")
             return expected_call_id
 
+        async def assignment(context, *, tier):
+            del context
+            if not self.policy.providers:
+                raise LlmCredentialUnavailableError(
+                    f"Project has no {tier} LLM model assignment"
+                )
+            selected = self.policy.providers[0]
+            return ProjectModelAssignment(
+                project_id=self.policy.project_id,
+                tier=tier,
+                provider=selected.provider,
+                model=selected.model,
+                endpoint_url=selected.endpoint_url,
+                setup_version=self.policy.version,
+                connection_version=3,
+                inventory_version=5,
+                model_catalog_version="llm-provider-catalog@2",
+            )
+
         async def prepare(
             context,
             *,
@@ -107,6 +131,11 @@ class _GovernanceRecorder:
             prompt_sha256,
             estimated_input_tokens,
             max_output_tokens,
+            model_tier,
+            setup_version,
+            connection_version,
+            inventory_version,
+            model_catalog_version,
         ):
             del prompt_sha256, estimated_input_tokens, max_output_tokens
             assert call_id == expected_call_id
@@ -119,7 +148,19 @@ class _GovernanceRecorder:
                 attempt_id=uuid4(),
                 reserved_cost_usd_micros=10_000,
                 provider_policy=policy,
+                credential_id=uuid4() if provider != "local" else None,
+                credential_version=1 if provider != "local" else None,
+                setup_version=setup_version,
+                model_tier=model_tier,
+                connection_version=connection_version,
+                inventory_version=inventory_version,
+                model_catalog_version=model_catalog_version,
             )
+
+        async def load_key(context, prepared):
+            del context, prepared
+            self.events.append("credential:loaded")
+            return "project-provider-key"
 
         async def mark(context, *, attempt_id):
             assert isinstance(attempt_id, UUID)
@@ -139,8 +180,10 @@ class _GovernanceRecorder:
             self.events.append(f"call:{kwargs['status']}")
 
         monkeypatch.setattr(router, "load_project_llm_policy", load)
+        monkeypatch.setattr(router, "load_project_model_assignment", assignment)
         monkeypatch.setattr(router, "begin_llm_call", begin)
         monkeypatch.setattr(router, "prepare_provider_attempt", prepare)
+        monkeypatch.setattr(router, "_load_attempt_api_key", load_key)
         monkeypatch.setattr(router, "mark_provider_egress", mark)
         monkeypatch.setattr(router, "finish_provider_attempt", finish_attempt)
         monkeypatch.setattr(
@@ -190,12 +233,6 @@ async def test_actual_usage_is_audited_before_plain_content_is_returned(monkeypa
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_tier_models",
-        lambda tier: [_candidate("openai", "model-a")],
-    )
-
     async def invoke(model, messages, **kwargs):
         recorder.events.append("provider:egress")
         return router.TextCompletion("answer", input_tokens=11, output_tokens=7)
@@ -210,6 +247,72 @@ async def test_actual_usage_is_audited_before_plain_content_is_returned(monkeypa
     assert recorder.events.index("call:succeeded") > recorder.events.index(
         "attempt:succeeded"
     )
+    assert recorder.events.index("credential:loaded") < recorder.events.index(
+        "attempt:in_flight"
+    )
+    assert recorder.events.index("attempt:in_flight") < recorder.events.index(
+        "provider:egress"
+    )
+
+
+@pytest.mark.asyncio
+async def test_xai_plain_completion_uses_the_governed_provider_path(monkeypatch):
+    provider = _provider("xai", "grok-reviewed")
+    recorder = _GovernanceRecorder(_policy(provider))
+    recorder.install(monkeypatch)
+    class Completions:
+        async def create(self, **kwargs):
+            assert kwargs["model"] == "grok-reviewed"
+            return type(
+                "Response",
+                (),
+                {
+                    "choices": [
+                        type(
+                            "Choice",
+                            (),
+                            {
+                                "message": type(
+                                    "Message", (), {"content": "grok answer"}
+                                )()
+                            },
+                        )()
+                    ],
+                    "usage": type(
+                        "Usage",
+                        (),
+                        {"prompt_tokens": 13, "completion_tokens": 5},
+                    )(),
+                },
+            )()
+
+    client = type(
+        "Client",
+        (),
+        {
+            "chat": type(
+                "Chat",
+                (),
+                {"completions": Completions()},
+            )()
+        },
+    )()
+    endpoints: list[str] = []
+
+    def get_xai(_api_key: str, endpoint_url: str):
+        endpoints.append(endpoint_url)
+        return client
+
+    monkeypatch.setattr(router, "_get_xai", get_xai)
+
+    answer = await router.chat_completion("reasoning", _MESSAGES, context=_context())
+
+    assert answer == "grok answer"
+    assert "attempt:1:prepared:xai/grok-reviewed" in recorder.events
+    assert recorder.attempt_finishes[0]["input_tokens"] == 13
+    assert recorder.attempt_finishes[0]["output_tokens"] == 5
+    assert recorder.call_finishes[-1]["status"] == "succeeded"
+    assert endpoints == ["https://xai.example/v1"]
 
 
 @pytest.mark.asyncio
@@ -220,14 +323,6 @@ async def test_unknown_provider_error_is_nonretryable(monkeypatch):
         _policy(openai_policy, anthropic_policy, cross_vendor=True)
     )
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_tier_models",
-        lambda tier: [
-            _candidate("openai", "model-a"),
-            _candidate("anthropic", "model-b"),
-        ],
-    )
     invoked: list[str] = []
 
     async def unknown(model, messages, **kwargs):
@@ -241,7 +336,7 @@ async def test_unknown_provider_error_is_nonretryable(monkeypatch):
     monkeypatch.setitem(router._PROVIDER_FN, "openai", unknown)
     monkeypatch.setitem(router._PROVIDER_FN, "anthropic", must_not_run)
 
-    with pytest.raises(RuntimeError, match="without a safe retry"):
+    with pytest.raises(RuntimeError, match="LLM call failed"):
         await router.chat_completion("fast", _MESSAGES, context=_context())
 
     assert invoked == ["openai"]
@@ -256,14 +351,6 @@ async def test_cross_vendor_retry_is_denied_by_default(monkeypatch):
     anthropic_policy = _provider("anthropic", "model-b")
     recorder = _GovernanceRecorder(_policy(openai_policy, anthropic_policy))
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_tier_models",
-        lambda tier: [
-            _candidate("openai", "model-a"),
-            _candidate("anthropic", "model-b"),
-        ],
-    )
     invoked: list[str] = []
 
     async def timeout(model, messages, **kwargs):
@@ -277,29 +364,23 @@ async def test_cross_vendor_retry_is_denied_by_default(monkeypatch):
     monkeypatch.setitem(router._PROVIDER_FN, "openai", timeout)
     monkeypatch.setitem(router._PROVIDER_FN, "anthropic", must_not_run)
 
-    with pytest.raises(RuntimeError, match="No safe LLM retry remained"):
+    with pytest.raises(RuntimeError, match="LLM call failed"):
         await router.chat_completion("fast", _MESSAGES, context=_context())
 
     assert invoked == ["openai"]
-    assert recorder.attempt_finishes[0]["retryable"] is True
+    assert recorder.attempt_finishes[0]["retryable"] is False
 
 
 @pytest.mark.asyncio
-async def test_cross_vendor_retry_requires_explicit_policy_for_both_models(monkeypatch):
+async def test_cross_vendor_fallback_is_never_implicit_even_when_policy_allows(
+    monkeypatch,
+):
     openai_policy = _provider("openai", "model-a")
     anthropic_policy = _provider("anthropic", "model-b")
     recorder = _GovernanceRecorder(
         _policy(openai_policy, anthropic_policy, cross_vendor=True)
     )
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_tier_models",
-        lambda tier: [
-            _candidate("openai", "model-a"),
-            _candidate("anthropic", "model-b"),
-        ],
-    )
     invoked: list[str] = []
 
     async def timeout(model, messages, **kwargs):
@@ -313,14 +394,12 @@ async def test_cross_vendor_retry_requires_explicit_policy_for_both_models(monke
     monkeypatch.setitem(router._PROVIDER_FN, "openai", timeout)
     monkeypatch.setitem(router._PROVIDER_FN, "anthropic", fallback)
 
-    result = await router.chat_completion("fast", _MESSAGES, context=_context())
+    with pytest.raises(RuntimeError, match="LLM call failed"):
+        await router.chat_completion("fast", _MESSAGES, context=_context())
 
-    assert result == "safe fallback"
-    assert invoked == ["openai", "anthropic"]
-    assert [item["status"] for item in recorder.attempt_finishes] == [
-        "failed",
-        "succeeded",
-    ]
+    assert invoked == ["openai"]
+    assert [item["status"] for item in recorder.attempt_finishes] == ["failed"]
+    assert recorder.attempt_finishes[0]["retryable"] is False
 
 
 @pytest.mark.asyncio
@@ -328,11 +407,6 @@ async def test_privacy_classification_denial_is_durably_blocked(monkeypatch):
     public_only = _provider("openai", "model-a", classifications=frozenset({"public"}))
     recorder = _GovernanceRecorder(_policy(public_only))
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_tier_models",
-        lambda tier: [_candidate("openai", "model-a")],
-    )
     invoked = False
 
     async def must_not_run(model, messages, **kwargs):
@@ -342,7 +416,7 @@ async def test_privacy_classification_denial_is_durably_blocked(monkeypatch):
 
     monkeypatch.setitem(router._PROVIDER_FN, "openai", must_not_run)
 
-    with pytest.raises(RuntimeError, match="permits none"):
+    with pytest.raises(RuntimeError, match="does not permit"):
         await router.chat_completion("fast", _MESSAGES, context=_context())
 
     assert invoked is False
@@ -355,16 +429,25 @@ async def test_provider_policy_is_bound_to_exact_endpoint_before_egress(monkeypa
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
     recorder.install(monkeypatch)
+
+    async def unapproved_assignment(context, *, tier):
+        del context
+        return ProjectModelAssignment(
+            project_id="projectA",
+            tier=tier,
+            provider="openai",
+            model="model-a",
+            endpoint_url="https://unapproved.example/v1",
+            setup_version=7,
+            connection_version=3,
+            inventory_version=5,
+            model_catalog_version="llm-provider-catalog@2",
+        )
+
     monkeypatch.setattr(
         router,
-        "_tier_models",
-        lambda tier: [
-            {
-                "provider": "openai",
-                "model": "model-a",
-                "endpoint_url": "https://unapproved.example/v1",
-            }
-        ],
+        "load_project_model_assignment",
+        unapproved_assignment,
     )
     invoked = False
 
@@ -375,7 +458,7 @@ async def test_provider_policy_is_bound_to_exact_endpoint_before_egress(monkeypa
 
     monkeypatch.setitem(router._PROVIDER_FN, "openai", must_not_run)
 
-    with pytest.raises(RuntimeError, match="permits none"):
+    with pytest.raises(RuntimeError, match="does not permit"):
         await router.chat_completion("fast", _MESSAGES, context=_context())
 
     assert invoked is False
@@ -387,13 +470,17 @@ async def test_provider_policy_is_bound_to_exact_endpoint_before_egress(monkeypa
 async def test_missing_provider_is_durably_blocked(monkeypatch):
     recorder = _GovernanceRecorder(_policy())
     recorder.install(monkeypatch)
-    monkeypatch.setattr(router, "_tier_models", lambda tier: [])
-
-    with pytest.raises(RuntimeError, match="No LLM providers are configured"):
+    with pytest.raises(
+        LlmCredentialUnavailableError,
+        match="no fast LLM model assignment",
+    ):
         await router.chat_completion("fast", _MESSAGES, context=_context())
 
     assert recorder.call_finishes[-1]["status"] == "blocked"
-    assert recorder.call_finishes[-1]["error_classification"] == "no_provider"
+    assert (
+        recorder.call_finishes[-1]["error_classification"]
+        == "credential_unavailable"
+    )
 
 
 @pytest.mark.asyncio
@@ -401,11 +488,6 @@ async def test_budget_denial_terminalizes_logical_call_before_egress(monkeypatch
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_tier_models",
-        lambda tier: [_candidate("openai", "model-a")],
-    )
     invoked = False
 
     async def deny_budget(context, **kwargs):
@@ -432,11 +514,6 @@ async def test_audit_failure_after_successful_egress_fails_closed(monkeypatch):
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_tier_models",
-        lambda tier: [_candidate("openai", "model-a")],
-    )
     egress = False
 
     async def invoke(model, messages, **kwargs):
@@ -462,11 +539,6 @@ async def test_cancellation_after_egress_is_persisted_and_reraised(monkeypatch):
     provider = _provider("openai", "model-a")
     recorder = _GovernanceRecorder(_policy(provider))
     recorder.install(monkeypatch)
-    monkeypatch.setattr(
-        router,
-        "_tier_models",
-        lambda tier: [_candidate("openai", "model-a")],
-    )
 
     async def cancel(model, messages, **kwargs):
         raise asyncio.CancelledError
@@ -487,10 +559,9 @@ async def test_tool_completion_uses_the_same_governance_path(monkeypatch):
     recorder.install(monkeypatch)
     monkeypatch.setattr(
         router,
-        "_tier_models",
-        lambda tier: [_candidate("openai", "model-a")],
+        "_get_openai",
+        lambda _api_key, _endpoint_url: object(),
     )
-    monkeypatch.setattr(router, "_get_openai", lambda: object())
 
     async def tool_invoke(*args, **kwargs):
         return router.ToolCompletion("tool answer", input_tokens=9, output_tokens=4)
@@ -556,10 +627,17 @@ class _BudgetConn:
                 "allowed_data_classifications": ["confidential"],
                 "input_cost_per_million_tokens_usd_micros": 1_000_000,
                 "output_cost_per_million_tokens_usd_micros": 0,
+                "credential_id": UUID(
+                    "10000000-0000-4000-8000-000000000049"
+                ),
+                "credential_version": 1,
             }
         raise AssertionError(query)
 
     async def fetchval(self, query: str, *args: Any):
+        if "SELECT state = 'active'" in query:
+            assert args == ("projectA",)
+            return True
         if "SELECT status" in query and "FROM llm_calls" in query:
             return self.backend.calls.get(args[0])
         if "SELECT COALESCE(sum" in query:
@@ -575,7 +653,7 @@ class _BudgetConn:
                 {
                     "call_id": args[1],
                     "attempt_number": args[4],
-                    "provider": args[5],
+                    "provider": args[6],
                     "status": "prepared",
                     "retryable": False,
                     "reserved_cost": args[12],
@@ -627,6 +705,11 @@ async def test_concurrent_replicas_cannot_race_past_shared_cost_ceiling():
             prompt_sha256="a" * 64,
             estimated_input_tokens=10,
             max_output_tokens=1,
+            model_tier="fast",
+            setup_version=7,
+            connection_version=3,
+            inventory_version=5,
+            model_catalog_version="llm-provider-catalog@2",
         )
 
     results = await asyncio.gather(
@@ -646,6 +729,62 @@ class _ReconcileTransaction:
 
     async def __aexit__(self, *exc):
         return False
+
+
+class _EgressAuthorityConn:
+    def __init__(self, *, authorized: bool = True) -> None:
+        self.authorized = authorized
+        self.queries: list[str] = []
+
+    def transaction(self) -> _ReconcileTransaction:
+        return _ReconcileTransaction()
+
+    async def fetchrow(self, query: str, *args: Any):
+        self.queries.append(query)
+        assert "FROM agent_runs" in query
+        return {"active": 1}
+
+    async def fetchval(self, query: str, *args: Any):
+        self.queries.append(query)
+        if "SELECT state = 'active'" in query:
+            return True
+        if "SELECT attempt.attempt_id" in query:
+            assert "FOR UPDATE OF attempt" in query
+            assert "FOR SHARE OF policy, assignment, provider_policy" in query
+            return args[0] if self.authorized else None
+        if "UPDATE llm_provider_attempts" in query:
+            return args[0]
+        raise AssertionError(query)
+
+
+@pytest.mark.asyncio
+async def test_provider_egress_locks_exact_setup_and_credential_authority():
+    attempt_id = uuid4()
+    conn = _EgressAuthorityConn()
+
+    await mark_provider_egress(
+        _context(pool=_ReconcilePool(conn)),
+        attempt_id=attempt_id,
+    )
+
+    assert any("UPDATE llm_provider_attempts" in query for query in conn.queries)
+
+
+@pytest.mark.asyncio
+async def test_provider_egress_stops_when_exact_authority_was_replaced():
+    attempt_id = uuid4()
+    conn = _EgressAuthorityConn(authorized=False)
+
+    with pytest.raises(
+        LlmCredentialUnavailableError,
+        match="lost credential authority",
+    ):
+        await mark_provider_egress(
+            _context(pool=_ReconcilePool(conn)),
+            attempt_id=attempt_id,
+        )
+
+    assert not any("UPDATE llm_provider_attempts" in query for query in conn.queries)
 
 
 class _ReconcileConn:
@@ -690,6 +829,11 @@ class _ReconcilePool:
 class _InactiveOwnerConn:
     def transaction(self):
         return _ReconcileTransaction()
+
+    async def fetchval(self, query: str, *args: Any):
+        assert "SELECT state = 'active'" in query
+        assert args == ("projectA",)
+        return True
 
     async def fetchrow(self, query: str, *args: Any):
         assert "lease_owner_id = $3" in query

@@ -39,6 +39,8 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
 )
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
+_LLM_CONNECTION_READER = "llm-connections:read"
+_LLM_CONNECTION_MANAGER = "llm-connections:manage"
 _SERVICE_CREDENTIAL_ROLES = frozenset(
     {
         "events:write",
@@ -360,8 +362,60 @@ def required_role(service: str, method: str, path: str) -> str | None:
         return ""
     if service == "query":
         return "query:read" if path.startswith("/v1/query/") else ""
+    if service == "llm-vault":
+        connection = r"/v1/llm-connections/[0-9a-fA-F-]{36}"
+        if method == "GET" and (
+            path == "/v1/llm-connections"
+            or re.fullmatch(connection, path) is not None
+        ):
+            return _LLM_CONNECTION_READER
+        if method == "POST" and path == "/v1/llm-connections":
+            return _LLM_CONNECTION_MANAGER
+        if method == "PUT" and re.fullmatch(connection, path) is not None:
+            return _LLM_CONNECTION_MANAGER
+        if method == "POST" and re.fullmatch(
+            connection + r"/(?:refresh|revoke)", path
+        ) is not None:
+            return _LLM_CONNECTION_MANAGER
+        return ""
     if service == "agents":
         if not path.startswith("/v1/agents"):
+            return ""
+        if path == "/v1/agents/setup":
+            if method == "GET":
+                return "agents:read"
+            if method == "PUT":
+                return _LLM_CONNECTION_MANAGER
+            return ""
+        if path == "/v1/agents/setup/deactivate":
+            return (
+                _LLM_CONNECTION_MANAGER
+                if method == "POST"
+                else ""
+            )
+        if path.startswith("/v1/agents/setup"):
+            return ""
+        if path.startswith("/v1/agents/llm-connections"):
+            provider_path = (
+                r"/v1/agents/llm-connections/"
+                r"(?:openai|anthropic|google|xai)"
+            )
+            if method == "GET" and (
+                path == "/v1/agents/llm-connections"
+                or re.fullmatch(provider_path + r"/models", path) is not None
+            ):
+                return _LLM_CONNECTION_READER
+            if method == "PUT" and re.fullmatch(provider_path, path) is not None:
+                return _LLM_CONNECTION_MANAGER
+            if (
+                method == "POST"
+                and re.fullmatch(
+                    provider_path + r"/(?:refresh-models|revoke)",
+                    path,
+                )
+                is not None
+            ):
+                return _LLM_CONNECTION_MANAGER
             return ""
         if method == "GET" and path == "/v1/agents/capabilities/execution":
             return "agents:run"
@@ -377,6 +431,28 @@ def required_role(service: str, method: str, path: str) -> str | None:
             return "agents:manage"
         return ""
     if service == "codegen":
+        if path.startswith("/v1/llm-connections"):
+            provider_path = (
+                r"/v1/llm-connections/"
+                r"(?:openai|anthropic|google|xai)"
+            )
+            if method == "GET" and (
+                path == "/v1/llm-connections"
+                or re.fullmatch(provider_path + r"/models", path) is not None
+            ):
+                return "agents:read"
+            if method == "PUT" and re.fullmatch(provider_path, path) is not None:
+                return _LLM_CONNECTION_MANAGER
+            if (
+                method == "POST"
+                and re.fullmatch(
+                    provider_path + r"/(?:refresh-models|revoke)",
+                    path,
+                )
+                is not None
+            ):
+                return _LLM_CONNECTION_MANAGER
+            return ""
         if method == "GET" and (
             path.startswith("/v1/changesets") or path.startswith("/v1/connections/")
         ):
@@ -389,6 +465,41 @@ def required_role(service: str, method: str, path: str) -> str | None:
             return "agents:manage"
         return ""
     return ""
+
+
+async def _has_llm_connection_authority(
+    request: Request,
+    project_id: str,
+    user_id: str,
+) -> bool:
+    async with request.app.state.pg_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT (
+                account.active
+                AND (
+                    project.owner_user_id = $2
+                    OR (
+                        'agents:manage' = ANY(
+                            COALESCE(membership.roles, ARRAY[]::TEXT[])
+                        )
+                        AND 'credentials:manage' = ANY(
+                            COALESCE(membership.roles, ARRAY[]::TEXT[])
+                        )
+                    )
+                )
+            ) AS llm_connection_authorized
+            FROM admin_projects AS project
+            JOIN admin_users AS account ON account.user_id = $2
+            LEFT JOIN admin_user_projects AS membership
+              ON membership.project_id = project.project_id
+             AND membership.user_id = account.user_id
+            WHERE project.project_id = $1
+            """,
+            project_id,
+            uuid.UUID(user_id),
+        )
+    return row is not None and bool(row["llm_connection_authorized"])
 
 
 def _assert_tenant_value(value: object, project_id: str) -> None:
@@ -426,7 +537,7 @@ async def _request_body(
     if raw_body and require_json and media_type != _JSON_MEDIA_TYPE:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Codegen request bodies must use application/json",
+            detail="Upstream request bodies must use application/json",
         )
     if raw_body and media_type == _JSON_MEDIA_TYPE:
         try:
@@ -505,7 +616,32 @@ async def proxy_service(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Route not available"
         )
-    if role is not None and role not in roles:
+    elevated_llm_connection_read = False
+    if role in {_LLM_CONNECTION_READER, _LLM_CONNECTION_MANAGER}:
+        if role == _LLM_CONNECTION_READER and "agents:read" in roles:
+            pass
+        else:
+            has_connection_authority = await _has_llm_connection_authority(
+                request,
+                project_id,
+                session.user_id,
+            )
+            if not has_connection_authority:
+                detail = (
+                    "Connection management requires project ownership or "
+                    "delegated agents:manage and credentials:manage roles"
+                    if role == _LLM_CONNECTION_MANAGER
+                    else (
+                        "LLM connection access requires agents:read, project ownership, "
+                        "or delegated agents:manage and credentials:manage roles"
+                    )
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=detail,
+                )
+            elevated_llm_connection_read = role == _LLM_CONNECTION_READER
+    elif role is not None and role not in roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role"
         )
@@ -525,19 +661,38 @@ async def proxy_service(
         request,
         settings,
         project_id,
-        require_json=service == "codegen",
+        require_json=service in {"codegen", "llm-vault"},
     )
 
     ephemeral_credential_id: str | None = None
-    require_human_actor = service == "agents" and request.method not in _SAFE_METHODS
-    api_key, ephemeral_credential_id = await _service_credential(
-        request,
-        project_id,
-        roles,
-        settings,
-        actor_user_id=session.user_id if require_human_actor else None,
-        force_ephemeral=require_human_actor,
-    )
+    require_human_actor = (
+        service == "agents"
+        and (
+            request.method not in _SAFE_METHODS
+            or upstream_path == "/v1/agents/setup"
+        )
+    ) or role == _LLM_CONNECTION_MANAGER
+    credential_roles = roles
+    if role == _LLM_CONNECTION_MANAGER or elevated_llm_connection_read:
+        # Grant only the upstream read capability needed by this management
+        # surface. The receiving service rechecks live authority inside
+        # mutation transactions.
+        credential_roles = frozenset({"agents:read"})
+    if service == "llm-vault":
+        api_key = settings.llm_vault_admin_token
+    else:
+        api_key, ephemeral_credential_id = await _service_credential(
+            request,
+            project_id,
+            credential_roles,
+            settings,
+            actor_user_id=(
+                session.user_id
+                if require_human_actor or elevated_llm_connection_read
+                else None
+            ),
+            force_ephemeral=require_human_actor or elevated_llm_connection_read,
+        )
     try:
         if service == "codegen":
             await _require_codegen_scope(
@@ -556,7 +711,12 @@ async def proxy_service(
         for name, value in request.headers.items()
         if name.lower() in _FORWARDED_REQUEST_HEADERS
     }
-    headers["X-API-Key"] = api_key
+    if service == "llm-vault":
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-APDL-Project-ID"] = project_id
+        headers["X-APDL-Actor-User-ID"] = session.user_id
+    else:
+        headers["X-API-Key"] = api_key
 
     upstream_url = f"{settings.service_urls[service].rstrip('/')}{upstream_path}"
     upstream_request = request.app.state.http_client.build_request(

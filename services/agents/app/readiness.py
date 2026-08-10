@@ -60,10 +60,10 @@ async def _probe_codegen_readiness(
 ) -> dict[str, Any]:
     """Read Codegen's strict readiness/capability contract.
 
-    A reachable process is not enough: offline and shadow deployments are
-    healthy but cannot accept the changeset mutations produced by an approval
-    command.  Malformed or non-ready responses are unavailable, never inferred
-    as publication-capable.
+    A reachable process is not enough: an offline deployment is healthy but
+    cannot accept the changeset mutations produced by an approval command.
+    Malformed or non-ready responses are unavailable, never inferred as
+    publication-capable.
     """
     if not configured:
         return {
@@ -97,8 +97,9 @@ async def _probe_codegen_readiness(
         body.get("status") != "ready"
         or body.get("service") != "apdl-codegen"
         or not isinstance(capabilities, dict)
-        or set(capabilities) != {"changeset_creation"}
+        or set(capabilities) != {"changeset_creation", "credential_store"}
         or capabilities.get("changeset_creation") not in {"tenant_scoped", "disabled"}
+        or capabilities.get("credential_store") != "ready"
     ):
         return {
             "configured": True,
@@ -112,50 +113,12 @@ async def _probe_codegen_readiness(
     }
 
 
-def _provider_probes() -> dict[str, dict[str, Any]]:
-    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
-    local_url = os.getenv("LOCAL_LLM_URL", "").strip()
-
-    return {
-        "openai": {
-            "configured": bool(openai_key),
-            "url": _endpoint(
-                os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                "models",
-            ),
-            "headers": {"Authorization": f"Bearer {openai_key}"},
-        },
-        "anthropic": {
-            "configured": bool(anthropic_key),
-            "url": _endpoint(
-                os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-                "v1/models",
-            ),
-            "headers": {
-                "anthropic-version": "2023-06-01",
-                "x-api-key": anthropic_key,
-            },
-        },
-        "google": {
-            "configured": bool(google_key),
-            "url": "https://generativelanguage.googleapis.com/v1beta/models",
-            "headers": {"x-goog-api-key": google_key},
-        },
-        "local": {
-            "configured": bool(local_url),
-            "url": _endpoint(local_url, "models"),
-            "headers": {},
-        },
-    }
-
-
 def _service_probes() -> dict[str, dict[str, Any]]:
     service_urls = {
         "query": os.getenv("QUERY_SERVICE_URL", "http://localhost:8082"),
         "config": os.getenv("CONFIG_SERVICE_URL", "http://localhost:8081"),
         "codegen": os.getenv("CODEGEN_SERVICE_URL", "http://localhost:8084"),
+        "llm_vault": os.getenv("LLM_VAULT_URL", "http://localhost:8086"),
     }
     return {
         name: {
@@ -169,12 +132,11 @@ def _service_probes() -> dict[str, dict[str, Any]]:
 
 async def capability_report() -> dict[str, Any]:
     """Report optional workflow capabilities without affecting core readiness."""
-    provider_probes = _provider_probes()
     service_probes = _service_probes()
     generic_service_probes = {
-        name: service_probes[name] for name in ("query", "config")
+        name: service_probes[name] for name in ("query", "config", "llm_vault")
     }
-    generic_probes = {**provider_probes, **generic_service_probes}
+    generic_probes = generic_service_probes
     codegen_probe = service_probes["codegen"]
 
     timeout = httpx.Timeout(_PROBE_TIMEOUT_SECONDS)
@@ -198,17 +160,17 @@ async def capability_report() -> dict[str, Any]:
 
     *generic_results, codegen = results
     reachability = dict(zip(generic_probes, generic_results, strict=True))
-    providers = {
-        name: {
-            "configured": probe["configured"],
-            "reachable": reachability[name],
-        }
-        for name, probe in provider_probes.items()
-    }
+    vault_configured = (
+        service_probes["llm_vault"]["configured"]
+        and len(os.getenv("LLM_VAULT_AGENTS_TOKEN", "").encode("utf-8")) >= 32
+    )
+    vault_operational = vault_configured and reachability["llm_vault"]
     llm = {
-        "configured": any(provider["configured"] for provider in providers.values()),
-        "reachable": any(provider["reachable"] for provider in providers.values()),
-        "providers": providers,
+        "credential_store": {
+            "configured": vault_configured,
+            "operational": vault_operational,
+        },
+        "project_credentials": "tenant_scoped",
     }
     services: dict[str, dict[str, Any]] = {
         name: {
@@ -220,10 +182,12 @@ async def capability_report() -> dict[str, Any]:
     services["codegen"] = codegen
     capabilities = {"llm": llm, **services}
     fully_available = (
+        vault_operational
+        and
         all(
             capability["configured"] and capability["reachable"]
             for name, capability in capabilities.items()
-            if name != "codegen"
+            if name not in {"codegen", "llm"}
         )
         # Generic Codegen readiness deliberately cannot authorize a tenant.
         # ``tenant_scoped`` means the service is healthy and callers must use

@@ -25,8 +25,10 @@ def make_settings(**overrides) -> Settings:
             "query": "http://query.test",
             "agents": "http://agents.test",
             "codegen": "http://codegen.test",
+            "llm-vault": "http://llm-vault.test",
         },
         "service_api_keys": {"demo": TEST_API_KEY},
+        "llm_vault_admin_token": "test-vault-admin-token-is-32-bytes-long",
         "allowed_origins": frozenset({"http://admin.test"}),
         "registration_enabled": True,
         "max_accounts": 100,
@@ -61,6 +63,7 @@ def make_settings(**overrides) -> Settings:
 class AuditConnection:
     def __init__(self, statements: list[tuple[str, tuple[object, ...]]]) -> None:
         self.statements = statements
+        self.llm_connection_authorized = True
 
     @asynccontextmanager
     async def transaction(self):
@@ -72,6 +75,10 @@ class AuditConnection:
 
     async def fetchrow(self, query: str, *args):
         self.statements.append((query, args))
+        if "AS llm_connection_authorized" in query:
+            return {
+                "llm_connection_authorized": self.llm_connection_authorized
+            }
         if "AS session_active" in query and "AS project_authorized" in query:
             return {"session_active": True, "project_authorized": True}
         raise AssertionError(f"Unexpected fetchrow query: {query}")

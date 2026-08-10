@@ -38,7 +38,7 @@ import { APDL } from '@apdl-oss/sdk';
 const apdl = APDL.init({
   endpoint: 'https://api.example.com',
   auth: {
-    clientKey: 'client_demo_0123456789abcdef',
+    clientKey: 'client_yourproject_replacewithrevealedkey',
   },
   autoCapture: true,
   privacyMode: 'standard',
@@ -68,6 +68,18 @@ variables, so `init()` can be called with no arguments:
 |---|---|---|
 | endpoint | `NEXT_PUBLIC_APDL_URL` | `APDL_URL` |
 | clientKey | `NEXT_PUBLIC_APDL_CLIENT_KEY` | `APDL_CLIENT_KEY` |
+
+For Next.js, add the browser-safe values to `.env.local` and restart the
+development server:
+
+```dotenv
+NEXT_PUBLIC_APDL_URL=https://api.example.com
+NEXT_PUBLIC_APDL_CLIENT_KEY=client_yourproject_replacewithrevealedkey
+```
+
+The SDK uses direct, statically analyzable references to these public variables,
+so Next.js includes them in the browser bundle. Never put a secret server key in
+a `NEXT_PUBLIC_*` variable.
 
 For module-scope use without any `useEffect`, import the lazy `apdl` singleton.
 It no-ops on the server and auto-starts on the first browser tick, reading config
@@ -177,7 +189,7 @@ gateway URL (`make dev-core` starts the gateway on port 8000):
 const apdl = APDL.init({
   endpoint: 'http://localhost:8000',
   auth: {
-    clientKey: 'client_demo_0123456789abcdef',
+    clientKey: 'client_yourproject_replacewithrevealedkey',
   },
   autoCapture: true,
   privacyMode: 'standard',

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -184,6 +185,600 @@ async def test_agents_mutation_uses_human_bound_ephemeral_credential(
         if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
     )
     assert removal[1] == (insert[1][0],)
+
+
+@pytest.mark.asyncio
+async def test_llm_connection_read_uses_live_management_authority_without_agents_read(
+    admin_session: AdminSession,
+) -> None:
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "projects": {"demo": frozenset({"config:read"})},
+        }
+    )
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "llm_provider_connection_list@1",
+                "project_id": "demo",
+                "connections": [],
+            },
+        )
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        response = client.get(
+            "/api/projects/demo/agents/v1/agents/llm-connections",
+            params={"project_id": "demo"},
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen_key != TEST_API_KEY
+    authority = next(
+        statement
+        for statement in statements
+        if "AS llm_connection_authorized" in statement[0]
+    )
+    assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
+    credential_insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert credential_insert[1][4] == ["agents:read"]
+    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
+    removal = next(
+        statement
+        for statement in statements
+        if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
+    )
+    assert removal[1] == (credential_insert[1][0],)
+
+
+@pytest.mark.asyncio
+async def test_llm_connection_read_fails_without_role_or_live_management_authority(
+    admin_session: AdminSession,
+) -> None:
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "projects": {"demo": frozenset({"config:read"})},
+        }
+    )
+    called = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200)
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        client.app.state.pg_pool.connection.llm_connection_authorized = False
+        response = client.get(
+            "/api/projects/demo/agents/v1/agents/llm-connections",
+            params={"project_id": "demo"},
+        )
+
+    assert response.status_code == 403
+    assert "agents:read" in response.json()["detail"]
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_llm_connection_mutation_uses_live_dual_role_authority(
+    admin_session: AdminSession,
+) -> None:
+    csrf = "csrf-token"
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "csrf_hash": token_hash(csrf),
+        }
+    )
+    seen: dict[str, object] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["key"] = request.headers["x-api-key"]
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "llm_provider_connection@1",
+                "project_id": "demo",
+                "provider": "openai",
+                "version": 1,
+            },
+        )
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
+        response = client.put(
+            "/api/projects/demo/agents/v1/agents/llm-connections/openai",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={
+                "project_id": "demo",
+                "api_key": "provider-secret",
+                "version": 0,
+            },
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen["body"] == {
+        "project_id": "demo",
+        "api_key": "provider-secret",
+        "version": 0,
+    }
+    assert seen["key"] != TEST_API_KEY
+    authority = next(
+        statement
+        for statement in statements
+        if "AS llm_connection_authorized" in statement[0]
+    )
+    assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
+    credential_insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
+    mutation_audit = next(
+        statement
+        for statement in statements
+        if "INSERT INTO admin_proxy_audit" in statement[0]
+    )
+    assert mutation_audit[1][4] == "llm-connections:manage"
+
+
+@pytest.mark.asyncio
+async def test_llm_connection_mutation_fails_when_live_authority_is_lost(
+    admin_session: AdminSession,
+) -> None:
+    csrf = "csrf-token"
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "csrf_hash": token_hash(csrf),
+        }
+    )
+    called = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200)
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        client.app.state.pg_pool.connection.llm_connection_authorized = False
+        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
+        response = client.post(
+            "/api/projects/demo/agents/v1/agents/llm-connections/openai/refresh-models",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={"project_id": "demo", "version": 1},
+        )
+
+    assert response.status_code == 403
+    assert "ownership" in response.json()["detail"]
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_codegen_llm_connection_mutation_uses_human_bound_ephemeral_credential(
+    admin_session: AdminSession,
+) -> None:
+    csrf = "csrf-token"
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "csrf_hash": token_hash(csrf),
+        }
+    )
+    seen: dict[str, object] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["key"] = request.headers["x-api-key"]
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "codegen_provider_connection@1",
+                "project_id": "demo",
+                "provider": "openai",
+                "version": 1,
+            },
+        )
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
+        response = client.put(
+            "/api/projects/demo/codegen/v1/llm-connections/openai",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={
+                "project_id": "demo",
+                "api_key": "provider-secret",
+                "version": 0,
+            },
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen["body"] == {
+        "project_id": "demo",
+        "api_key": "provider-secret",
+        "version": 0,
+    }
+    assert seen["key"] != TEST_API_KEY
+    authority = next(
+        statement
+        for statement in statements
+        if "AS llm_connection_authorized" in statement[0]
+    )
+    assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
+    credential_insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
+    assert credential_insert[1][4] == ["agents:read"]
+    mutation_audit = next(
+        statement
+        for statement in statements
+        if "INSERT INTO admin_proxy_audit" in statement[0]
+    )
+    assert mutation_audit[1][4] == "llm-connections:manage"
+    assert all("provider-secret" not in repr(arguments) for _, arguments in statements)
+    removal = next(
+        statement
+        for statement in statements
+        if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
+    )
+    assert removal[1] == (credential_insert[1][0],)
+
+
+@pytest.mark.asyncio
+async def test_codegen_llm_connection_mutation_fails_when_live_authority_is_lost(
+    admin_session: AdminSession,
+) -> None:
+    csrf = "csrf-token"
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "csrf_hash": token_hash(csrf),
+        }
+    )
+    called = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200)
+
+    async with proxy_client(httpx.MockTransport(upstream), session) as client:
+        client.app.state.pg_pool.connection.llm_connection_authorized = False
+        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
+        response = client.post(
+            "/api/projects/demo/codegen/v1/llm-connections/openai/refresh-models",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={"project_id": "demo", "version": 1},
+        )
+
+    assert response.status_code == 403
+    assert "ownership" in response.json()["detail"]
+    assert not called
+
+
+def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
+    assert (
+        proxy.required_role(
+            "agents",
+            "PUT",
+            "/v1/agents/llm-connections/openai",
+        )
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "POST",
+            "/v1/agents/llm-connections/google/revoke",
+        )
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "GET",
+            "/v1/agents/llm-connections/xai/models",
+        )
+        == "llm-connections:read"
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "PUT",
+            "/v1/agents/llm-connections/OpenAI",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "POST",
+            "/v1/agents/llm-connections/openai/unknown",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "POST",
+            "/v1/agents/llm-connections/openai",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "PUT",
+            "/v1/agents/llm-connections/openai/revoke",
+        )
+        == ""
+    )
+
+    assert (
+        proxy.required_role(
+            "codegen",
+            "GET",
+            "/v1/llm-connections",
+        )
+        == "agents:read"
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "GET",
+            "/v1/llm-connections/xai/models",
+        )
+        == "agents:read"
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "PUT",
+            "/v1/llm-connections/openai",
+        )
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "POST",
+            "/v1/llm-connections/google/refresh-models",
+        )
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "POST",
+            "/v1/llm-connections/google/revoke",
+        )
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "GET",
+            "/v1/llm-connections/openai",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "PUT",
+            "/v1/llm-connections/OpenAI",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "POST",
+            "/v1/llm-connections/openai/unknown",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "POST",
+            "/v1/llm-connections/openai",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "codegen",
+            "PUT",
+            "/v1/llm-connections/openai/revoke",
+        )
+        == ""
+    )
+
+
+def test_agents_setup_proxy_routes_are_strictly_mapped() -> None:
+    assert (
+        proxy.required_role("agents", "GET", "/v1/agents/setup")
+        == "agents:read"
+    )
+    assert (
+        proxy.required_role("agents", "PUT", "/v1/agents/setup")
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "POST",
+            "/v1/agents/setup/deactivate",
+        )
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role("agents", "POST", "/v1/agents/setup") == ""
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "PUT",
+            "/v1/agents/setup/deactivate",
+        )
+        == ""
+    )
+    assert (
+        proxy.required_role(
+            "agents",
+            "GET",
+            "/v1/agents/setup/unknown",
+        )
+        == ""
+    )
+
+
+@pytest.mark.asyncio
+async def test_agents_setup_status_uses_human_bound_ephemeral_credential(
+    admin_session: AdminSession,
+) -> None:
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "agents_project_setup@1",
+                "project_id": "demo",
+                "state": "inactive",
+                "version": 0,
+            },
+        )
+
+    async with proxy_client(
+        httpx.MockTransport(upstream),
+        admin_session,
+    ) as client:
+        response = client.get(
+            "/api/projects/demo/agents/v1/agents/setup?project_id=demo"
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen_key != TEST_API_KEY
+    credential_insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
+    credential_removal = next(
+        statement
+        for statement in statements
+        if "DELETE FROM auth_credentials WHERE credential_id = $1"
+        in statement[0]
+    )
+    assert credential_removal[1] == (credential_insert[1][0],)
+
+
+@pytest.mark.asyncio
+async def test_agents_setup_mutation_rechecks_live_dual_role_authority(
+    admin_session: AdminSession,
+) -> None:
+    csrf = "csrf-token"
+    session = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "csrf_hash": token_hash(csrf),
+        }
+    )
+    seen_body: object = None
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_body
+        seen_body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "agents_project_setup@1",
+                "project_id": "demo",
+                "state": "active",
+                "version": 1,
+            },
+        )
+
+    async with proxy_client(
+        httpx.MockTransport(upstream),
+        session,
+    ) as client:
+        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
+        response = client.put(
+            "/api/projects/demo/agents/v1/agents/setup",
+            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            json={
+                "project_id": "demo",
+                "fast_model": {
+                    "provider": "openai",
+                    "model": "gpt-5.4-mini",
+                    "connection_version": 1,
+                    "inventory_version": 1,
+                },
+                "reasoning_model": {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-6",
+                    "connection_version": 2,
+                    "inventory_version": 3,
+                },
+                "version": 0,
+            },
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen_body == {
+        "project_id": "demo",
+        "fast_model": {
+            "provider": "openai",
+            "model": "gpt-5.4-mini",
+            "connection_version": 1,
+            "inventory_version": 1,
+        },
+        "reasoning_model": {
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "connection_version": 2,
+            "inventory_version": 3,
+        },
+        "version": 0,
+    }
+    authority = next(
+        statement
+        for statement in statements
+        if "AS llm_connection_authorized" in statement[0]
+    )
+    assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
+    credential_insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
 
 
 @pytest.mark.asyncio
@@ -642,7 +1237,7 @@ async def test_codegen_proxy_rejects_noncanonical_json_media_types(
 
     assert response.status_code == 415
     assert response.json() == {
-        "detail": "Codegen request bodies must use application/json"
+            "detail": "Upstream request bodies must use application/json"
     }
     assert not called
 

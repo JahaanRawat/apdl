@@ -8,8 +8,12 @@ environment without re-importing the module.
 from __future__ import annotations
 
 import base64
+import binascii
+import logging
 import os
+import re
 import tempfile
+from pathlib import Path
 
 from app.editor.deadlines import (
     MAX_CODEGEN_JOB_BUDGET_SECONDS as _MAX_CODEGEN_JOB_BUDGET_SECONDS,
@@ -23,14 +27,16 @@ from app.egress import (
     validate_proxy_url,
     validate_socket_volume,
 )
-from app.evaluations.models import RolloutStage
+from app.models.execution import PublicationStage
 from app.safety.policy import (
     PlatformCodegenSafetyPolicy,
     load_platform_safety_policy,
 )
 
 _DEFAULT_MODEL = "claude-opus-4-8"
+_GITHUB_APP_KEY_BASE64_SETTING = "GITHUB_APP_PRIVATE_KEY_BASE64"
 MAX_CODEGEN_JOB_BUDGET_SECONDS = _MAX_CODEGEN_JOB_BUDGET_SECONDS
+logger = logging.getLogger(__name__)
 
 
 def postgres_url() -> str:
@@ -65,37 +71,30 @@ def github_app_id() -> str:
 
 
 def github_app_private_key() -> str:
-    r"""The GitHub App's PEM private key.
+    """Decode the canonical single-line GitHub App PEM setting.
 
-    Resolved so it works cleanly from a single-line ``.env`` (Docker) or a file
-    (host), checked in this order:
-
-    1. ``GITHUB_APP_PRIVATE_KEY`` — inline PEM. A one-line value whose newlines
-       are backslash-escaped (``\n``) is restored to real newlines, so the key
-       survives a ``.env`` file / compose interpolation.
-    2. ``GITHUB_APP_PRIVATE_KEY_BASE64`` — base64 of the ``.pem``; the simplest
-       single-line form to carry through ``.env`` (``base64 -w0 key.pem``).
-    3. ``GITHUB_APP_PRIVATE_KEY_PATH`` — path to the ``.pem`` (``~`` expanded).
+    The value must be standard RFC 4648 Base64 containing non-empty UTF-8 text.
+    Invalid input fails closed and is diagnosed without logging key material.
     """
-    inline = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
-    if inline.strip():
-        # A one-line .env value often carries escaped newlines; restore them.
-        if "\\n" in inline and "\n" not in inline:
-            inline = inline.replace("\\n", "\n")
-        return inline.strip()
-
-    encoded = os.getenv("GITHUB_APP_PRIVATE_KEY_BASE64", "").strip()
-    if encoded:
-        try:
-            return base64.b64decode(encoded).decode("utf-8")
-        except (ValueError, UnicodeDecodeError):
-            return ""
-
-    path = os.path.expanduser(os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", ""))
-    if path and os.path.exists(path):
-        with open(path, encoding="utf-8") as handle:
-            return handle.read()
-    return ""
+    encoded = os.getenv(_GITHUB_APP_KEY_BASE64_SETTING, "")
+    if not encoded:
+        return ""
+    try:
+        encoded_bytes = encoded.encode("ascii")
+        private_key = base64.b64decode(encoded_bytes, validate=True).decode("utf-8")
+    except (UnicodeEncodeError, binascii.Error, UnicodeDecodeError):
+        logger.warning(
+            "%s must be standard RFC 4648 Base64 containing UTF-8 PEM text",
+            _GITHUB_APP_KEY_BASE64_SETTING,
+        )
+        return ""
+    if not private_key.strip():
+        logger.warning(
+            "%s must decode to non-empty PEM text",
+            _GITHUB_APP_KEY_BASE64_SETTING,
+        )
+        return ""
+    return private_key
 
 
 def github_api_url() -> str:
@@ -114,12 +113,12 @@ def github_webhook_secret() -> str:
 
 
 def codegen_model() -> str:
-    """LiteLLM model id the editor drives (any provider key present in env)."""
+    """Explicit local/custom-editor fallback; never used for tenant routing."""
     return os.getenv("CODEGEN_MODEL", _DEFAULT_MODEL)
 
 
 def codegen_revision() -> str:
-    """Immutable codegen candidate revision bound to rollout evidence.
+    """Immutable Codegen worker revision bound to publication authority.
 
     Production deployments should set ``CODEGEN_REVISION`` to the image or Git
     digest. The fallback is intentionally conspicuous and cannot publish. The
@@ -133,25 +132,22 @@ def codegen_revision() -> str:
     )
 
 
-def codegen_rollout_stage() -> RolloutStage:
+def codegen_rollout_stage() -> PublicationStage:
     """Configured deployment stage; offline is the fail-closed default."""
-    raw = os.getenv("CODEGEN_ROLLOUT_STAGE", RolloutStage.offline.value).strip()
+    raw = os.getenv(
+        "CODEGEN_ROLLOUT_STAGE", PublicationStage.offline.value
+    ).strip()
     try:
-        return RolloutStage(raw)
+        return PublicationStage(raw)
     except ValueError as exc:
-        allowed = ", ".join(stage.value for stage in RolloutStage)
+        allowed = ", ".join(stage.value for stage in PublicationStage)
         raise ValueError(
             f"CODEGEN_ROLLOUT_STAGE must be one of: {allowed}"
         ) from exc
 
 
-def codegen_rollout_authorization_path() -> str:
-    """Operator-mounted rollout evidence used for evaluated PR stages."""
-    return os.getenv("CODEGEN_ROLLOUT_AUTHORIZATION_PATH", "").strip()
-
-
 def codegen_development_mode() -> bool:
-    """Explicit local-only acknowledgement for unevaluated draft PRs.
+    """Explicit local-only acknowledgement for development draft PRs.
 
     The rollout stage alone is not enough to enter development publication.
     The local Compose overlay must set this second, deliberately named marker;
@@ -252,14 +248,39 @@ def codegen_sandbox_network() -> str:
     return os.getenv("CODEGEN_SANDBOX_NETWORK", "").strip()
 
 
+def codegen_llm_broker_dir() -> str:
+    """Shared host path for per-changeset controller/worker Unix sockets."""
+    value = os.getenv(
+        "CODEGEN_LLM_BROKER_DIR",
+        "/tmp/apdl-codegen-llm-broker",
+    )
+    path = Path(value)
+    if (
+        not value
+        or len(value) > 54
+        or value == "/"
+        or value.startswith("//")
+        or value.endswith("/")
+        or not path.is_absolute()
+        or re.fullmatch(r"/[A-Za-z0-9._/-]+", value) is None
+        or any(part in {".", ".."} for part in path.parts)
+        or path.as_posix() != value
+    ):
+        raise ValueError(
+            "CODEGEN_LLM_BROKER_DIR must be a canonical safe absolute path "
+            "of at most 54 characters"
+        )
+    return value
+
+
 def codegen_egress_policy_sha256() -> str:
-    """Content identity of the shipped, evaluated worker egress policy."""
+    """Content identity of the shipped tenant worker egress policy."""
     raw = os.getenv("CODEGEN_EGRESS_POLICY_SHA256", "").strip()
     return validate_policy_sha256(raw) if raw else ""
 
 
 def codegen_egress_proxy_image_id() -> str:
-    """Immutable proxy image ID bound into evaluated publication evidence."""
+    """Immutable proxy image ID bound into tenant publication authority."""
     raw = os.getenv("CODEGEN_EGRESS_PROXY_IMAGE_ID", "").strip()
     return validate_proxy_image_id(raw) if raw else ""
 
@@ -284,8 +305,8 @@ def codegen_controller_image_id() -> str:
 
 
 def codegen_sandbox_image() -> str:
-    """Configured production candidate image reference."""
-    return os.getenv("CODEGEN_SANDBOX_IMAGE", "apdl-codegen-sandbox:latest").strip()
+    """Configured isolated worker image reference."""
+    return os.getenv("CODEGEN_SANDBOX_IMAGE", "apdl-codegen-worker:latest").strip()
 
 
 def codegen_trusted_repos_only() -> bool:
@@ -294,11 +315,10 @@ def codegen_trusted_repos_only() -> bool:
 
 
 def codegen_helper_model() -> str:
-    """LiteLLM model id for the auxiliary calls (brief compile + diff review).
+    """Explicit local/custom-editor helper model fallback.
 
-    Defaults to the editing model so a single ``CODEGEN_MODEL`` configures the
-    whole pipeline; override with ``CODEGEN_HELPER_MODEL`` to run the auxiliary
-    steps on a cheaper/faster model than the editor.
+    Tenant requests never call this getter; project assignments provide their
+    exact helper model.
     """
     return os.getenv("CODEGEN_HELPER_MODEL") or codegen_model()
 

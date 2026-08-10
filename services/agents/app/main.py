@@ -16,13 +16,26 @@ from app.auth import PostgresAuthenticator, authenticate_request
 from app.memory.pgvector_store import PgVectorStore
 from app.readiness import capability_report
 from app.request_body_limit import RequestBodyLimitMiddleware
-from app.routers import approvals, capabilities, custom_agents, runs, status, triggers
+from app.routers import (
+    approvals,
+    capabilities,
+    custom_agents,
+    llm_vault,
+    llm_connections,
+    runs,
+    setup,
+    status,
+    triggers,
+)
 from app.schema import assert_schema_ready
 from app.store.approval_effects import run_approval_effect_worker_forever
 from app.store.llm_governance import (
     reconcile_orphaned_llm_attempts,
     reconcile_orphaned_llm_attempts_forever,
 )
+from app.store.llm_connections import ProjectConnectionStore
+from app.store.llm_credentials import ProjectCredentialStore
+from app.store.llm_setup import AgentsSetupStore
 from app.store.run_leases import (
     requeue_expired_runs,
     requeue_expired_runs_forever,
@@ -154,11 +167,16 @@ async def lifespan(application: FastAPI):
     maintenance_connection = None
     maintenance_task = None
     maintenance_listener = None
+    credential_store = None
     worker_stop = asyncio.Event()
     worker_tasks: list[asyncio.Task] = []
     try:
         application.state.pg_pool = pool
         application.state.authenticator = PostgresAuthenticator(pool)
+        credential_store = ProjectCredentialStore.from_environment()
+        application.state.llm_credential_store = credential_store
+        application.state.llm_connection_store = ProjectConnectionStore(pool)
+        application.state.agents_setup_store = AgentsSetupStore(pool)
         maintenance_connection = await pool.acquire()
         maintenance_task, maintenance_listener = await _start_maintenance_monitor(
             maintenance_connection
@@ -236,6 +254,8 @@ async def lifespan(application: FastAPI):
             )
         elif maintenance_connection is not None:
             await maintenance_connection.close()
+        if credential_store is not None:
+            await credential_store.aclose()
         await pool.close()
         logger.info("Agents service shut down: PostgreSQL pool closed")
 
@@ -261,7 +281,10 @@ app.add_middleware(RequestBodyLimitMiddleware)
 # custom_agents first: it owns static shapes (/custom/*, /definitions) that
 # must win over the run routers' /{run_id}/... wildcards.
 auth_dependencies = [Depends(authenticate_request)]
+app.include_router(llm_vault.router)
 app.include_router(custom_agents.router, dependencies=auth_dependencies)
+app.include_router(llm_connections.router, dependencies=auth_dependencies)
+app.include_router(setup.router, dependencies=auth_dependencies)
 app.include_router(capabilities.router, dependencies=auth_dependencies)
 app.include_router(triggers.router, dependencies=auth_dependencies)
 app.include_router(status.router, dependencies=auth_dependencies)
@@ -283,7 +306,14 @@ async def readiness_check(request: Request):
 
     runtime_objects_ready = all(
         getattr(state, attribute, None) is not None
-        for attribute in ("pg_pool", "authenticator", "vector_store")
+        for attribute in (
+            "pg_pool",
+            "authenticator",
+            "vector_store",
+            "llm_credential_store",
+            "llm_connection_store",
+            "agents_setup_store",
+        )
     )
     runtime_tasks = (
         getattr(state, "run_dispatcher_task", None),

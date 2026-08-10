@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app import auth, credentials, projects, proxy
+from app import auth, credentials, members, projects, proxy
 from app.config import Settings
 from app.request_body_limit import RequestBodyLimitMiddleware
 
@@ -28,6 +28,7 @@ _CORE_UPSTREAMS = {
 _CAPABILITY_UPSTREAMS = {
     "agents": ("/ready", "ready"),
     "codegen": ("/ready", "ready"),
+    "llm-vault": ("/ready", "ready"),
 }
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
@@ -240,6 +241,7 @@ async def security_headers(request: Request, call_next):
 
 app.include_router(auth.router)
 app.include_router(projects.router)
+app.include_router(members.router)
 app.include_router(credentials.router)
 app.include_router(proxy.router)
 

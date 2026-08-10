@@ -32,6 +32,10 @@ export const queryKeys = {
   changesets: (wsId: string) => [wsId, 'changesets'] as const,
   repoConnection: (wsId: string) => [wsId, 'repo-connection'] as const,
   credentials: (wsId: string) => [wsId, 'credentials'] as const,
+  projectAuthorization: (wsId: string) => [wsId, 'project-authorization'] as const,
+  projectMembers: (wsId: string) => [wsId, 'project-members'] as const,
+  membershipAudit: (wsId: string) => [wsId, 'project-members', 'audit'] as const,
+  ownershipAudit: (wsId: string) => [wsId, 'project-ownership', 'audit'] as const,
   accessibleRepos: (wsId: string) => [wsId, 'github-repos'] as const,
   changeset: (wsId: string, id: string) => [wsId, 'changeset', id] as const,
   changesetObservations: (wsId: string, id: string) =>
@@ -49,4 +53,30 @@ export const queryKeys = {
     [wsId, 'custom-agents', 'definitions', projectId] as const,
   agentExecutionCapabilities: (wsId: string, projectId: string) =>
     [wsId, 'agents', 'execution-capabilities', projectId] as const,
+  llmConnections: (wsId: string) => [wsId, 'llm-vault', 'connections'] as const,
+  llmModels: (wsId: string, connectionId: string) =>
+    [wsId, 'llm-vault', 'connections', connectionId] as const,
+  agentsSetup: (wsId: string, projectId: string) =>
+    [wsId, 'agents', 'setup', projectId] as const,
+  agentsConnectionsPrefix: (wsId: string, projectId: string) =>
+    [wsId, 'agents', 'llm-connections', projectId] as const,
+  agentsConnections: (wsId: string, projectId: string) =>
+    [wsId, 'agents', 'llm-connections', projectId, 'list'] as const,
+  agentsModels: (
+    wsId: string,
+    projectId: string,
+    provider: string,
+    connectionVersion: number,
+    inventoryVersion: number,
+  ) =>
+    [
+      wsId,
+      'agents',
+      'llm-connections',
+      projectId,
+      'models',
+      provider,
+      connectionVersion,
+      inventoryVersion,
+    ] as const,
 }

@@ -1,6 +1,7 @@
 // Canonical fixtures matching serialize_flag() / the audit store exactly —
 // these are what the live API returns (Strict Schema Rule test material).
 import type { FlagAuditEntry, FlagConfig } from '../../src/api/types/flags'
+import type { AgentsSetup } from '../../src/api/types/agents-setup'
 import type {
   ChangesetObservationHistory,
   PublicationAuthorization,
@@ -13,51 +14,91 @@ import type {
 } from '../../src/api/types/codegen'
 import type { Workspace } from '../../src/core/workspace'
 
-type EvaluatedPublicationAuthorization = Extract<
+type TenantPublicationAuthorization = Extract<
   PublicationAuthorization,
-  { schema_version: 'publication_authorization@4' }
+  { schema_version: 'tenant_publication_authorization@1' }
 >
 
-export function makePublicationAuthorization(
-  overrides: Partial<EvaluatedPublicationAuthorization> = {},
-): EvaluatedPublicationAuthorization {
+export function makeTenantPublicationAuthorization(
+  overrides: Partial<TenantPublicationAuthorization> = {},
+): TenantPublicationAuthorization {
   return {
-    schema_version: 'publication_authorization@4',
+    schema_version: 'tenant_publication_authorization@1',
+    authority: 'tenant_model_assignments',
     request: {
-      schema_version: 'publication_request@3',
-      requested_stage: 'reviewed_pr',
+      schema_version: 'tenant_publication_request@1',
+      requested_stage: 'tenant_draft_pr',
       risk: 'medium',
-      model: 'openai/gpt-5.3-codex',
-      codegen_revision: 'codegen-improvements@9838401',
-      candidate_identity_sha256: '7'.repeat(64),
-      egress_policy_sha256: 'e'.repeat(64),
-      canary_identity: null,
+      execution_snapshot: {
+        schema_version: 'codegen_llm_execution_snapshot@2',
+        project_id: 'demo',
+        repository_grant_id: 'ghg_demo',
+        repository_id: 123456,
+        repository_installation_id: 789,
+        repository_full_name: 'acme/widgets',
+        codegen_revision: 'codegen-tenant-routing@9838401',
+        behavior_configuration_sha256: 'a'.repeat(64),
+        rollout_stage: 'tenant_draft_pr',
+        assignments: [
+          {
+            schema_version: 'codegen_llm_assignment_snapshot@1',
+            role: 'editor',
+            provider: 'openai',
+            model_id: 'gpt-5.3-codex',
+            assignment_version: 7,
+            connection_version: 4,
+            inventory_version: 3,
+            catalog_version: 'codegen-provider-catalog@1',
+            context_window_tokens: 200_000,
+            supports_tool_calling: true,
+            supports_structured_output: true,
+            input_cost_per_million_tokens_usd_micros: 1_250_000,
+            output_cost_per_million_tokens_usd_micros: 10_000_000,
+          },
+          {
+            schema_version: 'codegen_llm_assignment_snapshot@1',
+            role: 'helper',
+            provider: 'anthropic',
+            model_id: 'claude-haiku-4-5-20251001',
+            assignment_version: 8,
+            connection_version: 5,
+            inventory_version: 2,
+            catalog_version: 'codegen-provider-catalog@1',
+            context_window_tokens: 200_000,
+            supports_tool_calling: true,
+            supports_structured_output: true,
+            input_cost_per_million_tokens_usd_micros: 800_000,
+            output_cost_per_million_tokens_usd_micros: 4_000_000,
+          },
+        ],
+      },
+      execution_snapshot_sha256: '1'.repeat(64),
+      runtime_identity: {
+        schema_version: 'tenant_publication_runtime_identity@1',
+        controller_image_id: `sha256:${'2'.repeat(64)}`,
+        worker_image_id: `sha256:${'3'.repeat(64)}`,
+        codegen_revision: 'codegen-tenant-routing@9838401',
+        behavior_configuration_sha256: 'a'.repeat(64),
+        egress_policy_sha256: '4'.repeat(64),
+        egress_proxy_image_id: `sha256:${'5'.repeat(64)}`,
+        egress_transport: 'network_none_unix_socket@1',
+        max_concurrent_jobs: 1,
+        identity_sha256: '6'.repeat(64),
+      },
     },
-    expected_model: 'openai/gpt-5.3-codex',
-    expected_codegen_revision: 'codegen-improvements@9838401',
-    expected_candidate_identity_sha256: '7'.repeat(64),
-    expected_egress_policy_sha256: 'e'.repeat(64),
-    report_sha256: '1'.repeat(64),
-    segmented_report_sha256: 'a'.repeat(64),
-    bundle_sha256: '2'.repeat(64),
-    policy_sha256: '3'.repeat(64),
     decision: {
-      schema_version: 'rollout_decision@3',
-      requested_stage: 'reviewed_pr',
+      schema_version: 'tenant_publication_decision@1',
+      requested_stage: 'tenant_draft_pr',
       risk: 'medium',
-      allowed: false,
-      publish_branch: false,
-      create_pull_request: false,
+      allowed: true,
+      publish_branch: true,
+      create_pull_request: true,
       ready_for_review: false,
-      reasons: ['test pass rate 0.800 is below required 0.950'],
-      evaluation_summary_sha256: '4'.repeat(64),
-      segmented_report_sha256: 'a'.repeat(64),
-      policy_sha256: '3'.repeat(64),
-      canary_identity_sha256: null,
-      canary_bucket: null,
-      decision_sha256: '5'.repeat(64),
+      reasons: [],
+      decision_sha256: '7'.repeat(64),
     },
-    authorization_sha256: '6'.repeat(64),
+    draft_only: true,
+    authorization_sha256: '8'.repeat(64),
     ...overrides,
   }
 }
@@ -502,6 +543,7 @@ export function makeWorkspace(overrides: Partial<Workspace> = {}): Workspace {
       'agents:manage',
       'agents:approve',
       'credentials:manage',
+      'members:manage',
     ],
     ...overrides,
   }
@@ -521,6 +563,99 @@ export function makeReadOnlyAgentWorkspace(
     ],
     ...overrides,
   })
+}
+
+export function makeAgentsSetup(
+  overrides: Partial<AgentsSetup> = {},
+): AgentsSetup {
+  return {
+    schema_version: 'agents_project_setup@1',
+    project_id: 'demo',
+    state: 'active',
+    version: 1,
+    caller_capabilities: {
+      can_read: true,
+      can_manage: true,
+      can_activate: false,
+      can_deactivate: true,
+      management_authority: 'owner',
+    },
+    assignments: [
+      {
+        tier: 'fast',
+        provider: 'openai',
+        model: 'gpt-5.4-mini',
+        connection_version: 1,
+        inventory_version: 1,
+        model_catalog_version: 'llm-provider-catalog@2',
+        display_name: 'GPT-5.4 Mini',
+        endpoint_url: 'https://api.openai.com/v1',
+        endpoint_host: 'api.openai.com',
+        data_residency: 'global',
+        allowed_data_classifications: [
+          'public',
+          'internal',
+          'confidential',
+          'restricted',
+        ],
+        input_cost_per_million_tokens_usd_micros: 250_000,
+        output_cost_per_million_tokens_usd_micros: 1_000_000,
+        current: true,
+        assigned_at: '2026-07-30T12:00:00+00:00',
+        updated_at: '2026-07-30T12:00:00+00:00',
+      },
+      {
+        tier: 'reasoning',
+        provider: 'openai',
+        model: 'o4-mini',
+        connection_version: 1,
+        inventory_version: 1,
+        model_catalog_version: 'llm-provider-catalog@2',
+        display_name: 'OpenAI o4-mini',
+        endpoint_url: 'https://api.openai.com/v1',
+        endpoint_host: 'api.openai.com',
+        data_residency: 'global',
+        allowed_data_classifications: [
+          'public',
+          'internal',
+          'confidential',
+          'restricted',
+        ],
+        input_cost_per_million_tokens_usd_micros: 1_100_000,
+        output_cost_per_million_tokens_usd_micros: 4_400_000,
+        current: true,
+        assigned_at: '2026-07-30T12:00:00+00:00',
+        updated_at: '2026-07-30T12:00:00+00:00',
+      },
+    ],
+    connections: [
+      {
+        provider: 'openai',
+        connection_version: 1,
+        inventory_version: 1,
+        state: 'active',
+        catalog_version: 'llm-provider-catalog@2',
+        current: true,
+        validated_at: '2026-07-30T12:00:00+00:00',
+      },
+    ],
+    blockers: [],
+    analysis_ready: true,
+    policy: {
+      required_data_residency: 'global',
+      allow_cross_vendor_retry: false,
+      project_daily_cost_limit_usd_micros: 20_000_000,
+      run_cost_limit_usd_micros: 2_000_000,
+    },
+    effectful_execution: {
+      authorized: false,
+      authorization_source: null,
+    },
+    activated_at: '2026-07-30T12:00:00+00:00',
+    deactivated_at: null,
+    deactivation_reason: null,
+    ...overrides,
+  } as AgentsSetup
 }
 
 export function seedWorkspace(workspace: Workspace = makeWorkspace()): Workspace {

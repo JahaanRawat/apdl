@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "version": "0.3.3",
-  "tag": "v0.3.3",
+  "version": "0.3.4",
+  "tag": "v0.3.4",
   "repository": "https://github.com/kuvera-apdl/apdl",
   "artifacts": {
     "source": {
@@ -83,6 +83,13 @@
       "repository": "ghcr.io/kuvera-apdl/apdl-ingestion",
       "context": "services/ingestion",
       "dockerfile": "services/ingestion/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "llm-vault",
+      "repository": "ghcr.io/kuvera-apdl/apdl-llm-vault",
+      "context": "services/llm-vault",
+      "dockerfile": "services/llm-vault/Dockerfile",
       "build_args": []
     },
     {

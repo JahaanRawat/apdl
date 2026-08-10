@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { createFlagExampleCurl, listFlagsCurl } from '@/api/config'
-import { SERVICE_DESCRIPTORS } from '@/api/health'
 import { countEvents, timeseriesEvents } from '@/api/query'
 import type { FlagState } from '@/api/types/flags'
 import { CurlButton } from '@/components/shared/CurlButton'
@@ -17,10 +16,12 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@tanstack/react-query'
 
 import { listRuns, runResults } from '@/api/agents'
+import { ApiError } from '@/api/http'
 import { TERMINAL_RUN_STATUSES } from '@/api/schemas/agents'
 import { useLive } from '@/core/live'
 import { hasWorkspaceRole, serviceConnection, useWorkspace } from '@/core/workspace'
 import { RunStatusPill } from '@/features/agents/RunStatusPill'
+import { useAgentsSetup } from '@/features/agents/setup/hooks'
 import { TimeseriesChart } from '@/features/analytics/charts'
 import { EventCombobox } from '@/features/analytics/EventCombobox'
 import { densifyBuckets, rollingHourBuckets } from '@/features/analytics/timeseries'
@@ -34,34 +35,10 @@ import { useAnalyticsQuery } from '@/features/analytics/useAnalyticsQuery'
 import { useExperimentsQuery } from '@/features/experiments/hooks'
 import { ExperimentStatusPill } from '@/features/experiments/StatusPill'
 import { useFlagsQuery } from '@/features/flags/hooks'
-import { ServiceHealthCard } from '@/features/system/ServiceHealthCard'
-import { useServiceHealthQuery } from '@/features/system/hooks'
 import { useNow } from '@/lib/hooks'
 import { isPastDate, parseServerDate } from '@/lib/format'
 
 const FLAG_STATES: FlagState[] = ['draft', 'active', 'disabled', 'archived']
-
-function HealthStrip() {
-  const queries = {
-    ingestion: useServiceHealthQuery('ingestion'),
-    config: useServiceHealthQuery('config'),
-    query: useServiceHealthQuery('query'),
-    agents: useServiceHealthQuery('agents'),
-  }
-  return (
-    <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-      {SERVICE_DESCRIPTORS.map(({ service, label }) => (
-        <ServiceHealthCard
-          key={service}
-          label={label}
-          result={queries[service].data}
-          isLoading={queries[service].isPending}
-          linkTo="/system/health"
-        />
-      ))}
-    </div>
-  )
-}
 
 function FlagsSummaryCard() {
   const { active } = useWorkspace()
@@ -388,6 +365,8 @@ function AgentsCard() {
   const { active, projectId } = useWorkspace()
   const canRun = hasWorkspaceRole(active, 'agents:run')
   const canApprove = hasWorkspaceRole(active, 'agents:approve')
+  const setupQuery = useAgentsSetup()
+  const canStart = canRun && setupQuery.data?.analysis_ready === true
 
   // The latest run is read from the server (GET /v1/agents/runs), the source of
   // truth for every browser and for runs a scheduler triggers — not from this
@@ -467,16 +446,70 @@ function AgentsCard() {
             </ul>
           </div>
         ) : null}
-        {canRun ? (
+        {setupQuery.isError ? (
+          <div
+            className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs"
+            role="alert"
+          >
+            <p className="font-medium">
+              {setupQuery.error instanceof ApiError &&
+              (setupQuery.error.status === 401 ||
+                setupQuery.error.status === 403)
+                ? 'Agents setup access is not authorized.'
+                : 'Agents setup is temporarily unavailable.'}
+            </p>
+            <p className="mt-1 text-muted-foreground">
+              {setupQuery.error instanceof ApiError &&
+              (setupQuery.error.status === 401 ||
+                setupQuery.error.status === 403)
+                ? 'Ask a project owner to grant agents:read access.'
+                : 'Execution remains disabled until setup can be verified.'}
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="mt-2"
+              onClick={() => void setupQuery.refetch()}
+            >
+              Retry setup check
+            </Button>
+          </div>
+        ) : setupQuery.data && !setupQuery.data.analysis_ready ? (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+            <p className="font-medium">
+              {setupQuery.data.state === 'active'
+                ? 'Agents setup needs attention.'
+                : 'Agentic runs are not active.'}
+            </p>
+            {setupQuery.data.caller_capabilities.can_manage ? (
+              <Link
+                to="/settings/workspace?agents_setup=1"
+                className="mt-1 inline-block font-medium underline underline-offset-4"
+              >
+                Review Agents setup →
+              </Link>
+            ) : (
+              <p className="mt-1">
+                Ask the project owner or a delegated Agents manager to finish
+                setup.
+              </p>
+            )}
+          </div>
+        ) : canStart ? (
           <Link
             to="/agents/trigger"
             className="block text-sm font-medium underline underline-offset-4"
           >
             Trigger a run →
           </Link>
-        ) : (
+        ) : setupQuery.data?.analysis_ready ? (
           <p className="text-xs text-muted-foreground">
             Read-only agent access; starting runs requires agents:run.
+          </p>
+        ) : (
+          <p className="text-xs text-muted-foreground">
+            Verifying Agentic runs setup before enabling execution.
           </p>
         )}
       </CardContent>
@@ -489,9 +522,8 @@ export function OverviewPage() {
     <div className="space-y-6">
       <PageHeader
         title="Overview"
-        description="Is the Loop alive — service health, flag state, and live distribution at a glance."
+        description="Event activity, experiment state, flag delivery, and agent runs at a glance."
       />
-      <HealthStrip />
       <div className="grid items-start gap-4 lg:grid-cols-3">
         <ThroughputCard />
         <ExperimentsCard />

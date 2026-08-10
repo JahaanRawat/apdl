@@ -53,6 +53,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { queryKeys } from '@/core/queryClient'
+import { SdkConnectionLinks } from '@/features/settings/SdkConnectionLinks'
 import { hasWorkspaceRole, useWorkspace } from '@/core/workspace'
 
 const ROLE_DESCRIPTIONS: Record<CredentialRole, string> = {
@@ -379,7 +380,7 @@ export function ProjectCredentialsCard() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <ShieldAlert className="h-5 w-5" />
-            SDK credentials
+            SDK Credentials
           </CardTitle>
           <CardDescription>
             Project <code className="font-mono">{active.projectId}</code> does not grant{' '}
@@ -387,6 +388,9 @@ export function ProjectCredentialsCard() {
             management actions remain unavailable.
           </CardDescription>
         </CardHeader>
+        <CardContent>
+          <SdkConnectionLinks />
+        </CardContent>
       </Card>
     )
   }
@@ -401,7 +405,7 @@ export function ProjectCredentialsCard() {
             <div className="space-y-1.5">
               <CardTitle className="flex items-center gap-2">
                 <KeyRound className="h-5 w-5" />
-                SDK credentials
+                SDK Credentials
               </CardTitle>
               <CardDescription>
                 Reveal-once browser and server credentials for active project{' '}
@@ -414,7 +418,8 @@ export function ProjectCredentialsCard() {
             </Button>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-5">
+          <SdkConnectionLinks />
           {query.isPending ? (
             <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
               <Loader2 className="animate-spin" />

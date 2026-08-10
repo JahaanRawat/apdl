@@ -1,19 +1,21 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { TooltipProvider } from '../../src/components/ui/tooltip'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import { EventsExplorerPage } from '../../src/features/analytics/EventsExplorerPage'
 import { FunnelsPage } from '../../src/features/analytics/FunnelsPage'
+import { CohortsPage } from '../../src/features/analytics/CohortsPage'
 import { RetentionPage } from '../../src/features/analytics/RetentionPage'
 import { seedWorkspace } from '../helpers/fixtures'
 
 const requests: { path: string; body: unknown }[] = []
+const catalogRequests: unknown[] = []
 
 const server = setupServer(
   http.post('*/api/projects/demo/query/v1/query/events/count', async ({ request }) => {
@@ -82,7 +84,8 @@ const server = setupServer(
       cohorts: [],
     })
   }),
-  http.post('*/api/projects/demo/query/v1/query/events/names', async () => {
+  http.post('*/api/projects/demo/query/v1/query/events/names', async ({ request }) => {
+    catalogRequests.push(await request.json())
     return HttpResponse.json({
       events: [
         { event_name: 'page', event_count: 76, unique_users: 11 },
@@ -101,11 +104,12 @@ beforeEach(() => {
   localStorage.clear()
   seedWorkspace()
   requests.length = 0
+  catalogRequests.length = 0
 })
 
 function renderPage(ui: React.ReactElement) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  render(
+  return render(
     <WorkspaceProvider initialWorkspaces={[seedWorkspace()]}>
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
@@ -117,6 +121,43 @@ function renderPage(ui: React.ReactElement) {
 }
 
 describe('EventsExplorerPage', () => {
+  test('loads the event catalog through the current UTC date', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-30T03:00:00Z'))
+    try {
+      renderPage(<EventsExplorerPage />)
+
+      await waitFor(() => expect(catalogRequests).toHaveLength(1))
+      expect(catalogRequests[0]).toEqual({
+        project_id: 'demo',
+        start_date: '2026-05-02',
+        end_date: '2026-07-30',
+        limit: 1000,
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test.each([
+    ['Events Explorer', <EventsExplorerPage />, '2026-07-24'],
+    ['Funnels', <FunnelsPage />, '2026-07-24'],
+    ['Cohorts', <CohortsPage />, '2026-07-01'],
+    ['Retention', <RetentionPage />, '2026-07-01'],
+  ])('%s defaults to an inclusive UTC range', (_name, page, startDate) => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-07-30T03:00:00Z'))
+    try {
+      const view = renderPage(page)
+      expect(screen.getByLabelText('Start date (UTC)')).toHaveValue(startDate)
+      expect(screen.getByLabelText('End date (UTC)')).toHaveValue('2026-07-30')
+      expect(screen.getByText('UTC')).toBeVisible()
+      view.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   test('runs a counts query with project_id and renders the result table', async () => {
     renderPage(<EventsExplorerPage />)
     await userEvent.click(screen.getByRole('button', { name: 'Run' }))

@@ -27,10 +27,10 @@
 
 APDL ingests user behavior events, runs analytics queries, evaluates feature
 flags and A/B experiments, and can use opt-in LLM workflows to generate
-insights and propose experiment designs. In 0.3.3 those workflows do not close
-the product loop: experiment designs require human approval, approval creates
-an inert Config draft with a disabled flag, treatment implementation is a
-separate changeset lifecycle, and an operator must separately activate any
+insights and propose experiment designs. In the current developer preview those
+workflows do not close the product loop: experiment designs require human
+approval, approval creates an inert Config draft with a disabled flag, treatment
+implementation is a separate changeset lifecycle, and an operator must activate any
 completed treatment. Personalization, autonomous evaluation, and rollback are
 disabled. The intended data flow is:
 
@@ -41,20 +41,20 @@ disabled. The intended data flow is:
 
 ## Release status
 
-APDL 0.3.3 is an OSS **developer preview**, not a production release. Its
+APDL is an OSS **developer preview**, not a production release. Its
 supported deployment is a fresh, single-node, source-built Docker Compose
 installation. The supported core consists of Ingestion, Config, Query, the
 Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console, together
 with Redis, ClickHouse, and PostgreSQL.
 
-The 0.3.3 release publishes exactly these installable artifacts from one tested
-revision:
+The current release publishes exactly these installable artifacts from one
+tested revision:
 
 - GitHub source archives for this repository;
 - [`@apdl-oss/sdk`](https://www.npmjs.com/package/@apdl-oss/sdk) on npm; and
 - [`apdl-sdk`](https://pypi.org/project/apdl-sdk/) on PyPI.
 
-APDL does **not** publish GHCR or other container images for 0.3.3. Compose
+APDL does **not** publish GHCR or other container images for this release. Compose
 builds the core images from the checked-out source. Agents is an opt-in,
 operator-provisioned preview. Only the Codegen API/control plane is available
 as a source-only, non-publishing `offline` preview; its Aider editor/worker and
@@ -71,8 +71,14 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), Docker, Node.js 20.19+, Python 
 git clone https://github.com/kuvera-apdl/apdl.git && cd apdl
 cp .env.example .env
 make dev-core            # supported core + local Admin console
-make smoke               # strict event → flag evaluation → exact query result
 ```
+
+The normal bootstrap creates no projects, users, or API credentials. Open
+<http://localhost:5173/register>, create the first local account, then create a
+project in **Workspace settings**. From that project, create reveal-once browser
+or confidential SDK credentials as needed. The example enables registration
+only for the loopback-bound local stack; disable it before exposing Admin
+outside local development.
 
 This developer preview supports fresh, single-node databases only. Do not run
 `make dev-core` or the initialization scripts against an existing APDL
@@ -81,10 +87,11 @@ in this release.
 
 The same fresh-install proof CI runs is available as `make smoke-fresh`. It uses
 an isolated Compose project and fresh volumes, initializes both databases,
-provisions the canonical `demo` project with separate confidential and browser
-credentials, starts only the services needed for the core proof, sends and
-queries exactly one event, evaluates a flag, and removes every container and
-volume when it finishes.
+provisions a test-only `demo` project with separate confidential and browser
+credentials inside that isolated environment, starts only the services needed
+for the core proof, sends and queries exactly one event, evaluates a flag, and
+removes every container and volume when it finishes. Those fixtures never enter
+the normal developer database.
 
 Agents and Codegen are opt-in Compose profiles. `make dev-core` leaves both off;
 `make dev-all` starts Agents plus the offline Codegen API/control plane. It does
@@ -100,7 +107,7 @@ publication is not part of this OSS developer-preview release.
 | `scripts/dev.sh up-core` | Start the supported core stack (same as `make dev-core`) |
 | `scripts/dev.sh up-full` | Explicitly add optional Agents and offline Codegen (same as `make dev-all`) |
 | `scripts/dev.sh status` | Container status + service health endpoints |
-| `scripts/dev.sh smoke` | End-to-end smoke test against the running stack |
+| `scripts/dev.sh smoke` | Running-stack smoke; requires `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY` |
 | `scripts/dev.sh check` | Lint + test every package in parallel |
 | `scripts/dev.sh logs [svc]` | Tail Docker logs |
 | `scripts/dev.sh down` / `reset` | Stop everything / also wipe data volumes |
@@ -110,7 +117,8 @@ To work on one service with hot-reload, start the deps and run it directly:
 ```bash
 make dev            # infra deps only
 make run-ingestion  # :8080   (also: run-config :8081, run-query :8082,
-                    #          run-agents :8083, run-pipeline)
+                    #          run-llm-vault :8086, run-agents :8083,
+                    #          run-codegen :8084, run-pipeline)
 ```
 
 ## Using the SDKs
@@ -134,7 +142,7 @@ import { APDL } from '@apdl-oss/sdk';
 const apdl = APDL.init({
   endpoint: 'http://localhost:8000',
   auth: {
-    clientKey: 'client_demo_0123456789abcdef0123456789abcdef',
+    clientKey: 'client_yourproject_replacewithrevealedkey',
   },
   autoCapture: true,                     // clicks, page views, forms, scroll depth, rage clicks
   privacyMode: 'standard',              // 'standard' | 'cookieless'
@@ -151,7 +159,7 @@ if (checkoutVariant === 'treatment') {
 ```
 
 → [Full JS SDK docs](sdk/javascript/README.md): configuration, privacy
-controls, local UI rendering APIs, and real-time flag subscriptions. The 0.3.3
+controls, local UI rendering APIs, and real-time flag subscriptions. The current
 backend does not store or deliver UI configurations.
 
 ### Python (server-side) — [`apdl-sdk`](sdk/python/README.md)
@@ -160,7 +168,7 @@ backend does not store or deliver UI configurations.
 from apdl import APDL
 
 with APDL.init(
-    api_key="proj_demo_0123456789abcdef0123456789abcdef",
+    api_key="proj_yourproject_replacewithrevealedkey",
     endpoint="http://localhost:8000",
 ) as client:
     client.track("order_completed", {"total": 42.0}, user_id="u_123")
@@ -186,6 +194,7 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | `agents` | 8083 | Operator preview | Opt-in LLM workflows; self-registered projects are read-only | [README](services/agents/README.md) |
 | `codegen` | 8084 (internal) | Offline preview | Source-only; publication is disabled | [README](services/codegen/README.md) |
 | `admin-api` | 8085 (internal) | Core | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
+| `llm-vault` | 8086 (internal) | Core | Shared project LLM credential custody and audited JIT access | [README](services/llm-vault/README.md) |
 | `admin` | 5173 | Core | Browser admin console | [README](services/admin/README.md) |
 | `clickhouse-writer` | — | Core | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
 | `gateway` | 8000 | Local development | nginx routing for the source-built stack; not production ingress | [Compose](infra/docker/docker-compose.yml) |
@@ -203,7 +212,8 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | Ingestion Service | Python 3.12, FastAPI, Redis Streams, Pydantic |
 | Config Service | Python 3.12, FastAPI, asyncpg, Redis, SSE, Pydantic |
 | Query Service | Python 3.12, FastAPI, ClickHouse, SciPy, NumPy |
-| Agents Service | Python 3.12, FastAPI, OpenAI/Anthropic/Google GenAI SDKs, pgvector |
+| Agents Service | Python 3.12, FastAPI, OpenAI/Anthropic/Google GenAI SDKs, xAI via the OpenAI-compatible API, pgvector |
+| LLM Credential Vault | Python 3.12, FastAPI, asyncpg, AES-256-GCM |
 | Event Pipeline | Redis Streams writer |
 | Analytics Store | ClickHouse (MergeTree, materialized views) |
 | Config Store | PostgreSQL 16 + pgvector |
@@ -226,6 +236,7 @@ apdl/
 │   ├── config/              # Flags & experiments CRUD, Redis cache, SSE
 │   ├── query/               # Funnels, cohorts, retention, experiment stats
 │   ├── agents/              # Agent graphs, LLM router, memory, tools, safety
+│   ├── llm-vault/           # Shared encrypted project LLM credential custody
 │   └── codegen/             # Offline source preview; publication disabled
 │
 ├── pipeline/
@@ -252,7 +263,7 @@ apdl/
 | One package | `make test-<pkg>` / `make lint-<pkg>` — `sdk`, `sdk-python`, `ingestion`, `config`, `query`, `agents` |
 | Build the JS SDK | `make build` |
 | ClickHouse migrations | `make migrate-clickhouse` |
-| Health overview / smoke test | `make status` / `make smoke` |
+| Health overview / isolated fresh-install smoke | `make status` / `make smoke-fresh` |
 | Stop containers | `make dev-down` |
 
 See [Database migration maintenance](docs/database-maintenance.md) for the
@@ -475,10 +486,11 @@ per-project policy:
 - **Behavior Analysis** — queries ClickHouse to identify trends, anomalies, and conversion patterns
 - **Experiment Design** — proposes A/B tests for human approval; an approval
   creates only a disabled experiment draft and may request separate treatment work
-- **Personalization** — disabled in 0.3.3; no canonical Config storage or SDK
-  delivery path exists yet
-- **Experiment Evaluation and Feature Proposals** — disabled in 0.3.3; current
-  statistical snapshots do not establish deployment readiness
+- **Personalization** — disabled in the current developer preview; no canonical
+  Config storage or SDK delivery path exists yet
+- **Experiment Evaluation and Feature Proposals** — disabled in the current
+  developer preview; current statistical snapshots do not establish deployment
+  readiness
 
 For eligible operator projects, proposed experiment drafts receive static
 validation and are recorded in the audit trail. Experiment design is hard-gated

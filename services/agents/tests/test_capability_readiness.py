@@ -15,10 +15,13 @@ async def test_capability_report_separates_configuration_and_reachability(
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
     monkeypatch.setenv("QUERY_SERVICE_URL", "http://query.test:8082")
     monkeypatch.setenv("CONFIG_SERVICE_URL", "http://config.test:8081")
     monkeypatch.setenv("CODEGEN_SERVICE_URL", "http://codegen.test:8084")
+    monkeypatch.setenv("LLM_VAULT_URL", "http://vault.test:8086")
+    monkeypatch.setenv("LLM_VAULT_AGENTS_TOKEN", "v" * 32)
 
     probed_urls = []
 
@@ -44,13 +47,9 @@ async def test_capability_report_separates_configuration_and_reachability(
 
     capabilities = report["capabilities"]
     assert report["status"] == "degraded"
-    assert capabilities["llm"]["configured"] is True
-    assert capabilities["llm"]["reachable"] is True
-    assert capabilities["llm"]["providers"] == {
-        "openai": {"configured": True, "reachable": True},
-        "anthropic": {"configured": False, "reachable": False},
-        "google": {"configured": False, "reachable": False},
-        "local": {"configured": False, "reachable": False},
+    assert capabilities["llm"] == {
+        "credential_store": {"configured": True, "operational": True},
+        "project_credentials": "tenant_scoped",
     }
     assert capabilities["query"] == {"configured": True, "reachable": True}
     assert capabilities["config"] == {"configured": True, "reachable": False}
@@ -70,7 +69,10 @@ async def test_generic_report_accepts_tenant_scoped_codegen_as_healthy(
     monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
+    monkeypatch.setenv("LLM_VAULT_URL", "http://vault.test:8086")
+    monkeypatch.setenv("LLM_VAULT_AGENTS_TOKEN", "v" * 32)
 
     async def reachable(*_args, **_kwargs):
         return True
@@ -88,6 +90,40 @@ async def test_generic_report_accepts_tenant_scoped_codegen_as_healthy(
     report = await readiness.capability_report()
 
     assert report["status"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_generic_readiness_never_probes_or_reports_tenant_provider_keys(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_LLM_URL", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "xai-secret")
+    monkeypatch.setenv("QUERY_SERVICE_URL", "")
+    monkeypatch.setenv("CONFIG_SERVICE_URL", "")
+    monkeypatch.setenv("CODEGEN_SERVICE_URL", "")
+    monkeypatch.setenv("LLM_VAULT_URL", "")
+    monkeypatch.delenv("LLM_VAULT_AGENTS_TOKEN", raising=False)
+
+    probes: list[tuple[str, dict[str, str]]] = []
+
+    async def fake_probe(client, url, *, headers=None):
+        del client
+        probes.append((url, headers or {}))
+        return True
+
+    monkeypatch.setattr(readiness, "_probe_endpoint", fake_probe)
+
+    report = await readiness.capability_report()
+
+    assert probes == []
+    assert report["capabilities"]["llm"] == {
+        "credential_store": {"configured": False, "operational": False},
+        "project_credentials": "tenant_scoped",
+    }
+    assert "xai-secret" not in str(report)
 
 
 @pytest.mark.asyncio
@@ -111,7 +147,10 @@ async def test_codegen_probe_distinguishes_disabled_from_unavailable() -> None:
             json={
                 "status": "ready",
                 "service": "apdl-codegen",
-                "capabilities": {"changeset_creation": "disabled"},
+                "capabilities": {
+                    "changeset_creation": "disabled",
+                    "credential_store": "ready",
+                },
             },
         )
 

@@ -1,8 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
+import { useState } from 'react'
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom'
 import { toast } from 'sonner'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -18,14 +19,15 @@ import {
   experimentUpdateSchema,
 } from '../../src/api/schemas/experiments'
 import { TooltipProvider } from '../../src/components/ui/tooltip'
+import { SUPPORTED_OPERATORS } from '../../src/core/evaluator/targetingContract'
 import { WorkspaceProvider } from '../../src/core/workspace'
 import type { Workspace } from '../../src/core/workspace'
 import {
+  ExperimentForm,
   buildCreate,
   buildUpdate,
   emptyExperimentValues,
   entryToFormValues,
-  parseTargetingRules,
   validateExperimentForm,
   type ExperimentFormValues,
 } from '../../src/features/experiments/ExperimentForm'
@@ -151,6 +153,16 @@ describe('experiment schemas', () => {
       .toBe(false)
     expect(experimentCreateSchema.safeParse({ ...create, status: 'completed' }).success).toBe(false)
     expect(experimentCreateSchema.safeParse({ ...create, status: 'stopped' }).success).toBe(false)
+    expect(
+      experimentCreateSchema.safeParse({
+        ...create,
+        targeting_rules: Array.from({ length: 51 }, (_, index) => ({
+          id: `rule-${index}`,
+          name: '',
+          conditions: [],
+        })),
+      }).success,
+    ).toBe(false)
     expect(experimentUpdateSchema.safeParse({ version: 2, description: 'updated' }).success).toBe(true)
     expect(experimentUpdateSchema.safeParse({ version: 2, bucket_by: 'user_id' }).success).toBe(true)
     expect(experimentUpdateSchema.safeParse({ version: 2, bucket_by: null }).success).toBe(false)
@@ -355,23 +367,80 @@ describe('experiment schemas', () => {
 })
 
 describe('experiment form model', () => {
-  test('parseTargetingRules validates eligibility without a competing rollout', () => {
-    expect(parseTargetingRules('')).toEqual({ value: [], error: null })
-    const rule = {
-      id: 'r1',
-      name: '',
-      conditions: [],
+  test('projects structured targeting values to the strict eligibility payload', () => {
+    const values = {
+      ...emptyExperimentValues(),
+      key: 'experiment-1',
+      targetingRules: [
+        {
+          id: 'rule-eu',
+          name: 'EU visitors',
+          conditions: [
+            {
+              attribute: 'country',
+              operator: 'equals' as const,
+              valueType: 'string' as const,
+              value: 'DE',
+              values: [],
+            },
+            {
+              attribute: 'email',
+              operator: 'exists' as const,
+              valueType: 'string' as const,
+              value: 'ignored',
+              values: [],
+            },
+            {
+              attribute: 'age',
+              operator: 'gte' as const,
+              valueType: 'number' as const,
+              value: '18',
+              values: [],
+            },
+            {
+              attribute: 'cohort',
+              operator: 'in' as const,
+              valueType: 'number' as const,
+              value: '',
+              values: [18, true, '18'],
+            },
+          ],
+        },
+      ],
     }
-    expect(parseTargetingRules(JSON.stringify([rule]))).toEqual({ value: [rule], error: null })
-    expect(parseTargetingRules(JSON.stringify([{
-      ...rule,
-      rollout: { percentage: 100, bucket_by: 'user_id' },
-    }])).error).toBe('Each rule needs exactly id, name, and conditions')
-    expect(parseTargetingRules('{"a": 1}').error).toBe('Must be a JSON array of rules')
-    expect(parseTargetingRules('[{"id":"r1"}]').error).toBe(
-      'Each rule needs exactly id, name, and conditions',
-    )
-    expect(parseTargetingRules('{nope').error).toBe('Invalid JSON')
+
+    expect(buildCreate(values).targeting_rules).toEqual([
+      {
+        id: 'rule-eu',
+        name: 'EU visitors',
+        conditions: [
+          { attribute: 'country', operator: 'equals', value: 'DE' },
+          { attribute: 'email', operator: 'exists' },
+          { attribute: 'age', operator: 'gte', value: 18 },
+          { attribute: 'cohort', operator: 'in', value: [18, true, '18'] },
+        ],
+      },
+    ])
+    expect(validateExperimentForm(values)).toEqual({})
+
+    const invalid = {
+      ...values,
+      targetingRules: [
+        {
+          ...values.targetingRules[0]!,
+          conditions: [
+            {
+              attribute: '',
+              operator: 'equals' as const,
+              valueType: 'string' as const,
+              value: '',
+              values: [],
+            },
+          ],
+        },
+      ],
+    }
+    expect(validateExperimentForm(invalid).targeting).toBeTruthy()
   })
 
   test('buildCreate projects the structured form to the canonical payload', () => {
@@ -397,7 +466,7 @@ describe('experiment form model', () => {
       nominalPower: 0.8,
       requiredSampleSizePerArm: 20,
       dataSettlementSeconds: 300,
-      targetingRulesJson: '',
+      targetingRules: [],
     }
     expect(buildCreate(values)).toEqual({
       key: 'exp-1',
@@ -420,6 +489,13 @@ describe('experiment form model', () => {
 
   })
 
+  test('entryToFormValues projects aware timestamps to native date input values', () => {
+    const values = entryToFormValues(experimentEntrySchema.parse(EXPERIMENT))
+
+    expect(values.start_date).toBe('2026-06-01')
+    expect(values.end_date).toBe('2026-07-01')
+  })
+
   test('buildUpdate diffs drafts and never sends frozen fields after draft', () => {
     const draft = experimentEntrySchema.parse({
       ...EXPERIMENT,
@@ -432,19 +508,29 @@ describe('experiment form model', () => {
     const draftValues = entryToFormValues(draft)
     draftValues.description = 'Changed'
     draftValues.bucket_by = 'user_id'
+    draftValues.default_variant = 'treatment'
     draftValues.start_date = '2026-06-01'
     draftValues.traffic_percentage = 50
-    draftValues.targetingRulesJson = JSON.stringify([
+    draftValues.targetingRules = [
       {
         id: 'rule-pro',
         name: 'Pro users',
-        conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
+        conditions: [
+          {
+            attribute: 'plan',
+            operator: 'equals',
+            valueType: 'string',
+            value: 'pro',
+            values: [],
+          },
+        ],
       },
-    ])
+    ]
     expect(buildUpdate(draftValues, draft, 7)).toEqual({
       version: 7,
       description: 'Changed',
       bucket_by: 'user_id',
+      default_variant: 'treatment',
       traffic_percentage: 50,
       targeting_rules: [
         {
@@ -469,15 +555,31 @@ describe('experiment form model', () => {
     stoppedValues.default_variant = 'treatment'
     stoppedValues.metricEvent = 'checkout_completed'
     stoppedValues.traffic_percentage = 25
-    stoppedValues.targetingRulesJson = JSON.stringify([
+    stoppedValues.targetingRules = [
       {
         id: 'rule-pro',
         name: 'Pro users',
-        conditions: [{ attribute: 'plan', operator: 'equals', value: 'pro' }],
+        conditions: [
+          {
+            attribute: 'plan',
+            operator: 'equals',
+            valueType: 'string',
+            value: 'pro',
+            values: [],
+          },
+        ],
       },
-    ])
+    ]
 
     expect(buildUpdate(stoppedValues, running)).toEqual({ version: 2, status: 'stopped' })
+  })
+
+  test('buildUpdate preserves unchanged draft scheduling timestamps', () => {
+    const draft = experimentEntrySchema.parse(DRAFT_EXPERIMENT)
+    const values = entryToFormValues(draft)
+    values.description = 'Changed'
+
+    expect(buildUpdate(values, draft)).toEqual({ version: 2, description: 'Changed' })
   })
 
   test('validateExperimentForm catches duplicate keys and an out-of-set default', () => {
@@ -545,6 +647,273 @@ describe('experiment form model', () => {
       .toBeTruthy()
     expect(validateExperimentForm({ ...base, key: 'good.key-1', flagKey: 'flag_ok' }).key)
       .toBeUndefined()
+  })
+})
+
+describe('ExperimentForm layout', () => {
+  test('labels variant columns and keeps row-specific field names while adding and removing rows', async () => {
+    function FormHarness() {
+      const [values, setValues] = useState({
+        ...emptyExperimentValues(),
+        key: 'checkout-test',
+      })
+
+      return (
+        <ExperimentForm
+          values={values}
+          onChange={setValues}
+          isCreate
+          onSubmit={vi.fn()}
+          submitting={false}
+        />
+      )
+    }
+
+    render(<FormHarness />)
+
+    const headings = within(screen.getByTestId('variant-column-headings'))
+    expect(headings.getByText('Key')).toBeInTheDocument()
+    expect(headings.getByText('User proportion')).toBeInTheDocument()
+    expect(headings.getByText('Comment')).toBeInTheDocument()
+
+    expect(screen.getByRole('textbox', { name: 'Key for variant 1' })).toHaveValue('control')
+    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 1' })).toHaveValue(1)
+    expect(screen.getByRole('textbox', { name: 'Comment for variant 1' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 1' })).toBeDisabled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add variant' }))
+
+    expect(screen.getByRole('textbox', { name: 'Key for variant 3' })).toBeVisible()
+    expect(screen.getByRole('spinbutton', { name: 'User proportion for variant 3' })).toHaveValue(1)
+    expect(screen.getByRole('textbox', { name: 'Comment for variant 3' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 3' })).toBeEnabled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Remove variant 2' }))
+
+    expect(screen.queryByRole('textbox', { name: 'Key for variant 3' })).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: 'Key for variant 2' })).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Remove variant 2' })).toBeDisabled()
+  })
+
+  test('keeps primary create inputs visible and starts Advanced Settings collapsed', async () => {
+    render(
+      <ExperimentForm
+        values={{ ...emptyExperimentValues(), key: 'checkout-test' }}
+        onChange={vi.fn()}
+        isCreate
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    const summaryText = screen.getByText('Advanced Settings')
+    const disclosure = summaryText.closest('details')
+    expect(disclosure).not.toBeNull()
+    expect(disclosure).not.toHaveAttribute('open')
+
+    expect(screen.getByPlaceholderText('checkout-redesign')).toBeVisible()
+    expect(screen.getByPlaceholderText('What this experiment tests')).toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'Control variant' })).not.toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).not.toBeVisible()
+    const status = screen.getByRole('combobox', { name: 'Status' })
+    const traffic = screen.getByRole('spinbutton', { name: 'Traffic percentage' })
+    expect(status).toBeVisible()
+    expect(status).toHaveValue('draft')
+    expect(within(status).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'draft',
+      'scheduled',
+      'running',
+    ])
+    expect(traffic).toBeVisible()
+    expect(traffic).toHaveValue(100)
+    expect(traffic).toHaveAttribute('min', '0')
+    expect(traffic).toHaveAttribute('max', '100')
+    expect(screen.getAllByRole('combobox', { name: 'Status' })).toHaveLength(1)
+    expect(screen.getAllByRole('spinbutton', { name: 'Traffic percentage' })).toHaveLength(1)
+    expect(screen.getByText('Weights set the relative split among variants.')).toBeVisible()
+    expect(
+      screen.getByText('Enrollment, flag, scheduling, analysis, and targeting controls.'),
+    ).toBeVisible()
+
+    await userEvent.click(summaryText.closest('summary')!)
+
+    expect(disclosure).toHaveAttribute('open')
+    expect(screen.getByRole('combobox', { name: 'Control variant' })).toBeVisible()
+    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeVisible()
+    expect(
+      screen.getByText(
+        "Statistical control for every comparison and the backing flag's fallback variant.",
+      ),
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        'Immutable after draft. Use anonymous visitors for browser experiments that start before sign-in.',
+      ),
+    ).toBeVisible()
+    expect(screen.getAllByRole('combobox', { name: 'Control variant' })).toHaveLength(1)
+    expect(screen.getAllByRole('combobox', { name: 'Bucketing identity' })).toHaveLength(1)
+    expect(within(disclosure!).queryByRole('combobox', { name: 'Status' })).not.toBeInTheDocument()
+    expect(
+      within(disclosure!).queryByRole('spinbutton', { name: 'Traffic percentage' }),
+    ).not.toBeInTheDocument()
+  })
+
+  test('keeps edit controls visible when collapsed and preserves lifecycle locks', async () => {
+    const runningValues = { ...emptyExperimentValues(), status: 'running' as const }
+    const { rerender } = render(
+      <ExperimentForm
+        values={runningValues}
+        onChange={vi.fn()}
+        isCreate={false}
+        currentStatus="running"
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    const runningStatus = screen.getByRole('combobox', { name: 'Status' })
+    expect(runningStatus).toBeEnabled()
+    expect(within(runningStatus).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'running',
+      'completed',
+      'stopped',
+    ])
+    const runningTraffic = screen.getByRole('spinbutton', { name: 'Traffic percentage' })
+    expect(runningTraffic).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Control variant' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeDisabled()
+
+    const disclosure = screen.getByText('Advanced Settings').closest('details')
+    expect(disclosure).toHaveAttribute('open')
+    await userEvent.click(screen.getByText('Advanced Settings').closest('summary')!)
+    expect(disclosure).not.toHaveAttribute('open')
+    expect(runningStatus).toBeVisible()
+    expect(runningTraffic).toBeVisible()
+
+    rerender(
+      <ExperimentForm
+        values={{ ...runningValues, status: 'stopped' }}
+        onChange={vi.fn()}
+        isCreate={false}
+        currentStatus="stopped"
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    const stoppedStatus = screen.getByRole('combobox', { name: 'Status' })
+    expect(stoppedStatus).toBeDisabled()
+    expect(within(stoppedStatus).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'stopped',
+    ])
+    expect(screen.getByText('This experiment has ended — status is terminal.')).toBeVisible()
+  })
+
+  test('updates control options from variant keys and keeps strict bucketing options', async () => {
+    function SelectorHarness() {
+      const [values, setValues] = useState({
+        ...emptyExperimentValues(),
+        key: 'checkout-test',
+      })
+
+      return (
+        <ExperimentForm
+          values={values}
+          onChange={setValues}
+          isCreate
+          onSubmit={vi.fn()}
+          submitting={false}
+        />
+      )
+    }
+
+    render(<SelectorHarness />)
+    await userEvent.click(screen.getByText('Advanced Settings').closest('summary')!)
+
+    const control = screen.getByRole('combobox', { name: 'Control variant' })
+    expect(within(control).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'control',
+      'treatment',
+    ])
+
+    const bucketing = screen.getByRole('combobox', { name: 'Bucketing identity' })
+    expect(
+      within(bucketing).getAllByRole('option').map((option) => ({
+        label: option.textContent,
+        value: (option as HTMLOptionElement).value,
+      })),
+    ).toEqual([
+      { label: 'Anonymous visitor', value: 'anonymous_id' },
+      { label: 'Authenticated user', value: 'user_id' },
+    ])
+
+    const treatmentKey = screen.getByRole('textbox', { name: 'Key for variant 2' })
+    await userEvent.clear(treatmentKey)
+    await userEvent.type(treatmentKey, 'challenger')
+
+    expect(within(control).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'control',
+      'challenger',
+    ])
+  })
+
+  test('opens Advanced Settings for hidden enrollment validation errors', async () => {
+    render(
+      <ExperimentForm
+        values={{
+          ...emptyExperimentValues(),
+          key: 'checkout-test',
+          default_variant: 'missing',
+          bucket_by: 'account_id' as ExperimentFormValues['bucket_by'],
+        }}
+        onChange={vi.fn()}
+        isCreate
+        onSubmit={vi.fn()}
+        submitting={false}
+      />,
+    )
+
+    const disclosure = screen.getByText('Advanced Settings').closest('details')
+    expect(disclosure).not.toHaveAttribute('open')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create experiment' }))
+
+    expect(disclosure).toHaveAttribute('open')
+    expect(
+      screen.getByText('Choose a control variant that matches a variant key'),
+    ).toBeVisible()
+    expect(screen.getByText('Choose anonymous_id or user_id')).toBeVisible()
+  })
+
+  test('opens Advanced Settings when a hidden launch requirement fails validation', async () => {
+    const onSubmit = vi.fn()
+    render(
+      <ExperimentForm
+        values={{
+          ...emptyExperimentValues(),
+          key: 'checkout-test',
+          status: 'running',
+        }}
+        onChange={vi.fn()}
+        isCreate
+        onSubmit={onSubmit}
+        submitting={false}
+      />,
+    )
+
+    const disclosure = screen.getByText('Advanced Settings').closest('details')
+    expect(disclosure).not.toHaveAttribute('open')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create experiment' }))
+
+    expect(disclosure).toHaveAttribute('open')
+    expect(
+      screen.getByText('Scheduled and running experiments require start and end dates'),
+    ).toBeVisible()
+    expect(
+      screen.getByText('Scheduled and running experiments require a primary metric'),
+    ).toBeVisible()
+    expect(onSubmit).not.toHaveBeenCalled()
   })
 })
 
@@ -690,12 +1059,16 @@ describe('ExperimentDetailPage', () => {
     renderDetail()
 
     await screen.findByDisplayValue('CTA experiment')
+    expect(screen.getByLabelText('Start date')).toHaveAttribute('type', 'date')
+    expect(screen.getByLabelText('Start date')).toHaveValue('2026-06-01')
+    expect(screen.getByLabelText('End date')).toHaveAttribute('type', 'date')
+    expect(screen.getByLabelText('End date')).toHaveValue('2026-07-01')
     expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Bucketing identity' })).toHaveValue(
       'anonymous_id',
     )
-    expect(screen.getByRole('textbox', { name: 'Targeting rules JSON' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Add targeting rule' })).toBeDisabled()
     expect(screen.getByRole('combobox', { name: 'Control variant' })).toHaveValue('control')
     expect(
       screen.getByText(
@@ -814,6 +1187,132 @@ describe('ExperimentDetailPage', () => {
     expect(updateBodies).toEqual([])
   })
 
+  test('uses structured targeting pickers and omits values for presence operators', async () => {
+    server.use(
+      http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
+        HttpResponse.json({ experiments: [DRAFT_EXPERIMENT], count: 1 }),
+      ),
+    )
+    renderDetail()
+
+    await screen.findByDisplayValue('CTA experiment')
+    expect(screen.queryByText(/targeting rules \(JSON array\)/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Targeting rules JSON' }))
+      .not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add targeting rule' }))
+    const type = screen.getByRole('combobox', {
+      name: 'Targeting rule 1 condition 1 type',
+    })
+    const operator = screen.getByRole('combobox', {
+      name: 'Targeting rule 1 condition 1 operator',
+    }) as HTMLSelectElement
+
+    expect(new Set(Array.from(operator.options, (option) => option.value))).toEqual(
+      SUPPORTED_OPERATORS,
+    )
+    await userEvent.type(type, 'email')
+    await userEvent.selectOptions(operator, 'exists')
+    expect(
+      screen.queryByRole('textbox', { name: 'Targeting rule 1 condition 1 value' }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('No value — checks presence')).toBeInTheDocument()
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Add condition after targeting rule 1 condition 1',
+      }),
+    )
+    await userEvent.type(
+      screen.getByRole('combobox', { name: 'Targeting rule 1 condition 2 type' }),
+      'age',
+    )
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', {
+        name: 'Targeting rule 1 condition 2 operator',
+      }),
+      'gte',
+    )
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Targeting rule 1 condition 2 value' }),
+      '18',
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Add condition after targeting rule 1 condition 2',
+      }),
+    )
+    await userEvent.type(
+      screen.getByRole('combobox', { name: 'Targeting rule 1 condition 3 type' }),
+      'beta_opt_in',
+    )
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', {
+        name: 'Targeting rule 1 condition 3 value type',
+      }),
+      'boolean',
+    )
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', {
+        name: 'Targeting rule 1 condition 3 value',
+      }),
+      'true',
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Add condition after targeting rule 1 condition 3',
+      }),
+    )
+    await userEvent.type(
+      screen.getByRole('combobox', { name: 'Targeting rule 1 condition 4 type' }),
+      'cohort',
+    )
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', {
+        name: 'Targeting rule 1 condition 4 operator',
+      }),
+      'in',
+    )
+    const membershipType = screen.getByRole('combobox', {
+      name: 'Targeting rule 1 condition 4 values type',
+    })
+    await userEvent.selectOptions(membershipType, 'number')
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Targeting rule 1 condition 4 values' }),
+      '18{Enter}',
+    )
+    await userEvent.selectOptions(membershipType, 'boolean')
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Targeting rule 1 condition 4 values' }),
+      'true',
+    )
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Add targeting rule 1 condition 4 values',
+      }),
+    )
+    await userEvent.selectOptions(membershipType, 'string')
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Targeting rule 1 condition 4 values' }),
+      '18{Enter}',
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(updateBodies).toHaveLength(1))
+    const rules = updateBodies[0]!.targeting_rules as {
+      conditions: Record<string, unknown>[]
+    }[]
+    expect(rules[0]!.conditions).toEqual([
+      { attribute: 'email', operator: 'exists' },
+      { attribute: 'age', operator: 'gte', value: 18 },
+      { attribute: 'beta_opt_in', operator: 'equals', value: true },
+      { attribute: 'cohort', operator: 'in', value: [18, true, '18'] },
+    ])
+    expect(rules[0]!.conditions[0]).not.toHaveProperty('value')
+  })
+
   test('a draft leaves every analysis-defining field editable and submits the edits', async () => {
     server.use(
       http.get('*/api/projects/demo/config/v1/admin/experiments', () =>
@@ -827,26 +1326,23 @@ describe('ExperimentDetailPage', () => {
     // The complement of the running case above: nothing is frozen while the
     // persisted status is still draft.
     const traffic = screen.getByRole('spinbutton', { name: 'Traffic percentage' })
-    const targeting = screen.getByRole('textbox', { name: 'Targeting rules JSON' })
     expect(traffic).toBeEnabled()
-    expect(targeting).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Add targeting rule' })).toBeEnabled()
     expect(screen.getByRole('textbox', { name: 'Metric event' })).toBeEnabled()
     expect(screen.getByRole('combobox', { name: 'Metric direction' })).toBeEnabled()
     expect(screen.getByRole('spinbutton', { name: 'Baseline conversion rate' })).toBeEnabled()
 
     await userEvent.clear(traffic)
     await userEvent.type(traffic, '55')
-    await userEvent.clear(targeting)
-    // Pasted rather than typed: user-event reads `{` as a key descriptor.
-    await userEvent.click(targeting)
-    await userEvent.paste(
-      JSON.stringify([
-        {
-          id: 'eu',
-          name: 'EU',
-          conditions: [{ attribute: 'country', operator: 'equals', value: 'DE' }],
-        },
-      ]),
+    await userEvent.click(screen.getByRole('button', { name: 'Add targeting rule' }))
+    await userEvent.type(screen.getByRole('textbox', { name: 'Targeting rule 1 name' }), 'EU')
+    await userEvent.type(
+      screen.getByRole('combobox', { name: 'Targeting rule 1 condition 1 type' }),
+      'country',
+    )
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Targeting rule 1 condition 1 value' }),
+      'DE',
     )
     await userEvent.clear(screen.getByPlaceholderText('What this experiment tests'))
     await userEvent.type(screen.getByPlaceholderText('What this experiment tests'), 'Draft copy')
@@ -870,8 +1366,21 @@ describe('ExperimentDetailPage', () => {
       version: 2,
       description: 'Draft copy',
       traffic_percentage: 55,
+      targeting_rules: [
+        {
+          name: 'EU',
+          conditions: [{ attribute: 'country', operator: 'equals', value: 'DE' }],
+        },
+      ],
     })
-    expect(updateBodies[0]).toHaveProperty('targeting_rules')
+    const targetingRules = updateBodies[0]!.targeting_rules as {
+      id: string
+      rollout?: unknown
+      conditions: { type?: unknown }[]
+    }[]
+    expect(targetingRules[0]!.id).toMatch(/^rule_[a-f0-9]{12}$/)
+    expect(targetingRules[0]).not.toHaveProperty('rollout')
+    expect(targetingRules[0]!.conditions[0]).not.toHaveProperty('type')
     expect(updateBodies[0]).toHaveProperty('primary_metric')
     expect(updateBodies[0]).toHaveProperty('statistical_plan')
   })
@@ -890,7 +1399,7 @@ describe('ExperimentDetailPage', () => {
     // The lock keys off the persisted status, not the pending selection, so the
     // launch form can still set final traffic and targeting in the same save.
     expect(screen.getByRole('spinbutton', { name: 'Traffic percentage' })).toBeEnabled()
-    expect(screen.getByRole('textbox', { name: 'Targeting rules JSON' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Add targeting rule' })).toBeEnabled()
 
     const traffic = screen.getByRole('spinbutton', { name: 'Traffic percentage' })
     await userEvent.clear(traffic)

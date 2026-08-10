@@ -48,6 +48,11 @@ projects with a canonical `admin_project_execution_authorizations` row.
 | `POST` | `/v1/agents/{run_id}/cancel` | Durably cancel an active run and fence further work |
 | `POST` | `/v1/agents/{run_id}/approve` | Validate exact per-item decisions and queue an approval command (`202`) |
 | `GET` | `/v1/agents/{run_id}/approvals/{command_id}` | Command and per-effect retry/manual-intervention status |
+| `GET` | `/v1/agents/llm-connections?project_id=...` | List project provider connections without secret metadata |
+| `PUT` | `/v1/agents/llm-connections/{provider}` | Validate, discover models, and atomically create or replace a connection |
+| `GET` | `/v1/agents/llm-connections/{provider}/models?project_id=...` | Read the last validated normalized model inventory |
+| `POST` | `/v1/agents/llm-connections/{provider}/refresh-models` | Revalidate a connection and atomically refresh its inventory |
+| `POST` | `/v1/agents/llm-connections/{provider}/revoke` | Revoke and crypto-shred an unassigned provider connection |
 | `GET` | `/health` | Liveness probe |
 | `GET` | `/ready` | Core readiness (runtime initialization and PostgreSQL) |
 | `GET` | `/ready/capabilities` | Non-blocking configured/reachable report for LLM, Query, Config, and Codegen |
@@ -77,6 +82,12 @@ envelope containing `command_id`, gate/count fields, timestamps, and an
 attempt/error/result fields. Config and Codegen calls run only in the durable
 effect worker with a persisted idempotency key and PostgreSQL quota reservation.
 
+Connection reads require `agents:read`. Mutations must use a human-bound
+credential and are authorized from live PostgreSQL state for either the current
+project owner or an active member holding both `agents:manage` and
+`credentials:manage`. Connection setup does not activate Agents or grant
+execution authority.
+
 ## Agent graphs
 
 Agents self-register via `@register_agent` and run in `order`:
@@ -93,29 +104,48 @@ Scaffold a new agent with `scripts/new_agent.py`.
 
 ## LLM router
 
-`app/llm/router.py` routes by tier (`fast` for cheap tasks, `reasoning` for
-analysis/design), but environment variables only define candidate models; they
-do not authorize tenant data egress. Every call carries an explicit project,
-run, purpose, execution kind, and data classification. Before network egress,
-the router loads the project's exact provider/model/residency policy, reserves
-the worst-case run and daily cost atomically, and persists the logical call and
-provider attempt. It then records provider/model, prompt hash, usage, cost,
-latency, outcome, and retry classification without storing prompt content.
+`app/llm/router.py` routes each tier (`fast` for cheap tasks, `reasoning` for
+analysis/design) through one exact project model assignment. Every call carries
+an explicit project, run, purpose, execution kind, and data classification.
+Before network egress, the router loads the project's exact
+provider/model/residency policy, reserves the worst-case run and daily cost
+atomically, binds the provider attempt to that project's active encrypted
+credential version, decrypts it just in time, and revalidates it at the egress
+boundary. It records provider/model, credential ID/version, prompt hash, usage,
+cost, latency, and outcome without storing prompt content or secret material.
 
-Migration 023 creates one safe default policy for every project: only the exact
-local model `gemma4` at `http://localhost:11434/v1`, local residency, zero paid
-spend, and no cross-vendor retry. Enabling OpenAI, Anthropic, or Google requires an operator to update
-`llm_project_policies` and insert the exact provider/model row in
-`llm_project_provider_policies`, including allowed data classifications,
-residency, current input/output prices, and positive project-daily and per-run
-ceilings. A provider failure crosses to another vendor only when the project
-policy explicitly permits it and the failure is classified as retryable.
+Migration 051 moves every fresh or migrated project to one explicit
+`inactive` setup with no fabricated model assignment. A current human owner, or
+an active delegated member holding both `agents:manage` and
+`credentials:manage`, connects one or more reviewed providers and activates the
+project through `/v1/agents/setup`. The server derives fixed endpoints,
+residency, classifications, reviewed prices, and positive project/run ceilings
+from the catalog. Each tier has one exact primary assignment; provider failures
+do not trigger an implicit same-vendor or cross-vendor fallback.
+
+### Connect xAI/Grok
+
+1. Apply PostgreSQL migrations with `make migrate-postgres`.
+2. Add the project's xAI connection through the authenticated
+   `/v1/agents/llm-connections/xai` API. The key is validated, encrypted, and
+   never returned to the browser.
+3. Select eligible fast and reasoning models and activate analysis through
+   `PUT /v1/agents/setup`. Pricing, residency, classifications, endpoints, and
+   budgets are server-owned and cannot be supplied by the client.
+4. Confirm the generic credential-store subsystem at
+   `GET /ready/capabilities`; connection presence is visible only through the
+   authenticated project API.
+
+xAI is integrated through its OpenAI-compatible Chat Completions endpoint. That
+supports APDL's client-side function-calling loop; xAI-hosted search, code, and
+MCP tools are not enabled by this provider adapter.
 
 ## Approval and safety boundary
 
-These levels apply only to projects with canonical execution authority.
-Self-created projects cannot start or resume an Agents execution at any
-autonomy level unless an operator has recorded the explicit override.
+These levels apply only to projects with active Agents setup. Owner activation
+permits governed L1/L2 analysis, but it does not grant `agents:approve`,
+Codegen, repository access, L3/L4 autonomous mutation, or any external effect.
+Those capabilities retain the immutable operator execution-authority ceiling.
 
 `gate_action` (`app/framework/gating.py`) is a generic policy primitive, not a
 claim that the enabled product flow is autonomous. Experiment design invokes it
@@ -186,30 +216,34 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
 | `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |
+| `LLM_VAULT_URL` | `http://localhost:8086` | Private project LLM credential vault |
+| `LLM_VAULT_AGENTS_TOKEN` | — | Agents-only workload token for exact just-in-time credential access |
+| `LLM_VAULT_PROJECTION_TOKEN` | — | Private token used by the vault to request Agents model projections |
 | `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
-| `OPENAI_API_KEY` | — | OpenAI provider |
-| `ANTHROPIC_API_KEY` | — | Anthropic provider |
-| `GOOGLE_API_KEY` | — | Google provider |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
-| `LOCAL_LLM_MODEL` / `LLM_FAST_*` / `LLM_REASONING_*` | per-tier defaults | Candidate model names; each exact provider/model must also be authorized by project policy |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
-| `APDL_SERVICE_API_KEYS` | — | Production project-to-key JSON for scoped Config/Query/Codegen calls |
-| `APDL_DEV_API_KEY` | — | Local-only fallback key when the service-key map is unset |
+| `APDL_SERVICE_API_KEYS` | — | Canonical project-to-key JSON for scoped Config/Query/Codegen calls |
 
-At least one policy-authorized provider must also be configured and reachable
-to execute an LLM-backed run. API keys alone grant no project permission.
-`/ready/capabilities` reports process-level provider and service availability,
-but its degraded state does not make the core `/ready` endpoint fail and does
-not assert that any particular project's policy permits egress.
+Remote provider keys are created in the project settings UI and held only by
+the private LLM Vault. Agents stores non-secret connection, inventory, policy,
+and assignment projections. Immediately before provider egress it requests the
+exact credential ID and version selected by the attempt, with an execution ID
+and purpose; the vault checks the explicit `agents` grant and records an
+immutable issuance audit. Agents never receives the vault encryption key and
+does not read ambient cloud-provider keys. `/ready/capabilities` reports only
+the generic vault subsystem and service dependencies, never tenant connection
+presence.
 
 ## Running locally
 
 ```bash
 make dev          # start Redis, ClickHouse, PostgreSQL
+make run-llm-vault
 make run-agents   # uvicorn with hot-reload → localhost:8083
 ```
 
-Set at least one LLM key in `.env` (created by `make setup`).
+Set the vault secrets in `.env` (created by `make setup`), then add project
+provider connections from Project settings in the Admin console.
 
 ## Tests
 

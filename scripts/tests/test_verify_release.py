@@ -33,8 +33,11 @@ VALID_MANIFEST = {
 class ReleaseManifestTests(unittest.TestCase):
     def test_checked_out_release_contract_is_consistent(self) -> None:
         version = verify_release.verify_release(ROOT, None, {})
+        manifest = json.loads(
+            (ROOT / "release-manifest.json").read_text(encoding="utf-8")
+        )
 
-        self.assertEqual(version, "0.3.3")
+        self.assertEqual(version, manifest["version"])
 
     def test_canonical_runtime_image_repositories_are_stable(self) -> None:
         repositories = {
@@ -54,6 +57,7 @@ class ReleaseManifestTests(unittest.TestCase):
                 "codegen-worker": "ghcr.io/kuvera-apdl/apdl-codegen-worker",
                 "config": "ghcr.io/kuvera-apdl/apdl-config",
                 "ingestion": "ghcr.io/kuvera-apdl/apdl-ingestion",
+                "llm-vault": "ghcr.io/kuvera-apdl/apdl-llm-vault",
                 "postgres-migrate": "ghcr.io/kuvera-apdl/apdl-postgres-migrate",
                 "query": "ghcr.io/kuvera-apdl/apdl-query",
             },
@@ -108,7 +112,7 @@ class ReleaseManifestTests(unittest.TestCase):
             egress_policy_sha256=policy_digest,
         )
 
-        self.assertEqual(len(matrix["include"]), 11)
+        self.assertEqual(len(matrix["include"]), 12)
         by_name = {image["name"]: image for image in matrix["include"]}
         self.assertEqual(
             by_name["codegen-worker"]["build_args"],
