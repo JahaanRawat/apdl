@@ -1,9 +1,9 @@
 # APDL Admin API
 
-Backend-for-frontend for the APDL Admin Console. It is the browser security
-boundary: human credentials terminate here, service credentials remain
-server-side except during an explicit reveal-once creation or rotation, and
-every request is authorized against a user, project, and role.
+Backend-for-frontend for the separately distributed APDL Admin Console. It is
+the browser security boundary: human credentials terminate here, service
+credentials remain server-side except during an explicit reveal-once creation
+or rotation, and every request is authorized against a user, project, and role.
 
 ## Security model
 
@@ -60,9 +60,10 @@ every request is authorized against a user, project, and role.
   results clear the cookie and redirect to the single generic Admin failure
   status without reflecting upstream details.
 - Uvicorn preserves the socket peer instead of trusting forwarded headers.
-  The Admin nginx edge clears `Forwarded` and `X-Real-IP`, overwrites
-  `X-Forwarded-For` with its direct peer, and is the only network allowed to
-  supply that single-hop identity to the API.
+  Direct local deployments trust no proxy CIDRs by default. A separately
+  deployed edge must clear untrusted forwarding headers, supply exactly one
+  canonical `X-Forwarded-For` address, and be explicitly allowlisted through
+  `APDL_ADMIN_TRUSTED_PROXY_CIDRS`.
 - Login abuse controls never lock the shared account row. PostgreSQL applies
   atomic short-window global, network, and opaque-device budgets plus
   progressive network-and-device delays for each submitted email. A correct
@@ -90,19 +91,18 @@ every request is authorized against a user, project, and role.
 make deps
 make migrate-postgres
 make run-admin-api
-make run-admin
 ```
 
 The normal bootstrap creates no users, projects, or credentials. The root
-`.env.example` enables registration for the loopback-bound local stack. Open
-`http://localhost:5173/register` and create an account; registration starts an
-authenticated session with an empty project list. The user may create a core
-analytics project from the workspace settings, then create a restricted browser
-or confidential SDK credential from the same page. Copy the revealed key before
-closing the dialog; it cannot be recovered. An operator may instead grant
-membership to an operator-provisioned project. Self-created projects expose
-Agents history read-only by default and cannot execute LLM or Codegen work until
-an operator records an explicit project execution authorization.
+`.env.example` enables registration only for loopback-bound local development.
+The browser console is maintained and deployed separately; this repository
+exposes the Admin API at `http://localhost:8085` but does not build or serve a
+frontend. Use `make create-admin-user` for bootstrap, recovery, and
+non-browser provisioning, or the documented direct
+[credential workflow](../../docs/authentication.md#operator-provision-credentials)
+for SDK-only development. Self-created projects expose Agents history read-only
+by default and cannot execute LLM or Codegen work until an operator records an
+explicit project execution authorization.
 
 Managed credential routes are:
 

@@ -48,7 +48,6 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertEqual(
             repositories,
             {
-                "admin": "ghcr.io/kuvera-apdl/apdl-admin",
                 "admin-api": "ghcr.io/kuvera-apdl/apdl-admin-api",
                 "agents": "ghcr.io/kuvera-apdl/apdl-agents",
                 "clickhouse-writer": "ghcr.io/kuvera-apdl/apdl-clickhouse-writer",
@@ -112,7 +111,7 @@ class ReleaseManifestTests(unittest.TestCase):
             egress_policy_sha256=policy_digest,
         )
 
-        self.assertEqual(len(matrix["include"]), 12)
+        self.assertEqual(len(matrix["include"]), 11)
         by_name = {image["name"]: image for image in matrix["include"]}
         self.assertEqual(
             by_name["codegen-worker"]["build_args"],

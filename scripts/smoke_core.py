@@ -299,11 +299,12 @@ def _check_health(args: argparse.Namespace) -> None:
             "capabilities": {
                 "agents": "not_ready",
                 "codegen": "not_ready",
+                "llm-vault": "ready",
             },
         }
         if decoded != expected:
             raise SmokeFailure(f"Admin readiness response differs: {decoded!r}")
-        print("  ok  Admin console and backend ready")
+        print("  ok  Admin API ready")
 
 
 def _prove_browser_ceiling(
@@ -373,7 +374,9 @@ def _prove_browser_ceiling(
         expected_status={401},
         timeout=args.request_timeout,
     )
-    if query_denial != {"detail": "Valid API key required"}:
+    if query_denial != {
+        "detail": "Valid API key or internal capability required"
+    }:
         raise SmokeFailure(f"Browser query denial differs: {query_denial!r}")
     print("  ok  Browser key is limited to event writes and client config reads")
 
@@ -668,7 +671,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--admin-url",
         default=os.environ.get("APDL_ADMIN_URL"),
-        help="Optional Admin console base URL to prove (env: APDL_ADMIN_URL)",
+        help="Optional Admin API base URL to prove (env: APDL_ADMIN_URL)",
     )
     parser.add_argument(
         "--request-timeout",

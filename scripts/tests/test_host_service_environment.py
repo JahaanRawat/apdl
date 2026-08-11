@@ -16,7 +16,6 @@ RUNNER = ROOT / "scripts" / "run_host_service.py"
 MAKEFILE = (ROOT / "Makefile").read_text(encoding="utf-8")
 
 SERVICES = (
-    "admin",
     "admin-api",
     "ingestion",
     "config",

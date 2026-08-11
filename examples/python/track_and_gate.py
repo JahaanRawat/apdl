@@ -2,8 +2,8 @@
 
 Prerequisites (see examples/README.md):
   1. `make dev-core` — supported core stack running on localhost
-  2. The `new-checkout` flag created in the Admin Console
-  3. `APDL_API_KEY` set to a confidential key created in Workspace settings
+  2. The `new-checkout` flag created through Config's Admin API
+  3. `APDL_API_KEY` set to an operator-provisioned confidential key
   4. `cd sdk/python && uv venv && uv pip install -e .`
 
 Run:
@@ -17,7 +17,7 @@ from apdl import APDL, APDLConfig
 API_KEY = os.environ.get("APDL_API_KEY", "").strip()
 if not API_KEY:
     raise SystemExit(
-        "APDL_API_KEY is required; create a confidential key in Workspace settings"
+        "APDL_API_KEY is required; provision a confidential project credential"
     )
 
 config = APDLConfig(

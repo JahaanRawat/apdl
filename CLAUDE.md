@@ -50,7 +50,6 @@ make run-agents     # Agents Service    → localhost:8083
 make run-codegen    # Codegen Service   → localhost:8084
 make run-admin-api  # Admin API (console gateway) → localhost:8085
 make run-pipeline   # ClickHouse Writer (Redis Streams consumer)
-make run-admin      # Admin Console (Vite dev server) → localhost:5173
 ```
 
 ### Per-service test/lint
@@ -65,7 +64,6 @@ make run-admin      # Admin Console (Vite dev server) → localhost:5173
 | Agents | `make test-agents` | `make lint-agents` |
 | Codegen | `make test-codegen` | `make lint-codegen` |
 | Admin API | `make test-admin-api` | `make lint-admin-api` |
-| Admin Console | `make test-admin` | `make lint-admin` |
 | ClickHouse Writer | `make test-writer` | `make lint-writer` |
 
 ### Running a single test
@@ -104,8 +102,8 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
                                               Codegen Service (Python/FastAPI :8084)
                                               → GitHub App → customer repos (autonomous PRs)
 
-Admin Console (browser) ──same-origin /api──→ Admin API (Python/FastAPI :8085)
-                                              → project-scoped credentials → core services
+Separately distributed Admin Console ──same-origin /api──→ Admin API (Python/FastAPI :8085)
+                                                           → project-scoped credentials → core services
 ```
 
 ### Data Flow
@@ -128,7 +126,7 @@ Admin Console (browser) ──same-origin /api──→ Admin API (Python/FastAP
 - **Query** (`services/query/`): Python 3.12, FastAPI, clickhouse-driver/asynch, SciPy, NumPy — uv, pytest-asyncio, ruff
 - **Agents** (`services/agents/`): Python 3.12, FastAPI, openai, anthropic, google-genai, asyncpg, pgvector — uv, pytest-asyncio, ruff
 - **Codegen** (`services/codegen/`): Python 3.12, FastAPI, asyncpg, httpx, pyjwt (GitHub App), Aider (model-agnostic editor via LiteLLM) — uv, pytest-asyncio, ruff. The "hands" of the autonomous loop: opens/merges PRs on customer repos
-- **Admin API** (`services/admin-api/`): Python 3.12, FastAPI, asyncpg, httpx — uv, pytest, ruff. Security gateway for the Admin Console: hashed sessions, CSRF/origin enforcement, login lockouts, memberships, and audited proxying to the core services
+- **Admin API** (`services/admin-api/`): Python 3.12, FastAPI, asyncpg, httpx — uv, pytest, ruff. Security gateway for the separately distributed Admin Console: hashed sessions, CSRF/origin enforcement, login lockouts, memberships, and audited proxying to the core services
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client, clickhouse-driver
 
 ### Key Ports
@@ -142,7 +140,6 @@ Admin Console (browser) ──same-origin /api──→ Admin API (Python/FastAP
 | Agents | 8083 |
 | Codegen | 8084 |
 | Admin API (console gateway) | 8085 |
-| Admin Console | 5173 |
 | Redis | 6379 |
 | ClickHouse HTTP / Native | 8123 / 9000 |
 | PostgreSQL | 5432 |

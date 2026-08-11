@@ -93,7 +93,7 @@ export APDL_CONFIG_HOST_PORT="${APDL_CONFIG_HOST_PORT:-$((SMOKE_PORT_BASE + 5))}
 export APDL_QUERY_HOST_PORT="${APDL_QUERY_HOST_PORT:-$((SMOKE_PORT_BASE + 6))}"
 export APDL_GATEWAY_HOST_PORT="${APDL_GATEWAY_HOST_PORT:-$((SMOKE_PORT_BASE + 7))}"
 export APDL_AGENTS_HOST_PORT="${APDL_AGENTS_HOST_PORT:-$((SMOKE_PORT_BASE + 8))}"
-export APDL_ADMIN_HOST_PORT="${APDL_ADMIN_HOST_PORT:-$((SMOKE_PORT_BASE + 9))}"
+export APDL_ADMIN_API_HOST_PORT="${APDL_ADMIN_API_HOST_PORT:-$((SMOKE_PORT_BASE + 9))}"
 
 COMPOSE_ARGS=(-f "$COMPOSE_FILE")
 if [ -n "${APDL_SMOKE_COMPOSE_OVERRIDE:-}" ]; then
@@ -391,7 +391,7 @@ case "${APDL_SMOKE_NO_BUILD:-false}" in
         echo "==> Pulling immutable release images without registry credentials"
         published_compose_services=(
             postgres-migrate ingestion config query clickhouse-writer
-            llm-vault admin-api admin
+            llm-vault admin-api
         )
         if [ "$smoke_all_images" = true ]; then
             published_compose_services+=(agents codegen)
@@ -454,7 +454,7 @@ compose run --rm --no-deps \
     /tmp/test_postgres_fence_owner_loss.py
 
 startup_services=(
-    ingestion config query clickhouse-writer admin-api admin gateway
+    ingestion config query clickhouse-writer admin-api gateway
 )
 if [ "$smoke_all_images" = true ]; then
     startup_services+=(agents codegen)
@@ -481,7 +481,7 @@ export APDL_GATEWAY_URL="http://127.0.0.1:$APDL_GATEWAY_HOST_PORT"
 export APDL_INGESTION_URL="http://127.0.0.1:$APDL_INGESTION_HOST_PORT"
 export APDL_CONFIG_URL="http://127.0.0.1:$APDL_CONFIG_HOST_PORT"
 export APDL_QUERY_URL="http://127.0.0.1:$APDL_QUERY_HOST_PORT"
-export APDL_ADMIN_URL="http://127.0.0.1:$APDL_ADMIN_HOST_PORT"
+export APDL_ADMIN_URL="http://127.0.0.1:$APDL_ADMIN_API_HOST_PORT"
 
 if [ "$SMOKE_SUITE" = "core" ]; then
     echo "==> Running exact-one-event core smoke"

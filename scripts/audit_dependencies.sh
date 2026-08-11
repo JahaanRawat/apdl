@@ -16,7 +16,7 @@ command -v uv >/dev/null || {
     exit 1
 }
 
-for package_dir in sdk/javascript services/admin; do
+for package_dir in sdk/javascript; do
     echo "==> Auditing $package_dir"
     (cd "$ROOT_DIR/$package_dir" && npm audit --audit-level=high)
 done

@@ -12,7 +12,6 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 
 SERVICES = (
-    "admin",
     "admin-api",
     "ingestion",
     "config",

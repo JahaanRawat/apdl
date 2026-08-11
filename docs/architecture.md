@@ -2,8 +2,9 @@
 
 > **0.3.0 developer-preview boundary:** this document describes the
 > source-built, fresh, single-node Compose runtime. Ingestion, Config, Query,
-> the Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console are the
-> supported core. Agents is an opt-in operator preview; only the Codegen API
+> the Redis-to-ClickHouse writer, Gateway, and Admin API are the supported
+> source-built core. The browser Admin Console is distributed separately.
+> Agents is an opt-in operator preview; only the Codegen API
 > control plane is a source-only offline preview. Its editor/worker and
 > publication paths are unsupported. Kubernetes, Terraform, multi-replica
 > operation, upgrades, backup, and restore are not supported. Redis Streams is
@@ -28,9 +29,8 @@ feedback cycle remains a product direction rather than a current capability.
 | Query Service | FastAPI, ClickHouse, SciPy | 8082 | Core, source-built | [README](../services/query/README.md) |
 | Agents Service | FastAPI, LLM SDKs, pgvector | 8083 | Operator preview, opt-in | [README](../services/agents/README.md) |
 | Codegen API/control plane | FastAPI, GitHub App | 8084 (internal) | Source-only offline preview; editor/worker unsupported | [README](../services/codegen/README.md) |
-| Admin API | FastAPI, Argon2id, opaque sessions | 8085 (internal) | Core, source-built | [README](../services/admin-api/README.md) |
+| Admin API | FastAPI, Argon2id, opaque sessions | 8085 | Core, source-built | [README](../services/admin-api/README.md) |
 | LLM Credential Vault | FastAPI, asyncpg, AES-256-GCM | 8086 (internal) | Core, private | [README](../services/llm-vault/README.md) |
-| Admin Console | React, Vite, nginx | 5173 | Core, source-built | [README](../services/admin/README.md) |
 | Redis-to-ClickHouse writer | Python, clickhouse-driver | — | Core, source-built | [README](../pipeline/README.md) |
 
 ## The three flows
@@ -58,7 +58,7 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
 ### 2. Flags & experiments (config path)
 
 ```
-Admin Browser ──HttpOnly session──→ Admin API ──project API key──→ Config / Query
+Separately distributed Admin Console ──HttpOnly session──→ Admin API ──project API key──→ Config / Query
 Operator preview ──→ Agents / offline Codegen
 Leased Agents execution ──60s execution capability──→ Query / Config / Codegen
 Agents ──human-approved inert draft──→ Config ──→ PostgreSQL (canonical) + Redis (60s cache)

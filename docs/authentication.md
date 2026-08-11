@@ -38,10 +38,10 @@ echoes the API key. This endpoint is not a human login system.
 
 ## Admin user sessions
 
-The Admin Console uses the separate `admin-api` backend-for-frontend. Human
-users authenticate with email and password; passwords are stored only as
-Argon2id hashes. Project membership and canonical roles live in
-`admin_user_projects`.
+The separately distributed Admin Console uses the OSS `admin-api`
+backend-for-frontend. Human users authenticate with email and password;
+passwords are stored only as Argon2id hashes. Project membership and canonical
+roles live in `admin_user_projects`.
 
 A successful login creates a random opaque session and CSRF token. PostgreSQL
 stores only their SHA-256 digests. The browser receives the session in an
@@ -105,8 +105,9 @@ creates the user and session in one transaction, but deliberately creates no
 `admin_user_projects` rows. A newly registered user is authenticated with
 `projects: []` and cannot call any project-scoped service route until an
 operator grants membership or the user creates a project from Workspace
-settings. Registration requires an exact allowed `Origin` and is rate-limited
-with login at the console proxy.
+settings. Registration requires an exact allowed `Origin` and shares the Admin
+API's application-level request budgets with login. A deployed console edge
+should add its own coarse abuse limits.
 
 An authenticated user can create a canonical project from
 `/settings/workspace`. `POST /api/projects` accepts only `{project_id}`, inserts
@@ -171,11 +172,12 @@ device. The first two failures remain the generic `401`; the third and later
 failures return the strict `auth_throttled` envelope and matching
 `Retry-After`.
 
-The Admin edge overwrites `X-Forwarded-For` with its direct peer and clears
-other forwarding headers. Uvicorn preserves the socket peer, and the
-application accepts one forwarded address only when that peer belongs to the
-explicit `APDL_ADMIN_TRUSTED_PROXY_CIDRS` JSON array. Direct peers, malformed
-addresses, and forwarded chains cannot select a different risk identity.
+A deployed console edge must overwrite `X-Forwarded-For` with the direct client
+address and clear other forwarding headers. Uvicorn preserves the socket peer,
+and the application accepts one forwarded address only when that peer belongs
+to the explicit `APDL_ADMIN_TRUSTED_PROXY_CIDRS` JSON array. The OSS Compose
+default is an empty array. Direct peers, malformed addresses, and forwarded
+chains cannot select a different risk identity.
 
 The `apdl_admin_device` cookie is a random HttpOnly, SameSite Strict risk
 signal; it is not an authentication factor. PostgreSQL receives only
@@ -303,10 +305,11 @@ consume-function owner can update only `consumed_at` through the atomic routine.
 ## Operator provision credentials
 
 Apply the PostgreSQL migrations first with `make migrate-postgres`. Generate a
-key, hash the full key, and insert only the hash. This direct SQL path is for
-operator-owned infrastructure credentials; normal project members should use
-the audited Admin Console workflow above. A confidential service credential
-declares its kind and non-secret prefix explicitly:
+key, hash the full key, and insert only the hash. This direct SQL path is the
+standalone OSS workflow for operator-owned infrastructure credentials. A
+separately distributed console can instead use the audited Admin API workflow
+above. A confidential service credential declares its kind and non-secret
+prefix explicitly:
 
 ```bash
 api_key="proj_acme_$(openssl rand -hex 24)"
@@ -384,13 +387,12 @@ disabled in the OSS developer preview.
 - Never store the plaintext key in PostgreSQL or logs.
 
 Normal local bootstrap runs only the PostgreSQL schema migrations, so the
-project and credential catalogs start empty. Register through the loopback
-Admin Console, create a project in Project management, and create reveal-once
-browser or confidential credentials there. The isolated fresh-smoke suite owns
-separate `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY` fixtures; it
-first verifies the catalogs are empty, provisions those fixtures with the
-test-only SQL under `scripts/fixtures/`, and destroys the isolated volumes when
-the suite finishes. Production deployments should set
+project and credential catalogs start empty. Provision standalone OSS
+credentials with the operator workflow above. The isolated fresh-smoke suite
+owns separate `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY`
+fixtures; it first verifies the catalogs are empty, provisions those fixtures
+with the test-only SQL under `scripts/fixtures/`, and destroys the isolated
+volumes when the suite finishes. Production deployments should set
 `APDL_SERVICE_API_KEYS` only on the Admin API and only to confidential project
 keys when persistent proxy credentials are desired. They should also assign a
 unique `APDL_AGENTS_POSTGRES_PASSWORD`, set

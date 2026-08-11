@@ -152,7 +152,7 @@ service's full environment.
 
 ---
 
-## 6. Frontend / UI XSS (SDK + admin console)
+## 6. Frontend / UI XSS (SDK and separately distributed console)
 
 The JS SDK renders **server/agent-controlled** UI configs, and those configs are attacker-
 influenceable (multi-tenant config service; LLM-generated personalization). Treat every UI

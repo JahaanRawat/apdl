@@ -44,8 +44,9 @@ disabled. The intended data flow is:
 APDL is an OSS **developer preview**, not a production release. Its
 supported deployment is a fresh, single-node, source-built Docker Compose
 installation. The supported core consists of Ingestion, Config, Query, the
-Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console, together
-with Redis, ClickHouse, and PostgreSQL.
+Redis-to-ClickHouse writer, Gateway, and Admin API, together with Redis,
+ClickHouse, and PostgreSQL. The browser Admin Console is distributed
+separately and is not part of this source release.
 
 The current release publishes exactly these installable artifacts from one
 tested revision:
@@ -70,15 +71,14 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), Docker, Node.js 20.19+, Python 
 ```bash
 git clone https://github.com/kuvera-apdl/apdl.git && cd apdl
 make setup               # dependencies + per-install local secrets
-make dev-core            # supported core + local Admin console
+make dev-core            # supported source-built backend
 ```
 
-The normal bootstrap creates no projects, users, or API credentials. Open
-<http://localhost:5173/register>, create the first local account, then create a
-project in **Workspace settings**. From that project, create reveal-once browser
-or confidential SDK credentials as needed. The example enables registration
-only for the loopback-bound local stack; disable it before exposing Admin
-outside local development.
+The normal bootstrap creates no projects, users, or API credentials. Provision
+the credentials needed by the SDK examples through the documented
+[operator workflow](docs/authentication.md#operator-provision-credentials).
+The separately distributed Admin Console uses `admin-api`; it is not built or
+served by this repository.
 
 This developer preview supports fresh, single-node databases only. Do not run
 `make dev-core` or the initialization scripts against an existing APDL
@@ -196,9 +196,8 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | `query` | 8082 | Core | Analytics queries on ClickHouse | [README](services/query/README.md) |
 | `agents` | 8083 | Operator preview | Opt-in LLM workflows; owner-enabled analysis, operator-gated effects | [README](services/agents/README.md) |
 | `codegen` | 8084 (internal) | Offline preview | Source-only; publication is disabled | [README](services/codegen/README.md) |
-| `admin-api` | 8085 (internal) | Core | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
+| `admin-api` | 8085 | Core | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
 | `llm-vault` | 8086 (internal) | Core | Shared project LLM credential custody and audited JIT access | [README](services/llm-vault/README.md) |
-| `admin` | 5173 | Core | Browser admin console | [README](services/admin/README.md) |
 | `clickhouse-writer` | — | Core | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
 | `gateway` | 8000 | Local development | nginx routing for the source-built stack; not production ingress | [Compose](infra/docker/docker-compose.yml) |
 | `redis` | 6379 | Core dependency | Event streams + cache | — |

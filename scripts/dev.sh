@@ -31,13 +31,13 @@ INGESTION_HOST_PORT="${APDL_INGESTION_HOST_PORT:-$(env_file_value APDL_INGESTION
 CONFIG_HOST_PORT="${APDL_CONFIG_HOST_PORT:-$(env_file_value APDL_CONFIG_HOST_PORT)}"
 QUERY_HOST_PORT="${APDL_QUERY_HOST_PORT:-$(env_file_value APDL_QUERY_HOST_PORT)}"
 AGENTS_HOST_PORT="${APDL_AGENTS_HOST_PORT:-$(env_file_value APDL_AGENTS_HOST_PORT)}"
-ADMIN_HOST_PORT="${APDL_ADMIN_HOST_PORT:-$(env_file_value APDL_ADMIN_HOST_PORT)}"
+ADMIN_API_HOST_PORT="${APDL_ADMIN_API_HOST_PORT:-$(env_file_value APDL_ADMIN_API_HOST_PORT)}"
 GATEWAY_HOST_PORT="${APDL_GATEWAY_HOST_PORT:-$(env_file_value APDL_GATEWAY_HOST_PORT)}"
 INGESTION_HOST_PORT="${INGESTION_HOST_PORT:-8080}"
 CONFIG_HOST_PORT="${CONFIG_HOST_PORT:-8081}"
 QUERY_HOST_PORT="${QUERY_HOST_PORT:-8082}"
 AGENTS_HOST_PORT="${AGENTS_HOST_PORT:-8083}"
-ADMIN_HOST_PORT="${ADMIN_HOST_PORT:-5173}"
+ADMIN_API_HOST_PORT="${ADMIN_API_HOST_PORT:-8085}"
 GATEWAY_HOST_PORT="${GATEWAY_HOST_PORT:-8000}"
 
 # Compose wrappers that load the repo-root .env. With `-f` pointing into
@@ -139,8 +139,6 @@ cmd_setup() {
 
     info "Setting up JavaScript SDK"
     (cd "$ROOT_DIR/sdk/javascript" && npm install --silent)
-    info "Setting up Admin Console"
-    (cd "$ROOT_DIR/services/admin" && npm install --silent)
     ok "Installed npm dependencies"
 
     cmd_up
@@ -276,10 +274,10 @@ cmd_status() {
     else
         info "Codegen disabled (opt in with scripts/dev.sh up-full or make dev-all; publication stays offline)"
     fi
-    if compose_service_exists admin || compose_service_exists admin-api; then
-        check_health "Admin API" "http://localhost:$ADMIN_HOST_PORT/api/ready" || failures=$((failures+1))
+    if compose_service_exists admin-api; then
+        check_health "Admin API" "http://localhost:$ADMIN_API_HOST_PORT/api/ready" || failures=$((failures+1))
     else
-        info "Admin console not started"
+        info "Admin API not started"
     fi
     [ "$failures" -eq 0 ] || warn "$failures required/enabled service(s) unhealthy — are they running? (scripts/dev.sh up-core)"
     [ "$failures" -eq 0 ]

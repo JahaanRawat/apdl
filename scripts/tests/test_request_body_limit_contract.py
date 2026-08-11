@@ -335,39 +335,6 @@ class NginxRequestBodyLimitContractTests(unittest.TestCase):
         )
         self._assert_canonical_413_location(error_location)
 
-    def test_admin_edge_matches_the_admin_api_2_mib_limit(self) -> None:
-        config = (ROOT / "services" / "admin" / "nginx.conf").read_text(
-            encoding="utf-8"
-        )
-        server_prefix = config.split("location ", 1)[0]
-        auth_location = config.split(
-            "location ~ ^/api/auth/(login|register)$ {",
-            1,
-        )[1].split("\n    }", 1)[0]
-        api_location = config.split(
-            "location /api/ {",
-            1,
-        )[1].split("\n    }", 1)[0]
-        error_location = config.split(
-            "location @payload_too_large {",
-            1,
-        )[1].split("\n    }", 1)[0]
-
-        self.assertIn("client_max_body_size 2m;", server_prefix)
-        self.assertIn(
-            "error_page 413 = @payload_too_large;",
-            server_prefix,
-        )
-        self.assertIn(
-            "error_page 413 = @payload_too_large;",
-            auth_location,
-        )
-        self.assertIn(
-            "error_page 413 = @payload_too_large;",
-            api_location,
-        )
-        self._assert_canonical_413_location(error_location)
-
     def _assert_canonical_413_location(self, location: str) -> None:
         canonical_json = json.dumps(CANONICAL_413, separators=(",", ":"))
 

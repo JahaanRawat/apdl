@@ -92,7 +92,6 @@ class MigrationQuiescenceTests(unittest.TestCase):
             "codegen",
             "clickhouse-writer",
             "admin-api",
-            "admin",
             "gateway",
         ):
             self.assertIn(f"--service {service}", POSTGRES_INIT)

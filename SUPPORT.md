@@ -31,9 +31,12 @@ The supported core is:
 
 - Ingestion, Config, and Query;
 - the Redis-to-ClickHouse writer;
-- Admin API and Admin Console;
+- Admin API;
 - the local-development Gateway; and
 - Redis, ClickHouse, PostgreSQL, and the checked-in fresh-install migrations.
+
+The browser Admin Console is distributed separately and is not an OSS source
+artifact or a supported component of this repository.
 
 `make smoke-fresh` is the release's canonical installation proof. The Gateway
 and default credentials/configuration are for isolated local development and

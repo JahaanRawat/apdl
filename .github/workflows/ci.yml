@@ -46,55 +46,6 @@ jobs:
       - run: npm run lint:package
         working-directory: sdk/javascript
 
-  admin-console:
-    name: Admin Console
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: services/admin/package-lock.json
-      - run: npm ci
-        working-directory: services/admin
-      - run: npm audit --audit-level=high
-        working-directory: services/admin
-      - run: npm run lint
-        working-directory: services/admin
-      - name: Test with coverage thresholds
-        run: npm run test:coverage
-        working-directory: services/admin
-      - name: Enforce changed-file coverage
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          COVERAGE_BASE: origin/${{ github.base_ref }}
-        run: npm run test:coverage:changed
-        working-directory: services/admin
-      - run: npm run build
-        working-directory: services/admin
-      - name: Enforce Admin bundle size budget
-        run: npm run check:bundle-size
-        working-directory: services/admin
-      - name: Upload full Admin coverage
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: admin-coverage-full
-          path: services/admin/coverage/full
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload changed-file Admin coverage
-        if: ${{ always() && github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: admin-coverage-changed
-          path: services/admin/coverage/changed
-          if-no-files-found: error
-          retention-days: 14
-
   admin-api:
     name: Admin API
     runs-on: ubuntu-latest

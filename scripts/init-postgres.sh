@@ -97,7 +97,6 @@ quiescence_args=(
     --service codegen
     --service clickhouse-writer
     --service admin-api
-    --service admin
     --service gateway
 )
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/scripts/migration_quiescence.py" \

@@ -304,6 +304,7 @@ class HealthContractTests(unittest.TestCase):
                     "capabilities": {
                         "agents": "not_ready",
                         "codegen": "not_ready",
+                        "llm-vault": "ready",
                     },
                 },
             ),

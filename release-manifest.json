@@ -19,13 +19,6 @@
   },
   "docker_images": [
     {
-      "name": "admin",
-      "repository": "ghcr.io/kuvera-apdl/apdl-admin",
-      "context": "services/admin",
-      "dockerfile": "services/admin/Dockerfile",
-      "build_args": []
-    },
-    {
       "name": "admin-api",
       "repository": "ghcr.io/kuvera-apdl/apdl-admin-api",
       "context": "services/admin-api",

@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -67,8 +67,6 @@ lint-staged:
 deps:
 	@echo "==> Installing SDK dependencies"
 	cd sdk/javascript && npm install
-	@echo "==> Installing Admin Console dependencies"
-	cd services/admin && npm install
 	@echo "==> Setting up Admin API"
 	cd services/admin-api && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Ingestion service"
@@ -88,13 +86,13 @@ deps:
 	@echo "==> Setting up Python SDK"
 	cd sdk/python && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 
-build: build-sdk build-admin
+build: build-sdk
 
-test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-llm-vault test-codegen test-writer test-admin-api test-admin
+test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-llm-vault test-codegen test-writer test-admin-api
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-llm-vault lint-codegen lint-writer lint-admin-api lint-admin
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-llm-vault lint-codegen lint-writer lint-admin-api
 
-clean: clean-sdk clean-admin
+clean: clean-sdk
 
 # Parallel local CI mirror: lint + test every package at once.
 check:
@@ -138,24 +136,6 @@ verify-release:
 
 test-packed-python-sdk:
 	./scripts/test-packed-python-sdk.sh
-
-# ─── Admin Console (TypeScript) ──────────────────────────────
-
-run-admin:
-	$(HOST_SERVICE_RUNNER) --service admin \
-		--working-directory services/admin -- npm run dev
-
-build-admin:
-	cd services/admin && npm run build
-
-test-admin:
-	cd services/admin && npm test
-
-lint-admin:
-	cd services/admin && npm run lint
-
-clean-admin:
-	rm -rf services/admin/dist services/admin/node_modules
 
 # ─── Admin API (Python) ─────────────────────────────────────
 
@@ -426,13 +406,13 @@ dev:
 
 dev-core:
 	$(COMPOSE) --profile agents --profile codegen stop -t 30 \
-		ingestion config query llm-vault agents codegen clickhouse-writer admin-api admin gateway
+		ingestion config query llm-vault agents codegen clickhouse-writer admin-api gateway
 	$(COMPOSE) --profile agents --profile codegen rm -f -s agents codegen
 	$(COMPOSE) up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)
 	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=$(COMPOSE_FILE)
 	$(COMPOSE) up -d --build --wait --wait-timeout 120 \
-		ingestion config query clickhouse-writer admin-api admin gateway
+		ingestion config query clickhouse-writer admin-api gateway
 	@echo "==> Core development stack is ready"
 	@echo "    Agents and Codegen are stopped; run make dev-all to opt into their offline services."
 

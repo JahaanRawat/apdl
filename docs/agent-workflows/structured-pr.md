@@ -24,7 +24,7 @@ git branch --show-current
 git diff -- <path> [<path> ...]
 
 # Phase 1 - run lint/tests for the touched area before committing
-make lint-<area>   # e.g. lint-config, lint-sdk, lint-admin
+make lint-<area>   # e.g. lint-config, lint-sdk, lint-admin-api
 # and, for non-trivial changes, the matching tests
 make test-<area>
 
@@ -77,7 +77,6 @@ matching `make test-<area>` target when the change is non-trivial:
 | `services/agents/` | `make lint-agents` | `make test-agents` |
 | `services/codegen/` | `make lint-codegen` | `make test-codegen` |
 | `services/admin-api/` | `make lint-admin-api` | `make test-admin-api` |
-| `services/admin/` | `make lint-admin` | `make test-admin` |
 | `sdk/javascript/` | `make lint-sdk` | `make test-sdk` |
 | `sdk/python/` | `make lint-sdk-python` | `make test-sdk-python` |
 | `pipeline/redis/` | `make lint-writer` | `make test-writer` |
@@ -85,7 +84,7 @@ matching `make test-<area>` target when the change is non-trivial:
 CI on push/PR to `main` lints (`ruff`) and tests (`pytest`) all six Python
 services — `ingestion`, `config`, `query`, `agents`, `codegen` (source-only
 checks), and `admin-api` — plus the Python SDK and the ClickHouse writer;
-lints, tests, and builds the JS SDK and the Admin Console; and runs release
+lints, tests, and builds the JS SDK; and runs release
 package contracts, a Python dependency audit, hermetic fresh-install
 core/experiment smokes, and a pinned-image ClickHouse upgrade smoke. Fix lint/test failures before
 proceeding. Do not open a PR with a red diff unless the user explicitly

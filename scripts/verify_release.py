@@ -27,13 +27,6 @@ OCI_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
 
 EXPECTED_DOCKER_IMAGES = [
     {
-        "name": "admin",
-        "repository": "ghcr.io/kuvera-apdl/apdl-admin",
-        "context": "services/admin",
-        "dockerfile": "services/admin/Dockerfile",
-        "build_args": [],
-    },
-    {
         "name": "admin-api",
         "repository": "ghcr.io/kuvera-apdl/apdl-admin-api",
         "context": "services/admin-api",
