@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal
@@ -15,7 +15,9 @@ from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from app.client_identity import resolve_client_ip
 from app.config import GatewaySettings
+from app.rate_limit import FixedWindowRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +89,15 @@ def _error_response(
     code: str,
     message: str,
     request_id: str,
+    retry_after_seconds: int | None = None,
 ) -> JSONResponse:
+    headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "X-Request-ID": request_id,
+    }
+    if retry_after_seconds is not None:
+        headers["Retry-After"] = str(retry_after_seconds)
     return JSONResponse(
         status_code=status_code,
         content={
@@ -96,11 +106,7 @@ def _error_response(
             "message": message,
             "request_id": request_id,
         },
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "X-Request-ID": request_id,
-        },
+        headers=headers,
     )
 
 
@@ -188,6 +194,7 @@ def _upstream_headers(
     request: Request,
     *,
     request_id: str,
+    client_ip: str | None,
     public_scheme: str,
     public_host: str,
 ) -> list[tuple[str, str]]:
@@ -202,8 +209,8 @@ def _upstream_headers(
     headers.append(("X-Request-ID", request_id))
     headers.append(("X-Forwarded-Host", public_host))
     headers.append(("X-Forwarded-Proto", public_scheme))
-    if request.client is not None:
-        headers.append(("X-Forwarded-For", request.client.host))
+    if client_ip is not None:
+        headers.append(("X-Forwarded-For", client_ip))
     return headers
 
 
@@ -262,6 +269,20 @@ async def gateway(request: Request) -> Response:
             request_id=request_id,
         )
 
+    client_ip = resolve_client_ip(request, settings.trusted_proxy_cidrs)
+    if route.name == "admin-api" and request.method != "OPTIONS":
+        retry_after = await request.app.state.api_rate_limiter.retry_after(
+            client_ip or "unknown"
+        )
+        if retry_after:
+            return _error_response(
+                status_code=429,
+                code="rate_limited",
+                message="Too many requests. Try again later.",
+                request_id=request_id,
+                retry_after_seconds=retry_after,
+            )
+
     try:
         body = await _bounded_body(request, route.max_body_bytes)
     except RequestBodyTooLarge:
@@ -290,6 +311,7 @@ async def gateway(request: Request) -> Response:
         headers=_upstream_headers(
             request,
             request_id=request_id,
+            client_ip=client_ip,
             public_scheme=settings.public_scheme,
             public_host=public_host,
         ),
@@ -346,8 +368,15 @@ def create_app(
     settings: GatewaySettings | None = None,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    rate_limit_clock: Callable[[], float] | None = None,
 ) -> Starlette:
     resolved = settings or GatewaySettings.from_env()
+    api_rate_limiter = FixedWindowRateLimiter(
+        request_limit=resolved.api_rate_limit,
+        window_seconds=resolved.api_rate_window_seconds,
+        max_clients=resolved.api_rate_max_clients,
+        clock=rate_limit_clock,
+    )
     limits = httpx.Limits(
         max_connections=resolved.max_connections,
         max_keepalive_connections=resolved.max_keepalive_connections,
@@ -390,6 +419,7 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.settings = resolved
+    application.state.api_rate_limiter = api_rate_limiter
     return application
 
 

@@ -424,7 +424,7 @@ services:
       APDL_DEPLOYMENT_ID: ${APDL_DEPLOYMENT_ID:-}
       APDL_DISPLAY_NAME: ${APDL_DISPLAY_NAME:-Local APDL}
       APDL_ADMIN_MAX_PROJECTS_PER_USER: ${APDL_ADMIN_MAX_PROJECTS_PER_USER:-5}
-      APDL_ADMIN_TRUSTED_PROXY_CIDRS: '${APDL_ADMIN_TRUSTED_PROXY_CIDRS:-[]}'
+      APDL_ADMIN_TRUSTED_PROXY_CIDRS: '["172.30.255.3/32"]'
       APDL_ADMIN_LOGIN_RISK_HMAC_KEY: ${APDL_ADMIN_LOGIN_RISK_HMAC_KEY:-local-admin-login-risk-key-change-me}
       APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS: ${APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS:-5}
       APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS: ${APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS:-60}
@@ -453,6 +453,12 @@ services:
         condition: service_healthy
       llm-vault:
         condition: service_healthy
+    networks:
+      default:
+      admin-gateway:
+        ipv4_address: 172.30.255.2
+        aliases:
+          - admin-api-gateway
 
   # Gateway — the only browser-visible backend boundary. It preserves /api/*
   # for the Admin API and retains the three registered SDK routes. It never
@@ -464,11 +470,24 @@ services:
     ports:
       - "127.0.0.1:${APDL_GATEWAY_HOST_PORT:-8000}:8000"
     environment:
-      ADMIN_API_URL: http://admin-api:8085
+      ADMIN_API_URL: http://admin-api-gateway:8085
       INGESTION_SERVICE_URL: http://ingestion:8080
       CONFIG_SERVICE_URL: http://config:8081
       APDL_GATEWAY_ALLOWED_HOSTS: '${APDL_GATEWAY_ALLOWED_HOSTS:-["localhost:8000"]}'
+      APDL_GATEWAY_TRUSTED_PROXY_CIDRS: '${APDL_GATEWAY_TRUSTED_PROXY_CIDRS:-[]}'
       APDL_GATEWAY_PUBLIC_SCHEME: ${APDL_GATEWAY_PUBLIC_SCHEME:-http}
+      APDL_GATEWAY_MAX_REQUEST_BYTES: ${APDL_GATEWAY_MAX_REQUEST_BYTES:-2097152}
+      APDL_GATEWAY_MAX_EVENT_BYTES: ${APDL_GATEWAY_MAX_EVENT_BYTES:-524288}
+      APDL_GATEWAY_CONNECT_TIMEOUT_SECONDS: ${APDL_GATEWAY_CONNECT_TIMEOUT_SECONDS:-5}
+      APDL_GATEWAY_READ_TIMEOUT_SECONDS: ${APDL_GATEWAY_READ_TIMEOUT_SECONDS:-60}
+      APDL_GATEWAY_STREAM_READ_TIMEOUT_SECONDS: ${APDL_GATEWAY_STREAM_READ_TIMEOUT_SECONDS:-3600}
+      APDL_GATEWAY_WRITE_TIMEOUT_SECONDS: ${APDL_GATEWAY_WRITE_TIMEOUT_SECONDS:-30}
+      APDL_GATEWAY_POOL_TIMEOUT_SECONDS: ${APDL_GATEWAY_POOL_TIMEOUT_SECONDS:-5}
+      APDL_GATEWAY_MAX_CONNECTIONS: ${APDL_GATEWAY_MAX_CONNECTIONS:-100}
+      APDL_GATEWAY_MAX_KEEPALIVE_CONNECTIONS: ${APDL_GATEWAY_MAX_KEEPALIVE_CONNECTIONS:-20}
+      APDL_GATEWAY_API_RATE_LIMIT: ${APDL_GATEWAY_API_RATE_LIMIT:-300}
+      APDL_GATEWAY_API_RATE_WINDOW_SECONDS: ${APDL_GATEWAY_API_RATE_WINDOW_SECONDS:-60}
+      APDL_GATEWAY_API_RATE_MAX_CLIENTS: ${APDL_GATEWAY_API_RATE_MAX_CLIENTS:-10000}
     healthcheck:
       test:
         [
@@ -487,8 +506,20 @@ services:
         condition: service_healthy
       admin-api:
         condition: service_healthy
+    networks:
+      default:
+      admin-gateway:
+        ipv4_address: 172.30.255.3
 
 volumes:
   redis-data:
   clickhouse-data:
   postgres-data:
+
+networks:
+  default:
+  admin-gateway:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.255.0/29

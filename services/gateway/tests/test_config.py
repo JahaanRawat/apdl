@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+
 import pytest
 
 from app.config import GatewaySettings
@@ -12,9 +14,13 @@ def test_defaults_are_local_and_bounded() -> None:
     assert settings.ingestion_origin == "http://ingestion:8080"
     assert settings.config_origin == "http://config:8081"
     assert settings.allowed_hosts == frozenset({"localhost:8000"})
+    assert settings.trusted_proxy_cidrs == ()
     assert settings.max_event_body_bytes == 512 * 1024
     assert settings.max_request_body_bytes == 2 * 1024 * 1024
     assert settings.stream_read_timeout_seconds >= settings.read_timeout_seconds
+    assert settings.api_rate_limit == 300
+    assert settings.api_rate_window_seconds == 60
+    assert settings.api_rate_max_clients == 10_000
 
 
 @pytest.mark.parametrize(
@@ -50,6 +56,38 @@ def test_hosted_origin_and_exact_host_are_configurable() -> None:
 
     assert settings.allowed_hosts == frozenset({"backend.example.com"})
     assert settings.public_scheme == "https"
+
+
+def test_trusted_proxy_networks_are_exact_and_canonical() -> None:
+    settings = GatewaySettings.from_env(
+        {
+            "APDL_GATEWAY_TRUSTED_PROXY_CIDRS": (
+                '["192.0.2.9/32","2001:db8::/64"]'
+            )
+        }
+    )
+
+    assert settings.trusted_proxy_cidrs == (
+        ipaddress.ip_network("192.0.2.9/32"),
+        ipaddress.ip_network("2001:db8::/64"),
+    )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not-json",
+        "{}",
+        '["192.0.2.9"]',
+        '["192.0.2.9/24"]',
+        '["2001:0db8::/64"]',
+        '["192.0.2.9/32", "192.0.2.9/32"]',
+        '["not-a-network"]',
+    ],
+)
+def test_trusted_proxy_networks_reject_ambiguous_values(raw: str) -> None:
+    with pytest.raises(ValueError, match="TRUSTED_PROXY_CIDRS"):
+        GatewaySettings.from_env({"APDL_GATEWAY_TRUSTED_PROXY_CIDRS": raw})
 
 
 @pytest.mark.parametrize(
@@ -90,3 +128,18 @@ def test_related_limits_are_consistent() -> None:
                 "APDL_GATEWAY_STREAM_READ_TIMEOUT_SECONDS": "59",
             }
         )
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "APDL_GATEWAY_API_RATE_LIMIT",
+        "APDL_GATEWAY_API_RATE_WINDOW_SECONDS",
+        "APDL_GATEWAY_API_RATE_MAX_CLIENTS",
+    ],
+)
+def test_rate_limit_bounds_must_be_positive_integers(name: str) -> None:
+    with pytest.raises(ValueError):
+        GatewaySettings.from_env({name: "0"})
+    with pytest.raises(ValueError):
+        GatewaySettings.from_env({name: "1.5"})

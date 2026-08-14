@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
 import os
@@ -12,6 +13,9 @@ from urllib.parse import urlsplit
 
 DEFAULT_MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_EVENT_BODY_BYTES = 512 * 1024
+DEFAULT_API_RATE_LIMIT = 300
+DEFAULT_API_RATE_WINDOW_SECONDS = 60
+DEFAULT_API_RATE_MAX_CLIENTS = 10_000
 _HOST_PATTERN = re.compile(
     r"^(?:localhost:\d{1,5}|"
     r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
@@ -94,12 +98,41 @@ def _allowed_hosts(environment: Mapping[str, str]) -> frozenset[str]:
     return frozenset(hosts)
 
 
+def _trusted_proxy_cidrs(
+    environment: Mapping[str, str],
+) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    name = "APDL_GATEWAY_TRUSTED_PROXY_CIDRS"
+    raw = environment.get(name, "[]")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be a JSON array") from exc
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ValueError(f"{name} must be a JSON string array")
+
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    for item in value:
+        try:
+            network = ipaddress.ip_network(item, strict=True)
+        except ValueError as exc:
+            raise ValueError(f"{name} contains an invalid network") from exc
+        if item != str(network) or network in networks:
+            raise ValueError(f"{name} must contain unique canonical networks")
+        networks.append(network)
+    return tuple(networks)
+
+
 @dataclass(frozen=True)
 class GatewaySettings:
     admin_api_origin: str
     ingestion_origin: str
     config_origin: str
     allowed_hosts: frozenset[str]
+    trusted_proxy_cidrs: tuple[
+        ipaddress.IPv4Network | ipaddress.IPv6Network, ...
+    ]
     public_scheme: str
     max_request_body_bytes: int
     max_event_body_bytes: int
@@ -110,6 +143,9 @@ class GatewaySettings:
     pool_timeout_seconds: float
     max_connections: int
     max_keepalive_connections: int
+    api_rate_limit: int
+    api_rate_window_seconds: int
+    api_rate_max_clients: int
 
     @classmethod
     def from_env(
@@ -138,6 +174,7 @@ class GatewaySettings:
                 "http://config:8081",
             ),
             allowed_hosts=_allowed_hosts(values),
+            trusted_proxy_cidrs=_trusted_proxy_cidrs(values),
             public_scheme=public_scheme,
             max_request_body_bytes=_positive_int(
                 values,
@@ -183,6 +220,21 @@ class GatewaySettings:
                 values,
                 "APDL_GATEWAY_MAX_KEEPALIVE_CONNECTIONS",
                 "20",
+            ),
+            api_rate_limit=_positive_int(
+                values,
+                "APDL_GATEWAY_API_RATE_LIMIT",
+                str(DEFAULT_API_RATE_LIMIT),
+            ),
+            api_rate_window_seconds=_positive_int(
+                values,
+                "APDL_GATEWAY_API_RATE_WINDOW_SECONDS",
+                str(DEFAULT_API_RATE_WINDOW_SECONDS),
+            ),
+            api_rate_max_clients=_positive_int(
+                values,
+                "APDL_GATEWAY_API_RATE_MAX_CLIENTS",
+                str(DEFAULT_API_RATE_MAX_CLIENTS),
             ),
         )
         if settings.max_event_body_bytes > settings.max_request_body_bytes:

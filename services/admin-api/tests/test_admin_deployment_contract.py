@@ -25,8 +25,7 @@ def test_compose_keeps_admin_api_internal_behind_the_gateway() -> None:
     )[0]
 
     assert (
-        "APDL_ADMIN_TRUSTED_PROXY_CIDRS: "
-        "'${APDL_ADMIN_TRUSTED_PROXY_CIDRS:-[]}'"
+        'APDL_ADMIN_TRUSTED_PROXY_CIDRS: \'["172.30.255.3/32"]\''
         in admin_service
     )
     assert '    expose:\n      - "8085"' in admin_service

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
@@ -26,11 +27,17 @@ async def gateway_client(
     upstream: httpx.AsyncBaseTransport,
     *,
     configured: GatewaySettings | None = None,
+    client_address: tuple[str, int] = ("127.0.0.1", 1234),
+    rate_limit_clock: Callable[[], float] | None = None,
 ) -> AsyncIterator[httpx.AsyncClient]:
-    app = create_app(configured or settings(), transport=upstream)
+    app = create_app(
+        configured or settings(),
+        transport=upstream,
+        rate_limit_clock=rate_limit_clock,
+    )
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
+            transport=httpx.ASGITransport(app=app, client=client_address),
             base_url="http://localhost:8000",
             headers={"Host": "localhost:8000"},
         ) as client:
@@ -95,6 +102,183 @@ async def test_api_path_query_and_required_headers_are_preserved() -> None:
     assert response.headers["x-request-id"] == REQUEST_ID
     assert "set-cookie" not in response.headers
     assert "x-upstream-hop" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_api_rate_limit_is_canonical_and_sdk_routes_are_independent() -> None:
+    calls: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(204)
+
+    configured = settings(
+        api_rate_limit=1,
+        api_rate_window_seconds=17,
+        api_rate_max_clients=10,
+    )
+    async with gateway_client(
+        httpx.MockTransport(upstream),
+        configured=configured,
+        rate_limit_clock=lambda: 100.0,
+    ) as client:
+        first_sdk = await client.get("/v1/flags")
+        allowed = await client.get(
+            "/api/console/v1/manifest",
+            headers={"X-Request-ID": REQUEST_ID},
+        )
+        limited = await client.get(
+            "/api/console/v1/session",
+            headers={"X-Request-ID": REQUEST_ID},
+        )
+        second_sdk = await client.get("/v1/flags")
+
+    assert first_sdk.status_code == second_sdk.status_code == 204
+    assert allowed.status_code == 204
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"] == "17"
+    assert limited.headers["x-request-id"] == REQUEST_ID
+    assert limited.json() == {
+        "schema_version": "error@1",
+        "code": "rate_limited",
+        "message": "Too many requests. Try again later.",
+        "request_id": REQUEST_ID,
+    }
+    assert calls == [
+        "/v1/flags",
+        "/api/console/v1/manifest",
+        "/v1/flags",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_options_does_not_consume_the_future_cors_actual_request_budget() -> (
+    None
+):
+    calls: list[str] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        return httpx.Response(204)
+
+    configured = settings(
+        api_rate_limit=1,
+        api_rate_window_seconds=60,
+        api_rate_max_clients=10,
+    )
+    async with gateway_client(
+        httpx.MockTransport(upstream),
+        configured=configured,
+    ) as client:
+        options = await client.options("/api/console/v1/session")
+        allowed = await client.get("/api/console/v1/session")
+        limited = await client.get("/api/console/v1/session")
+
+    assert options.status_code == allowed.status_code == 204
+    assert limited.status_code == 429
+    assert calls.count("GET") == 1
+
+
+@pytest.mark.asyncio
+async def test_trusted_forwarded_client_is_canonical_and_drives_rate_limit() -> None:
+    forwarded: list[list[str]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        forwarded.append(request.headers.get_list("x-forwarded-for"))
+        return httpx.Response(204)
+
+    configured = settings(
+        trusted_proxy_cidrs=(ipaddress.ip_network("127.0.0.1/32"),),
+        api_rate_limit=1,
+        api_rate_window_seconds=60,
+        api_rate_max_clients=10,
+    )
+    async with gateway_client(
+        httpx.MockTransport(upstream),
+        configured=configured,
+    ) as client:
+        first = await client.get(
+            "/api/health",
+            headers={"X-Forwarded-For": "203.0.113.9"},
+        )
+        independent = await client.get(
+            "/api/health",
+            headers={"X-Forwarded-For": "2001:0db8:0:0::5"},
+        )
+        limited = await client.get(
+            "/api/health",
+            headers={"X-Forwarded-For": "203.0.113.9"},
+        )
+
+    assert first.status_code == independent.status_code == 204
+    assert limited.status_code == 429
+    assert forwarded == [["203.0.113.9"], ["2001:db8::5"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "forwarded_headers",
+    [
+        [("X-Forwarded-For", "203.0.113.9, 198.51.100.7")],
+        [
+            ("X-Forwarded-For", "203.0.113.9"),
+            ("X-Forwarded-For", "198.51.100.7"),
+        ],
+        [("X-Forwarded-For", "not-an-ip")],
+        [("X-Forwarded-For", "fe80::1%25eth0")],
+    ],
+)
+async def test_ambiguous_forwarding_never_reaches_admin_as_a_chain(
+    forwarded_headers: list[tuple[str, str]],
+) -> None:
+    seen: list[list[str]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get_list("x-forwarded-for"))
+        return httpx.Response(204)
+
+    configured = settings(
+        trusted_proxy_cidrs=(ipaddress.ip_network("127.0.0.1/32"),)
+    )
+    async with gateway_client(
+        httpx.MockTransport(upstream),
+        configured=configured,
+    ) as client:
+        response = await client.get("/api/health", headers=forwarded_headers)
+
+    assert response.status_code == 204
+    assert seen == [["127.0.0.1"]]
+
+
+@pytest.mark.asyncio
+async def test_untrusted_peer_cannot_rotate_spoofed_rate_limit_identities() -> None:
+    seen: list[list[str]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get_list("x-forwarded-for"))
+        return httpx.Response(204)
+
+    configured = settings(
+        api_rate_limit=1,
+        api_rate_window_seconds=60,
+        api_rate_max_clients=10,
+    )
+    async with gateway_client(
+        httpx.MockTransport(upstream),
+        configured=configured,
+    ) as client:
+        allowed = await client.get(
+            "/api/health",
+            headers={"X-Forwarded-For": "203.0.113.9"},
+        )
+        limited = await client.get(
+            "/api/health",
+            headers={"X-Forwarded-For": "198.51.100.7"},
+        )
+
+    assert allowed.status_code == 204
+    assert limited.status_code == 429
+    assert seen == [["127.0.0.1"]]
 
 
 @pytest.mark.asyncio
