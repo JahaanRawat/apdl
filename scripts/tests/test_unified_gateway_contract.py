@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -30,7 +31,9 @@ class UnifiedGatewayDeploymentTests(unittest.TestCase):
             "config": "8081",
             "query": "8082",
             "agents": "8083",
+            "codegen": "8084",
             "admin-api": "8085",
+            "llm-vault": "8086",
         }.items():
             block = _service_block(service)
             with self.subTest(service=service):
@@ -129,6 +132,33 @@ class UnifiedGatewayDeploymentTests(unittest.TestCase):
             self.assertIn(f"  {service}:\n", overlay)
         self.assertNotIn("  gateway:\n", overlay)
         self.assertNotIn("0.0.0.0", overlay)
+
+    def test_release_contains_no_console_ui_or_compiled_gateway_assets(self) -> None:
+        paths = set(
+            subprocess.run(
+                ["git", "ls-files"],
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+        )
+        for prefix in (
+            "console/",
+            "admin-console/",
+            "services/console/",
+            "services/admin-console/",
+        ):
+            self.assertFalse(any(path.startswith(prefix) for path in paths))
+
+        compiled_suffixes = {".css", ".html", ".js", ".map", ".wasm"}
+        for path in paths:
+            if path.startswith(("services/gateway/", "services/admin-api/")):
+                self.assertNotIn(Path(path).suffix, compiled_suffixes, path)
+
+        manifest = json.loads((ROOT / "release-manifest.json").read_text())
+        image_names = {image["name"] for image in manifest["docker_images"]}
+        self.assertFalse(image_names & {"console", "admin-console", "console-ui"})
 
 
 if __name__ == "__main__":

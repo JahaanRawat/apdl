@@ -78,7 +78,8 @@ The normal bootstrap creates no projects, users, or API credentials. Provision
 the credentials needed by the SDK examples through the documented
 [operator workflow](docs/authentication.md#operator-provision-credentials).
 The separately distributed Admin Console uses `admin-api`; it is not built or
-served by this repository.
+served by this repository. Connect it through the unified gateway using the
+[Direct Console backend setup and release proof](docs/direct-console-backend.md).
 
 This developer preview supports fresh, single-node databases only. Do not run
 `make dev-core` or the initialization scripts against an existing APDL

@@ -52,3 +52,7 @@ owned only for `/api/*`; exact matches receive the fixed console policy and
 unauthenticated preflight handling, while `/v1/*` retains its independent SDK
 behavior. Wildcards, regexes, suffix matching, `null`, and credentialed or
 path-bearing origins fail closed.
+
+Release and deployment instructions, including the credential-safe manifest,
+session, SSE, logout, CORS, and routing verifier, are documented in
+[Direct Console backend setup](../../docs/direct-console-backend.md).
