@@ -575,6 +575,30 @@ async def test_only_registered_sdk_routes_reach_the_expected_service(
 
 
 @pytest.mark.asyncio
+async def test_canonical_console_stream_uses_long_read_timeout_without_negotiation() -> (
+    None
+):
+    seen_read_timeout: float | None = None
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_read_timeout
+        seen_read_timeout = request.extensions["timeout"]["read"]
+        return httpx.Response(204)
+
+    configured = settings(
+        read_timeout_seconds=2.0,
+        stream_read_timeout_seconds=123.0,
+    )
+    async with gateway_client(
+        httpx.MockTransport(upstream), configured=configured
+    ) as client:
+        response = await client.get("/api/projects/demo/config/v1/stream")
+
+    assert response.status_code == 204
+    assert seen_read_timeout == 123.0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "path",
     [
@@ -890,8 +914,8 @@ async def test_api_sse_is_cors_enabled_and_delivered_incrementally() -> None:
         "http_version": "1.1",
         "method": "GET",
         "scheme": "http",
-        "path": "/api/projects/demo/config/v1/admin/stream",
-        "raw_path": b"/api/projects/demo/config/v1/admin/stream",
+        "path": "/api/projects/demo/config/v1/stream",
+        "raw_path": b"/api/projects/demo/config/v1/stream",
         "query_string": b"",
         "root_path": "",
         "headers": [

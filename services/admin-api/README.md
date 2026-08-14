@@ -14,9 +14,10 @@ or rotation, and every request is authorized against a user, project, and role.
 - Sessions have one fixed absolute expiry. Logout and password reprovisioning
   revoke server-side sessions.
 - Long-lived SSE connections independently re-check the session, current project
-  membership, and exact required role every five seconds. Session loss emits
-  `auth_expired`; project or role loss emits `project_access_revoked`. Registry
-  failures close the stream fail-closed.
+  membership, and exact required role every five seconds. Authority loss emits
+  one strict `console_stream_control@1` event and closes; the next bearer
+  reconnect receives `401` for session loss or `403` for project/role loss.
+  Registry failures also emit the strict control shape and close fail-closed.
 - Five consecutive failures lock an account for 15 minutes by default. Login
   failures use one generic response to avoid user enumeration.
 - Browser self-registration is absent from console API version 1. Operators

@@ -42,6 +42,20 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
     }
 )
 _MAX_RETRY_AFTER_LENGTH = 128
+_CONSOLE_CONFIG_STREAM = ("config", "GET", "/v1/stream")
+_PROJECT_SCOPE_QUERY_ALIASES = frozenset(
+    {"project", "project-id", "project_id", "projectid"}
+)
+_PROJECT_SCOPE_HEADER_ALIASES = frozenset(
+    {
+        "project-id",
+        "x-apdl-project",
+        "x-apdl-project-id",
+        "x-project",
+        "x-project-id",
+    }
+)
+_MAX_LAST_EVENT_ID_LENGTH = 256
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
 _LLM_CONNECTION_READER = "llm-connections:read"
@@ -290,21 +304,24 @@ async def _stream_authority_state(
 def _stream_terminal_event(
     state: StreamAuthorityState | Literal["authorization_unavailable"],
     project_id: str,
-    required_role: str | None,
+    required_role: str,
 ) -> bytes:
-    if state == "session_expired":
-        return b"event: auth_expired\ndata: {}\n\n"
-    if state == "project_access_revoked":
-        payload: dict[str, str] = {"project_id": project_id}
-        if required_role is not None:
-            payload["required_role"] = required_role
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        return b"event: project_access_revoked\ndata: " + data + b"\n\n"
+    messages = {
+        "session_expired": "The console session expired.",
+        "project_access_revoked": "Project access was revoked.",
+        "authorization_unavailable": "Stream authorization is temporarily unavailable.",
+    }
     data = json.dumps(
-        {"reason": "authorization_unavailable", "retryable": True},
+        {
+            "schema_version": "console_stream_control@1",
+            "code": state,
+            "message": messages[state],
+            "project_id": project_id,
+            "required_role": required_role,
+        },
         separators=(",", ":"),
     ).encode("utf-8")
-    return b"event: stream_error\ndata: " + data + b"\n\n"
+    return b"event: console_stream_control\ndata: " + data + b"\n\n"
 
 
 async def _authorized_sse(
@@ -318,6 +335,7 @@ async def _authorized_sse(
 ):
     chunk_task: asyncio.Task | None = None
     authority_timer: asyncio.Task | None = None
+    iterator = None
     try:
         try:
             authority = await _stream_authority_state(
@@ -333,12 +351,14 @@ async def _authorized_sse(
                 session.user_id,
                 project_id,
             )
-            yield _stream_terminal_event(
-                "authorization_unavailable", project_id, required_role
-            )
+            if required_role is not None:
+                yield _stream_terminal_event(
+                    "authorization_unavailable", project_id, required_role
+                )
             return
         if authority != "authorized":
-            yield _stream_terminal_event(authority, project_id, required_role)
+            if required_role is not None:
+                yield _stream_terminal_event(authority, project_id, required_role)
             return
 
         iterator = response.aiter_raw()
@@ -368,12 +388,16 @@ async def _authorized_sse(
                         session.user_id,
                         project_id,
                     )
-                    yield _stream_terminal_event(
-                        "authorization_unavailable", project_id, required_role
-                    )
+                    if required_role is not None:
+                        yield _stream_terminal_event(
+                            "authorization_unavailable", project_id, required_role
+                        )
                     return
                 if authority != "authorized":
-                    yield _stream_terminal_event(authority, project_id, required_role)
+                    if required_role is not None:
+                        yield _stream_terminal_event(
+                            authority, project_id, required_role
+                        )
                     return
                 authority_timer = asyncio.create_task(
                     asyncio.sleep(settings.stream_authority_check_seconds)
@@ -396,8 +420,12 @@ async def _authorized_sse(
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        await response.aclose()
-        await _remove_ephemeral_credential(request, credential_id)
+        try:
+            if iterator is not None and hasattr(iterator, "aclose"):
+                await iterator.aclose()
+        finally:
+            await response.aclose()
+            await _remove_ephemeral_credential(request, credential_id)
 
 
 def required_role(service: str, method: str, path: str) -> str | None:
@@ -619,6 +647,46 @@ def _upstream_query_items(
     return items
 
 
+def _canonical_last_event_id(request: Request) -> str | None:
+    values = request.headers.getlist("last-event-id")
+    if not values:
+        return None
+    value = values[0]
+    if (
+        len(values) != 1
+        or not value
+        or len(value) > _MAX_LAST_EVENT_ID_LENGTH
+        or "\x00" in value
+        or "\r" in value
+        or "\n" in value
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Last-Event-ID",
+        )
+    return value
+
+
+def _require_path_only_stream_scope(request: Request) -> str | None:
+    for name, _value in request.query_params.multi_items():
+        if name.lower() in _PROJECT_SCOPE_QUERY_ALIASES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Stream project scope must come from the path",
+            )
+    if request.query_params:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The console stream does not accept query parameters",
+        )
+    if any(name in request.headers for name in _PROJECT_SCOPE_HEADER_ALIASES):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Stream project scope must come from the path",
+        )
+    return _canonical_last_event_id(request)
+
+
 async def _request_body(
     request: Request,
     settings: Settings,
@@ -720,13 +788,27 @@ async def proxy_service(
     settings: Settings = request.app.state.settings
     if PROJECT_ID_PATTERN.fullmatch(project_id) is None or service not in SERVICE_NAMES:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    upstream_path = f"/{path}"
+    is_console_config_stream = (
+        service,
+        request.method,
+        upstream_path,
+    ) == _CONSOLE_CONFIG_STREAM
     roles = session.projects.get(project_id)
     if roles is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+            status_code=(
+                status.HTTP_403_FORBIDDEN
+                if is_console_config_stream
+                else status.HTTP_404_NOT_FOUND
+            ),
+            detail=(
+                "Project access denied"
+                if is_console_config_stream
+                else "Project not found"
+            ),
         )
 
-    upstream_path = f"/{path}"
     role = required_role(service, request.method, upstream_path)
     if role == "":
         raise HTTPException(
@@ -767,20 +849,28 @@ async def proxy_service(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Credentials are not accepted from the browser",
         )
-    if any(
-        request.headers.getlist(name)
-        for name in ("x-apdl-project-id", "x-project-id")
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Project scope belongs only in the API path",
-        )
-    upstream_query = _upstream_query_items(
-        request,
-        service,
-        upstream_path,
-        project_id,
+    last_event_id = (
+        _require_path_only_stream_scope(request)
+        if is_console_config_stream
+        else None
     )
+    if is_console_config_stream:
+        upstream_query: list[tuple[str, str]] = []
+    else:
+        if any(
+            request.headers.getlist(name)
+            for name in ("x-apdl-project-id", "x-project-id")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Project scope belongs only in the API path",
+            )
+        upstream_query = _upstream_query_items(
+            request,
+            service,
+            upstream_path,
+            project_id,
+        )
     body = await _request_body(
         request,
         settings,
@@ -835,6 +925,8 @@ async def proxy_service(
         for name, value in request.headers.items()
         if name.lower() in _FORWARDED_REQUEST_HEADERS
     }
+    if last_event_id is not None:
+        headers["Last-Event-ID"] = last_event_id
     if service == "llm-vault":
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-APDL-Project-ID"] = project_id
@@ -880,12 +972,32 @@ async def proxy_service(
         for name, value in response.headers.items()
         if name.lower() in _FORWARDED_RESPONSE_HEADERS
     }
-    if response.headers.get("content-type", "").startswith("text/event-stream"):
+    is_event_stream = response.headers.get("content-type", "").startswith(
+        "text/event-stream"
+    )
+    if is_console_config_stream and (
+        response.status_code != status.HTTP_200_OK or not is_event_stream
+    ):
+        await response.aclose()
+        await _remove_ephemeral_credential(request, ephemeral_credential_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid upstream stream response",
+        )
+    if is_event_stream:
         if response.status_code >= 400:
             failure = _upstream_response_exception(response)
             await response.aclose()
             await _remove_ephemeral_credential(request, ephemeral_credential_id)
             raise failure
+        if is_console_config_stream:
+            response_headers.update(
+                {
+                    "cache-control": "no-cache, no-transform",
+                    "content-type": "text/event-stream",
+                    "x-accel-buffering": "no",
+                }
+            )
         return StreamingResponse(
             _authorized_sse(
                 response,

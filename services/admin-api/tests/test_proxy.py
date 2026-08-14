@@ -41,17 +41,33 @@ class StreamAuthorityPool:
 
 
 class StubStreamingResponse:
-    def __init__(self, *, busy: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        busy: bool = False,
+        chunks: tuple[bytes, ...] = (),
+        hold_open: bool = True,
+    ) -> None:
         self.busy = busy
+        self.chunks = chunks
+        self.hold_open = hold_open
         self.closed = False
+        self.iterator_closed = False
         self.release = asyncio.Event()
 
     async def aiter_raw(self):
-        if self.busy:
-            while True:
+        try:
+            for chunk in self.chunks:
                 await asyncio.sleep(0)
-                yield b"event: heartbeat\ndata: {}\n\n"
-        await self.release.wait()
+                yield chunk
+            if self.busy:
+                while True:
+                    await asyncio.sleep(0)
+                    yield b": heartbeat\n\n"
+            if self.hold_open:
+                await self.release.wait()
+        finally:
+            self.iterator_closed = True
 
     async def aclose(self) -> None:
         self.closed = True
@@ -70,6 +86,23 @@ def stream_request(pool: StreamAuthorityPool):
     return SimpleNamespace(
         app=SimpleNamespace(state=SimpleNamespace(pg_pool=pool)),
     )
+
+
+def stream_control(chunk: bytes) -> dict[str, str]:
+    lines = chunk.decode("utf-8").splitlines()
+    assert lines[0] == "event: console_stream_control"
+    assert lines[1].startswith("data: ")
+    payload = json.loads(lines[1].removeprefix("data: "))
+    assert set(payload) == {
+        "schema_version",
+        "code",
+        "message",
+        "project_id",
+        "required_role",
+    }
+    assert payload["schema_version"] == "console_stream_control@1"
+    assert payload["message"]
+    return payload
 
 
 @pytest.mark.asyncio
@@ -861,6 +894,148 @@ async def test_proxy_rejects_credentials_in_the_query_string(
 
 
 @pytest.mark.asyncio
+async def test_console_stream_rejects_every_query_parameter(
+    admin_session: AdminSession,
+) -> None:
+    called = False
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(500)
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(
+            "/api/projects/demo/config/v1/stream?access_token=browser-secret",
+            headers={"Accept": "text/event-stream"},
+        )
+
+    assert response.status_code == 400
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_console_stream_forwards_only_the_non_secret_reconnect_cursor(
+    admin_session: AdminSession,
+) -> None:
+    seen: dict[str, str | None] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["last_event_id"] = request.headers.get("last-event-id")
+        seen["authorization"] = request.headers.get("authorization")
+        seen["service_key"] = request.headers.get("x-api-key")
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "public, max-age=3600",
+                "X-API-Key": "upstream-secret",
+                "Authorization": "Bearer upstream-secret",
+            },
+            stream=FiniteAsyncStream(b": heartbeat\r\n\r\n"),
+        )
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(
+            "/api/projects/demo/config/v1/stream",
+            headers={
+                "Accept": "text/event-stream",
+                "Authorization": "Bearer browser-session",
+                "Last-Event-ID": "version-17",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.content == b": heartbeat\r\n\r\n"
+    assert seen == {
+        "last_event_id": "version-17",
+        "authorization": None,
+        "service_key": TEST_API_KEY,
+    }
+    assert response.headers["content-type"] == "text/event-stream"
+    assert response.headers["cache-control"] == "no-cache, no-transform"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert "x-api-key" not in response.headers
+    assert "authorization" not in response.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/projects/demo/config/v1/stream?project_id=demo",
+        "/api/projects/demo/config/v1/stream?projectId=demo",
+        "/api/projects/demo/config/v1/stream?project=demo",
+    ],
+)
+async def test_console_stream_rejects_url_project_aliases(
+    path: str,
+    admin_session: AdminSession,
+) -> None:
+    called = False
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(500)
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(path, headers={"Accept": "text/event-stream"})
+
+    assert response.status_code == 400
+    assert not called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "header",
+    ["Project-ID", "X-Project-ID", "X-APDL-Project-ID"],
+)
+async def test_console_stream_rejects_header_project_aliases(
+    header: str,
+    admin_session: AdminSession,
+) -> None:
+    called = False
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(500)
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(
+            "/api/projects/demo/config/v1/stream",
+            headers={"Accept": "text/event-stream", header: "demo"},
+        )
+
+    assert response.status_code == 400
+    assert not called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("last_event_id", ["", "x" * 257, "bad\x00id"])
+async def test_console_stream_rejects_noncanonical_last_event_id(
+    last_event_id: str,
+    admin_session: AdminSession,
+) -> None:
+    called = False
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(500)
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(
+            "/api/projects/demo/config/v1/stream",
+            headers={"Accept": "text/event-stream", "Last-Event-ID": last_event_id},
+        )
+
+    assert response.status_code == 400
+    assert not called
+
+
+@pytest.mark.asyncio
 async def test_sse_rechecks_membership_on_a_timer_without_upstream_chunks(
     admin_session: AdminSession,
 ) -> None:
@@ -882,18 +1057,65 @@ async def test_sse_rechecks_membership_on_a_timer_without_upstream_chunks(
     )
 
     terminal = await asyncio.wait_for(anext(generator), timeout=0.2)
-    await generator.aclose()
+    with pytest.raises(StopAsyncIteration):
+        await anext(generator)
 
-    assert terminal == (
-        b"event: project_access_revoked\ndata: "
-        b'{"project_id":"demo","required_role":"config:read"}\n\n'
-    )
+    assert stream_control(terminal) == {
+        "schema_version": "console_stream_control@1",
+        "code": "project_access_revoked",
+        "message": "Project access was revoked.",
+        "project_id": "demo",
+        "required_role": "config:read",
+    }
     assert upstream.closed
     assert len(pool.connection.calls) == 2
     query, args = pool.connection.calls[-1]
     assert "FROM admin_user_projects AS membership" in query
     assert "$5::TEXT = ANY(membership.roles)" in query
     assert args[3:] == ("demo", "config:read")
+
+
+@pytest.mark.asyncio
+async def test_console_stream_reconnect_gets_forbidden_after_project_loss(
+    admin_session: AdminSession,
+) -> None:
+    restricted = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "projects": {},
+        }
+    )
+    called = False
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(500)
+
+    async with proxy_client(httpx.MockTransport(upstream), restricted) as client:
+        response = client.get(
+            "/api/projects/demo/config/v1/stream",
+            headers={"Accept": "text/event-stream"},
+        )
+
+    assert response.status_code == 403
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_console_stream_rejects_a_non_sse_upstream_response(
+    admin_session: AdminSession,
+) -> None:
+    async with proxy_client(
+        httpx.MockTransport(lambda _request: httpx.Response(200, json={"flags": []})),
+        admin_session,
+    ) as client:
+        response = client.get(
+            "/api/projects/demo/config/v1/stream",
+            headers={"Accept": "text/event-stream"},
+        )
+
+    assert response.status_code == 502
 
 
 @pytest.mark.asyncio
@@ -914,7 +1136,7 @@ async def test_sse_distinguishes_session_expiry_and_fails_closed_on_db_error(
         "config:read",
         None,
     )
-    assert await anext(expired) == b"event: auth_expired\ndata: {}\n\n"
+    assert stream_control(await anext(expired))["code"] == "session_expired"
     await expired.aclose()
     assert expired_upstream.closed
 
@@ -928,9 +1150,8 @@ async def test_sse_distinguishes_session_expiry_and_fails_closed_on_db_error(
         "config:read",
         None,
     )
-    assert await anext(failed) == (
-        b"event: stream_error\ndata: "
-        b'{"reason":"authorization_unavailable","retryable":true}\n\n'
+    assert stream_control(await anext(failed))["code"] == (
+        "authorization_unavailable"
     )
     await failed.aclose()
     assert failed_upstream.closed
@@ -968,6 +1189,101 @@ async def test_busy_sse_cannot_starve_periodic_role_revalidation(
     assert chunk_count > 0
     assert len(pool.connection.calls) == 2
     assert upstream.closed
+
+
+@pytest.mark.asyncio
+async def test_sse_preserves_split_utf8_and_every_sse_field_byte_for_byte(
+    admin_session: AdminSession,
+) -> None:
+    chunks = (
+        b"id: version-18\r\nretry: 1500\r\nevent: con",
+        b"fig\r\ndata: caf\xc3",
+        b"\xa9\r\ndata: second line\r\n\r\n: heartbeat\r\n\r\n",
+    )
+    upstream = StubStreamingResponse(chunks=chunks, hold_open=False)
+    generator = proxy._authorized_sse(
+        upstream,
+        stream_request(
+            StreamAuthorityPool(
+                [{"session_active": True, "project_authorized": True}]
+            )
+        ),
+        admin_session,
+        make_settings(stream_authority_check_seconds=1),
+        "demo",
+        "config:read",
+        None,
+    )
+
+    received = [chunk async for chunk in generator]
+
+    assert received == list(chunks)
+    assert b"".join(received).decode("utf-8") == (
+        "id: version-18\r\n"
+        "retry: 1500\r\n"
+        "event: config\r\n"
+        "data: caf\N{LATIN SMALL LETTER E WITH ACUTE}\r\n"
+        "data: second line\r\n\r\n"
+        ": heartbeat\r\n\r\n"
+    )
+    assert upstream.closed
+    assert upstream.iterator_closed
+
+
+@pytest.mark.asyncio
+async def test_sse_delivers_the_first_chunk_before_upstream_completion(
+    admin_session: AdminSession,
+) -> None:
+    upstream = StubStreamingResponse(chunks=(b": heartbeat\n\n",))
+    generator = proxy._authorized_sse(
+        upstream,
+        stream_request(
+            StreamAuthorityPool(
+                [{"session_active": True, "project_authorized": True}]
+            )
+        ),
+        admin_session,
+        make_settings(stream_authority_check_seconds=1),
+        "demo",
+        "config:read",
+        None,
+    )
+
+    assert await asyncio.wait_for(anext(generator), timeout=0.2) == b": heartbeat\n\n"
+    assert not upstream.closed
+    await generator.aclose()
+    assert upstream.closed
+    assert upstream.iterator_closed
+
+
+@pytest.mark.asyncio
+async def test_sse_client_cancellation_closes_upstream_immediately(
+    admin_session: AdminSession,
+) -> None:
+    upstream = StubStreamingResponse()
+    generator = proxy._authorized_sse(
+        upstream,
+        stream_request(
+            StreamAuthorityPool(
+                [{"session_active": True, "project_authorized": True}]
+            )
+        ),
+        admin_session,
+        make_settings(stream_authority_check_seconds=1),
+        "demo",
+        "config:read",
+        None,
+    )
+    consumer = asyncio.create_task(anext(generator))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+    assert upstream.closed
+    assert upstream.iterator_closed
 
 
 @pytest.mark.asyncio

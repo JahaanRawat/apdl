@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -29,6 +30,9 @@ _CORS_METHODS = frozenset(_CORS_ALLOW_METHODS.split(", "))
 _CORS_ALLOW_HEADERS = "Authorization, Content-Type, Last-Event-ID"
 _CORS_HEADERS = frozenset(header.lower() for header in _CORS_ALLOW_HEADERS.split(", "))
 _CORS_VARY = "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
+_CONSOLE_CONFIG_STREAM_PATH = re.compile(
+    r"^/api/projects/[^/]+/config/v1/stream$"
+)
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -258,7 +262,9 @@ def _route_for(request: Request, settings: GatewaySettings) -> UpstreamRoute | N
             name="admin-api",
             origin=settings.admin_api_origin,
             max_body_bytes=settings.max_request_body_bytes,
-            long_read_timeout=accepts_sse,
+            long_read_timeout=(
+                accepts_sse or _CONSOLE_CONFIG_STREAM_PATH.fullmatch(path) is not None
+            ),
         )
     if path == "/v1/events":
         return UpstreamRoute(
