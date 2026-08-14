@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -315,7 +316,17 @@ class HealthContractTests(unittest.TestCase):
             patch.object(
                 smoke_core,
                 "_request_bytes",
-                return_value=(200, b"apdl gateway ok\n"),
+                return_value=(
+                    404,
+                    json.dumps(
+                        {
+                            "schema_version": "error@1",
+                            "code": "route_not_found",
+                            "message": "The route is not public.",
+                            "request_id": "11111111-1111-4111-8111-111111111111",
+                        }
+                    ).encode(),
+                ),
             ),
         ):
             smoke_core._check_health(args)

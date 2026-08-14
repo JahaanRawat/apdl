@@ -106,8 +106,13 @@ export APDL_QUERY_HOST_PORT="${APDL_QUERY_HOST_PORT:-$((SMOKE_PORT_BASE + 6))}"
 export APDL_GATEWAY_HOST_PORT="${APDL_GATEWAY_HOST_PORT:-$((SMOKE_PORT_BASE + 7))}"
 export APDL_AGENTS_HOST_PORT="${APDL_AGENTS_HOST_PORT:-$((SMOKE_PORT_BASE + 8))}"
 export APDL_ADMIN_API_HOST_PORT="${APDL_ADMIN_API_HOST_PORT:-$((SMOKE_PORT_BASE + 9))}"
+# The base stack exposes only the unified gateway. This hermetic overlay opens
+# loopback-only diagnostic ports for the smoke runner, and the ephemeral
+# gateway Host allowlist matches its randomized public port exactly.
+export APDL_GATEWAY_ALLOWED_HOSTS="[\"127.0.0.1:$APDL_GATEWAY_HOST_PORT\"]"
 
-COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+SMOKE_HOST_PORTS_FILE="$ROOT_DIR/scripts/fixtures/docker-compose.smoke-host-ports.yml"
+COMPOSE_ARGS=(-f "$COMPOSE_FILE" -f "$SMOKE_HOST_PORTS_FILE")
 if [ -n "${APDL_SMOKE_COMPOSE_OVERRIDE:-}" ]; then
     if [[ "$APDL_SMOKE_COMPOSE_OVERRIDE" != /* ]]; then
         APDL_SMOKE_COMPOSE_OVERRIDE="$ROOT_DIR/$APDL_SMOKE_COMPOSE_OVERRIDE"
@@ -403,7 +408,7 @@ case "${APDL_SMOKE_NO_BUILD:-false}" in
         echo "==> Pulling immutable release images without registry credentials"
         published_compose_services=(
             postgres-migrate ingestion config query clickhouse-writer
-            llm-vault admin-api
+            llm-vault admin-api gateway
         )
         if [ "$smoke_all_images" = true ]; then
             published_compose_services+=(agents codegen)

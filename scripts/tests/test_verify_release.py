@@ -55,6 +55,7 @@ class ReleaseManifestTests(unittest.TestCase):
                 "codegen-egress": "ghcr.io/kuvera-apdl/apdl-codegen-egress",
                 "codegen-worker": "ghcr.io/kuvera-apdl/apdl-codegen-worker",
                 "config": "ghcr.io/kuvera-apdl/apdl-config",
+                "gateway": "ghcr.io/kuvera-apdl/apdl-gateway",
                 "ingestion": "ghcr.io/kuvera-apdl/apdl-ingestion",
                 "llm-vault": "ghcr.io/kuvera-apdl/apdl-llm-vault",
                 "postgres-migrate": "ghcr.io/kuvera-apdl/apdl-postgres-migrate",
@@ -111,7 +112,7 @@ class ReleaseManifestTests(unittest.TestCase):
             egress_policy_sha256=policy_digest,
         )
 
-        self.assertEqual(len(matrix["include"]), 11)
+        self.assertEqual(len(matrix["include"]), 12)
         by_name = {image["name"]: image for image in matrix["include"]}
         self.assertEqual(
             by_name["admin-api"]["build_args"],

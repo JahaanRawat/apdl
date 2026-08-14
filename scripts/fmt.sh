@@ -27,6 +27,7 @@ PY_PACKAGES=(
   "services/llm-vault|app/ tests/"
   "services/codegen|app/ tests/ scripts/"
   "services/admin-api|app/ scripts/ tests/"
+  "services/gateway|app/ tests/"
 )
 
 fail=0

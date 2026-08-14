@@ -93,8 +93,8 @@ services:
     build:
       context: ../../services/ingestion
       dockerfile: Dockerfile
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_INGESTION_HOST_PORT:-8080}:8080"
+    expose:
+      - "8080"
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
@@ -125,8 +125,8 @@ services:
     build:
       context: ../../services/config
       dockerfile: Dockerfile
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_CONFIG_HOST_PORT:-8081}:8081"
+    expose:
+      - "8081"
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
@@ -160,8 +160,8 @@ services:
     build:
       context: ../../services/query
       dockerfile: Dockerfile
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_QUERY_HOST_PORT:-8082}:8082"
+    expose:
+      - "8082"
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_HOST: clickhouse
@@ -232,8 +232,8 @@ services:
     build:
       context: ../../services/agents
       dockerfile: Dockerfile
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_AGENTS_HOST_PORT:-8083}:8083"
+    expose:
+      - "8083"
     environment:
       LLM_VAULT_URL: http://llm-vault:8086
       LLM_VAULT_AGENTS_TOKEN: ${LLM_VAULT_AGENTS_TOKEN:-local-llm-vault-agents-token-change-me}
@@ -409,8 +409,8 @@ services:
       args:
         APDL_BACKEND_VERSION: ${APDL_BACKEND_VERSION:-}
         APDL_BUILD_REVISION: ${APDL_BUILD_REVISION:-}
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_ADMIN_API_HOST_PORT:-8085}:8085"
+    expose:
+      - "8085"
     environment:
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       INGESTION_SERVICE_URL: http://ingestion:8080
@@ -454,20 +454,28 @@ services:
       llm-vault:
         condition: service_healthy
 
-  # Gateway — single SDK front door. Routes /v1/events to ingestion and
-  # /v1/flags + /v1/stream to config, so an SDK connects with one `endpoint`
-  # URL (http://<host>:8000) instead of separate ingestion + config URLs.
+  # Gateway — the only browser-visible backend boundary. It preserves /api/*
+  # for the Admin API and retains the three registered SDK routes. It never
+  # serves the console SPA or any other UI assets.
   gateway:
-    image: nginx:1.31-alpine@sha256:7068961d45b07b2af510ac002e9daa63a1d3eba2111202d6768798690800fffd
+    build:
+      context: ../../services/gateway
+      dockerfile: Dockerfile
     ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_GATEWAY_HOST_PORT:-8000}:80"
-    volumes:
-      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - "127.0.0.1:${APDL_GATEWAY_HOST_PORT:-8000}:8000"
+    environment:
+      ADMIN_API_URL: http://admin-api:8085
+      INGESTION_SERVICE_URL: http://ingestion:8080
+      CONFIG_SERVICE_URL: http://config:8081
+      APDL_GATEWAY_ALLOWED_HOSTS: '${APDL_GATEWAY_ALLOWED_HOSTS:-["localhost:8000"]}'
+      APDL_GATEWAY_PUBLIC_SCHEME: ${APDL_GATEWAY_PUBLIC_SCHEME:-http}
     healthcheck:
       test:
         [
-          "CMD-SHELL",
-          "wget -q -O - http://127.0.0.1/ | grep -qx 'apdl gateway ok'",
+          "CMD",
+          "python",
+          "-m",
+          "app.healthcheck",
         ]
       interval: 5s
       timeout: 3s
@@ -476,6 +484,8 @@ services:
       ingestion:
         condition: service_healthy
       config:
+        condition: service_healthy
+      admin-api:
         condition: service_healthy
 
 volumes:

@@ -17,20 +17,21 @@ def test_admin_uvicorn_preserves_socket_peer_for_application_policy() -> None:
     assert "--no-proxy-headers" in run_admin_api
 
 
-def test_compose_exposes_admin_api_on_the_configured_bind_address() -> None:
+def test_compose_keeps_admin_api_internal_behind_the_gateway() -> None:
     compose = (ROOT / "infra/docker/docker-compose.yml").read_text(encoding="utf-8")
     environment = (ROOT / ".env.example").read_text(encoding="utf-8")
+    admin_service = compose.split("\n  admin-api:\n", 1)[1].split(
+        "\n  gateway:\n", 1
+    )[0]
 
     assert (
         "APDL_ADMIN_TRUSTED_PROXY_CIDRS: "
         "'${APDL_ADMIN_TRUSTED_PROXY_CIDRS:-[]}'"
-        in compose
+        in admin_service
     )
-    assert (
-        '"${APDL_BIND_ADDRESS:-127.0.0.1}:'
-        '${APDL_ADMIN_API_HOST_PORT:-8085}:8085"'
-        in compose
-    )
+    assert '    expose:\n      - "8085"' in admin_service
+    assert "    ports:\n" not in admin_service
+    assert "APDL_ADMIN_API_HOST_PORT" not in compose
     assert "admin-edge:" not in compose
     assert "APDL_ADMIN_TRUSTED_PROXY_CIDRS=[]" in environment
 

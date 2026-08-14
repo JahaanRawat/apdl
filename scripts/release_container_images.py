@@ -30,6 +30,7 @@ COMPOSE_IMAGES = (
     "query",
     "clickhouse-writer",
     "admin-api",
+    "gateway",
     "agents",
     "codegen",
 )

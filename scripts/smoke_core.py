@@ -273,14 +273,31 @@ def _check_health(args: argparse.Namespace) -> None:
 
     _, gateway_body = _request_bytes(
         _join_url(args.gateway_url, "/"),
-        expected_status={200},
+        expected_status={404},
         timeout=args.request_timeout,
     )
-    if gateway_body != b"apdl gateway ok\n":
-        raise SmokeFailure(
-            f"Gateway liveness body differs: {gateway_body[:200]!r}"
+    try:
+        gateway_error = _assert_object(
+            json.loads(gateway_body),
+            "Gateway root response",
         )
-    print("  ok  SDK gateway ready")
+    except json.JSONDecodeError as exc:
+        raise SmokeFailure("Gateway root response must be JSON") from exc
+    _assert_keys(
+        gateway_error,
+        {"schema_version", "code", "message", "request_id"},
+        "Gateway root response",
+    )
+    if (
+        gateway_error["schema_version"] != "error@1"
+        or gateway_error["code"] != "route_not_found"
+    ):
+        raise SmokeFailure(f"Gateway root contract differs: {gateway_error!r}")
+    try:
+        uuid.UUID(gateway_error["request_id"])
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise SmokeFailure("Gateway root request_id must be a UUID") from exc
+    print("  ok  Unified gateway ready without serving a UI root")
 
     if args.admin_url:
         _, decoded = _request_json(

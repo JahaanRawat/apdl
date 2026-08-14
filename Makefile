@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner run-gateway test-gateway lint-gateway test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -70,6 +70,8 @@ deps:
 	cd sdk/javascript && npm install
 	@echo "==> Setting up Admin API"
 	cd services/admin-api && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+	@echo "==> Setting up unified gateway"
+	cd services/gateway && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Ingestion service"
 	cd services/ingestion && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Config service"
@@ -89,9 +91,9 @@ deps:
 
 build: build-sdk
 
-test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-llm-vault test-codegen test-writer test-admin-api
+test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-llm-vault test-codegen test-writer test-admin-api test-gateway
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-llm-vault lint-codegen lint-writer lint-admin-api
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-llm-vault lint-codegen lint-writer lint-admin-api lint-gateway
 
 clean: clean-sdk
 
@@ -160,6 +162,23 @@ create-admin-user:
 assign-project-owner:
 	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
 	$(COMPOSE) run --rm --build --no-deps admin-api python -m scripts.assign_project_owner $(ARGS)
+
+# ─── Unified Gateway (Python) ───────────────────────────────
+
+run-gateway:
+	cd services/gateway && \
+		ADMIN_API_URL=http://localhost:8085 \
+		INGESTION_SERVICE_URL=http://localhost:8080 \
+		CONFIG_SERVICE_URL=http://localhost:8081 \
+		APDL_GATEWAY_ALLOWED_HOSTS='["localhost:8000"]' \
+		.venv/bin/python -m uvicorn app.main:app \
+		--reload --port 8000 --no-proxy-headers --no-access-log
+
+test-gateway:
+	cd services/gateway && .venv/bin/python -m pytest -q
+
+lint-gateway:
+	cd services/gateway && .venv/bin/ruff check app/ tests/
 
 # ─── SDK (Python) ────────────────────────────────────────────
 

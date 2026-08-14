@@ -199,7 +199,7 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | `admin-api` | 8085 | Core | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
 | `llm-vault` | 8086 (internal) | Core | Shared project LLM credential custody and audited JIT access | [README](services/llm-vault/README.md) |
 | `clickhouse-writer` | — | Core | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
-| `gateway` | 8000 | Local development | nginx routing for the source-built stack; not production ingress | [Compose](infra/docker/docker-compose.yml) |
+| `gateway` | 8000 | Core | Unified `/api/*` and registered `/v1/*` browser boundary; never serves console assets | [README](services/gateway/README.md) |
 | `redis` | 6379 | Core dependency | Event streams + cache | — |
 | `clickhouse` | 8123 / 9000 | Core dependency | Analytics store (HTTP / native) | — |
 | `postgres` | 5432 | Core dependency | Config store + pgvector | — |

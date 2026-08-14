@@ -76,6 +76,13 @@ EXPECTED_DOCKER_IMAGES = [
         "build_args": [],
     },
     {
+        "name": "gateway",
+        "repository": "ghcr.io/kuvera-apdl/apdl-gateway",
+        "context": "services/gateway",
+        "dockerfile": "services/gateway/Dockerfile",
+        "build_args": [],
+    },
+    {
         "name": "ingestion",
         "repository": "ghcr.io/kuvera-apdl/apdl-ingestion",
         "context": "services/ingestion",

@@ -136,6 +136,7 @@ cmd_setup() {
     setup_python_package "LLM Vault Service" "$ROOT_DIR/services/llm-vault"
     setup_python_package "Codegen Service"   "$ROOT_DIR/services/codegen"
     setup_python_package "Admin API"         "$ROOT_DIR/services/admin-api"
+    setup_python_package "Unified Gateway"   "$ROOT_DIR/services/gateway"
     setup_python_package "Pipeline Writer"   "$ROOT_DIR/pipeline/redis"
     setup_python_package "Python SDK"        "$ROOT_DIR/sdk/python"
 
@@ -232,12 +233,18 @@ check_health() {
 }
 
 check_compose_health() {
-    local name="$1" service="$2" url="$3"
-    if dc_full_all exec -T "$service" curl -fsS --max-time 3 "$url" >/dev/null 2>&1; then
-        ok "$name ($service → $url)"
+    local name="$1" service="$2" container_id health
+    container_id="$(dc_full_all ps -q "$service" 2>/dev/null)"
+    if [ -z "$container_id" ]; then
+        echo -e "${RED}  ✗${NC} $name container is not running"
+        return 1
+    fi
+    health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
+    if [ "$health" = "healthy" ]; then
+        ok "$name ($service container healthy)"
         return 0
     fi
-    echo -e "${RED}  ✗${NC} $name not healthy inside the $service container"
+    echo -e "${RED}  ✗${NC} $name container state is ${health:-unknown}"
     return 1
 }
 
@@ -256,10 +263,10 @@ cmd_status() {
     echo ""
     info "Service health"
     local failures=0
-    check_health "Ingestion" "http://localhost:$INGESTION_HOST_PORT/health" || failures=$((failures+1))
-    check_health "Config"    "http://localhost:$CONFIG_HOST_PORT/ready" || failures=$((failures+1))
-    check_health "Query"     "http://localhost:$QUERY_HOST_PORT/ready" || failures=$((failures+1))
-    check_health "Gateway"   "http://localhost:$GATEWAY_HOST_PORT/" || failures=$((failures+1))
+    check_compose_health "Ingestion" "ingestion" || failures=$((failures+1))
+    check_compose_health "Config" "config" || failures=$((failures+1))
+    check_compose_health "Query" "query" || failures=$((failures+1))
+    check_compose_health "Gateway" "gateway" || failures=$((failures+1))
     if compose_service_running clickhouse-writer; then
         ok "ClickHouse writer process running (functional readiness requires scripts/dev.sh smoke)"
     else
@@ -267,17 +274,17 @@ cmd_status() {
         failures=$((failures+1))
     fi
     if compose_service_exists agents; then
-        check_health "Agents" "http://localhost:$AGENTS_HOST_PORT/ready" || failures=$((failures+1))
+        check_compose_health "Agents" "agents" || failures=$((failures+1))
     else
         info "Agents disabled (opt in with scripts/dev.sh up-full or make dev-all)"
     fi
     if compose_service_exists codegen; then
-        check_compose_health "Codegen" "codegen" "http://127.0.0.1:8084/ready" || failures=$((failures+1))
+        check_compose_health "Codegen" "codegen" || failures=$((failures+1))
     else
         info "Codegen disabled (opt in with scripts/dev.sh up-full or make dev-all; publication stays offline)"
     fi
     if compose_service_exists admin-api; then
-        check_health "Admin API" "http://localhost:$ADMIN_API_HOST_PORT/api/ready" || failures=$((failures+1))
+        check_compose_health "Admin API" "admin-api" || failures=$((failures+1))
     else
         info "Admin API not started"
     fi
@@ -291,15 +298,17 @@ cmd_smoke() {
     [ -n "$SMOKE_BROWSER_KEY" ] || \
         die "APDL_SMOKE_BROWSER_KEY is required for the smoke test"
     require python3 "Install Python 3.12"
-    info "Running the canonical core smoke against the current stack"
-    APDL_SMOKE_CONFIDENTIAL_KEY="$SMOKE_CONFIDENTIAL_KEY" \
-    APDL_SMOKE_BROWSER_KEY="$SMOKE_BROWSER_KEY" \
-    APDL_GATEWAY_URL="http://localhost:$GATEWAY_HOST_PORT" \
-    APDL_INGESTION_URL="http://localhost:$INGESTION_HOST_PORT" \
-    APDL_CONFIG_URL="http://localhost:$CONFIG_HOST_PORT" \
-    APDL_QUERY_URL="http://localhost:$QUERY_HOST_PORT" \
-    APDL_ADMIN_URL="http://localhost:$ADMIN_HOST_PORT" \
-        python3 "$ROOT_DIR/scripts/smoke_core.py"
+    info "Running the canonical core smoke from inside the gateway network"
+    dc_full exec -T \
+        -e APDL_SMOKE_CONFIDENTIAL_KEY="$SMOKE_CONFIDENTIAL_KEY" \
+        -e APDL_SMOKE_BROWSER_KEY="$SMOKE_BROWSER_KEY" \
+        gateway python - \
+        --gateway-url http://localhost:8000 \
+        --ingestion-url http://ingestion:8080 \
+        --config-url http://config:8081 \
+        --query-url http://query:8082 \
+        --admin-url http://admin-api:8085 \
+        < "$ROOT_DIR/scripts/smoke_core.py"
     ok "Core smoke passed"
 }
 

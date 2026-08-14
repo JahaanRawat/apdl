@@ -109,7 +109,7 @@ class PublishedContainerImageTests(unittest.TestCase):
 
         override = release_container_images.render_compose_override(index)
 
-        self.assertEqual(override.count("@sha256:"), 8)
+        self.assertEqual(override.count("@sha256:"), 9)
         for name in release_container_images.COMPOSE_IMAGES:
             self.assertIn(f"  {name}:\n    image: ", override)
         self.assertIn("  agents:", override)
@@ -136,7 +136,7 @@ class PublishedContainerImageTests(unittest.TestCase):
         tested = release_container_images.merge_smoke_evidence(evidence_paths)
 
         self.assertEqual(tested["schema_version"], 2)
-        self.assertEqual(len(tested["images"]), 11)
+        self.assertEqual(len(tested["images"]), 12)
         for image in tested["images"]:
             self.assertEqual(
                 image["tested_platforms"],

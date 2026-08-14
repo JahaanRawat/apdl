@@ -314,38 +314,22 @@ class RequestBodyLimitContractTests(unittest.TestCase):
                     self.assertEqual(received, 0)
 
 
-class NginxRequestBodyLimitContractTests(unittest.TestCase):
+class GatewayRequestBodyLimitContractTests(unittest.TestCase):
     def test_public_gateway_matches_the_ingestion_512_kib_limit(self) -> None:
-        config = (
-            ROOT / "infra" / "docker" / "gateway" / "nginx.conf"
-        ).read_text(encoding="utf-8")
-        events_location = config.split(
-            "location = /v1/events {",
-            1,
-        )[1].split("\n    }", 1)[0]
-        error_location = config.split(
-            "location @payload_too_large {",
-            1,
-        )[1].split("\n    }", 1)[0]
-
-        self.assertIn("client_max_body_size 512k;", events_location)
-        self.assertIn(
-            "error_page 413 = @payload_too_large;",
-            events_location,
+        config = (ROOT / "services" / "gateway" / "app" / "config.py").read_text(
+            encoding="utf-8"
         )
-        self._assert_canonical_413_location(error_location)
-
-    def _assert_canonical_413_location(self, location: str) -> None:
-        canonical_json = json.dumps(CANONICAL_413, separators=(",", ":"))
-
-        self.assertIn("internal;", location)
-        self.assertIn("default_type application/json;", location)
-        self.assertIn('add_header Cache-Control "no-store" always;', location)
-        self.assertIn(
-            'add_header X-Content-Type-Options "nosniff" always;',
-            location,
+        gateway = (ROOT / "services" / "gateway" / "app" / "main.py").read_text(
+            encoding="utf-8"
         )
-        self.assertIn(f"return 413 '{canonical_json}';", location)
+
+        self.assertIn("DEFAULT_MAX_EVENT_BODY_BYTES = 512 * 1024", config)
+        self.assertIn('if path == "/v1/events":', gateway)
+        self.assertIn("max_body_bytes=settings.max_event_body_bytes", gateway)
+        self.assertIn("status_code=413", gateway)
+        self.assertIn('code="payload_too_large"', gateway)
+        for field in ("schema_version", "code", "message", "request_id"):
+            self.assertIn(f'"{field}"', gateway)
 
 
 if __name__ == "__main__":
