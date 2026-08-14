@@ -27,6 +27,10 @@ APDL_GATEWAY_HOST_PORT=8000
 Enter `localhost:8000` in the Console connection screen. The Console first
 opens `http://localhost:8000/api/console/v1/manifest`; it must not send a
 password, bearer, or project request until that strict manifest is compatible.
+Project-scoped browser requests carry the project only in
+`/api/projects/{project_id}/...`. Browser body, header, and query aliases are
+rejected; the Admin BFF injects any internal service field from that path only
+for its registered upstream routes.
 The main Compose file publishes only gateway port 8000 for product/browser
 traffic. Admin API, Ingestion, Config, Query, Agents, Codegen, and LLM Vault use
 private Compose ports. Local database ports remain loopback-only developer

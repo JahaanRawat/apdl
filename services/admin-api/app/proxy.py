@@ -43,19 +43,73 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
 )
 _MAX_RETRY_AFTER_LENGTH = 128
 _CONSOLE_CONFIG_STREAM = ("config", "GET", "/v1/stream")
-_PROJECT_SCOPE_QUERY_ALIASES = frozenset(
-    {"project", "project-id", "project_id", "projectid"}
-)
-_PROJECT_SCOPE_HEADER_ALIASES = frozenset(
+_NORMALIZED_PROJECT_SCOPE_ALIASES = frozenset(
     {
-        "project-id",
-        "x-apdl-project",
-        "x-apdl-project-id",
-        "x-project",
-        "x-project-id",
+        "project",
+        "projectid",
+        "xapdlproject",
+        "xapdlprojectid",
+        "xproject",
+        "xprojectid",
     }
 )
 _MAX_LAST_EVENT_ID_LENGTH = 256
+
+_UPSTREAM_PROJECT_BODY_ROUTES = frozenset(
+    {
+        ("config", "POST", "/v1/evaluate"),
+        ("query", "POST", "/v1/query/events/count"),
+        ("query", "POST", "/v1/query/events/timeseries"),
+        ("query", "POST", "/v1/query/events/breakdown"),
+        ("query", "POST", "/v1/query/events/names"),
+        ("query", "POST", "/v1/query/funnel"),
+        ("query", "POST", "/v1/query/retention"),
+        ("query", "POST", "/v1/query/cohort"),
+        ("query", "POST", "/v1/query/guardrails/evaluate"),
+        ("agents", "POST", "/v1/agents/trigger"),
+        ("agents", "POST", "/v1/agents/custom/test"),
+        ("agents", "PUT", "/v1/agents/setup"),
+        ("agents", "POST", "/v1/agents/setup/deactivate"),
+        ("codegen", "POST", "/v1/changesets"),
+        ("llm-vault", "POST", "/v1/llm-connections"),
+    }
+)
+_UPSTREAM_PROJECT_BODY_PATTERNS = (
+    (
+        "agents",
+        "PUT",
+        re.compile(r"^/v1/agents/llm-connections/(?:openai|anthropic|google|xai)$"),
+    ),
+    (
+        "agents",
+        "POST",
+        re.compile(
+            r"^/v1/agents/llm-connections/(?:openai|anthropic|google|xai)/(?:refresh-models|revoke)$"
+        ),
+    ),
+    (
+        "codegen",
+        "PUT",
+        re.compile(r"^/v1/llm-connections/(?:openai|anthropic|google|xai)$"),
+    ),
+    (
+        "codegen",
+        "POST",
+        re.compile(
+            r"^/v1/llm-connections/(?:openai|anthropic|google|xai)/(?:refresh-models|revoke)$"
+        ),
+    ),
+    (
+        "llm-vault",
+        "PUT",
+        re.compile(r"^/v1/llm-connections/[0-9a-fA-F-]{36}$"),
+    ),
+    (
+        "llm-vault",
+        "POST",
+        re.compile(r"^/v1/llm-connections/[0-9a-fA-F-]{36}/(?:refresh|revoke)$"),
+    ),
+)
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
 _LLM_CONNECTION_READER = "llm-connections:read"
@@ -590,6 +644,11 @@ def _assert_tenant_value(value: object, project_id: str) -> None:
         )
 
 
+def _is_project_scope_alias(name: str) -> bool:
+    normalized = name.lower().replace("-", "").replace("_", "")
+    return normalized in _NORMALIZED_PROJECT_SCOPE_ALIASES
+
+
 def _requires_upstream_project_query(
     service: str,
     method: str,
@@ -630,17 +689,36 @@ def _requires_upstream_project_query(
     return False
 
 
+def _requires_upstream_project_body(
+    service: str,
+    method: str,
+    path: str,
+) -> bool:
+    route = (service, method, path)
+    if route in _UPSTREAM_PROJECT_BODY_ROUTES:
+        return True
+    return any(
+        service == registered_service
+        and method == registered_method
+        and pattern.fullmatch(path) is not None
+        for registered_service, registered_method, pattern in (
+            _UPSTREAM_PROJECT_BODY_PATTERNS
+        )
+    )
+
+
 def _upstream_query_items(
     request: Request,
     service: str,
     path: str,
     project_id: str,
 ) -> list[tuple[str, str]]:
-    if "project_id" in request.query_params:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Project scope belongs only in the API path",
-        )
+    for name, _value in request.query_params.multi_items():
+        if _is_project_scope_alias(name):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Project scope belongs only in the API path",
+            )
     items = list(request.query_params.multi_items())
     if _requires_upstream_project_query(service, request.method, path):
         items.append(("project_id", project_id))
@@ -669,7 +747,7 @@ def _canonical_last_event_id(request: Request) -> str | None:
 
 def _require_path_only_stream_scope(request: Request) -> str | None:
     for name, _value in request.query_params.multi_items():
-        if name.lower() in _PROJECT_SCOPE_QUERY_ALIASES:
+        if _is_project_scope_alias(name):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Stream project scope must come from the path",
@@ -679,7 +757,7 @@ def _require_path_only_stream_scope(request: Request) -> str | None:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The console stream does not accept query parameters",
         )
-    if any(name in request.headers for name in _PROJECT_SCOPE_HEADER_ALIASES):
+    if any(_is_project_scope_alias(name) for name in request.headers):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Stream project scope must come from the path",
@@ -692,6 +770,7 @@ async def _request_body(
     settings: Settings,
     project_id: str,
     *,
+    inject_project: bool = False,
     require_json: bool = False,
 ) -> bytes:
     content_length = request.headers.get("content-length")
@@ -712,7 +791,7 @@ async def _request_body(
     media_type = (
         request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     )
-    if raw_body and require_json and media_type != _JSON_MEDIA_TYPE:
+    if (raw_body or inject_project) and require_json and media_type != _JSON_MEDIA_TYPE:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Upstream request bodies must use application/json",
@@ -720,10 +799,41 @@ async def _request_body(
     if raw_body and media_type == _JSON_MEDIA_TYPE:
         try:
             payload = json.loads(raw_body)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            if inject_project:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Upstream request body must be a JSON object",
+                ) from exc
             return raw_body
         if isinstance(payload, Mapping):
-            _assert_tenant_value(payload.get("project_id"), project_id)
+            if any(_is_project_scope_alias(str(name)) for name in payload):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Project scope belongs only in the API path",
+                )
+            if inject_project:
+                canonical_payload = {**payload, "project_id": project_id}
+                encoded = json.dumps(
+                    canonical_payload,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                if len(encoded) > settings.max_request_bytes:
+                    raise RequestBodyTooLarge
+                return encoded
+        elif inject_project:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Upstream request body must be a JSON object",
+            )
+    elif inject_project:
+        encoded = json.dumps(
+            {"project_id": project_id},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > settings.max_request_bytes:
+            raise RequestBodyTooLarge
+        return encoded
     return raw_body
 
 
@@ -857,10 +967,7 @@ async def proxy_service(
     if is_console_config_stream:
         upstream_query: list[tuple[str, str]] = []
     else:
-        if any(
-            request.headers.getlist(name)
-            for name in ("x-apdl-project-id", "x-project-id")
-        ):
+        if any(_is_project_scope_alias(name) for name in request.headers):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Project scope belongs only in the API path",
@@ -871,11 +978,17 @@ async def proxy_service(
             upstream_path,
             project_id,
         )
+    inject_project = _requires_upstream_project_body(
+        service,
+        request.method,
+        upstream_path,
+    )
     body = await _request_body(
         request,
         settings,
         project_id,
-        require_json=service in {"codegen", "llm-vault"},
+        inject_project=inject_project,
+        require_json=inject_project or service in {"codegen", "llm-vault"},
     )
 
     ephemeral_credential_id: str | None = None

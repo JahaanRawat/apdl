@@ -51,9 +51,11 @@ or rotation, and every request is authorized against a user, project, and role.
 - `/api/projects/{project_id}/{service}/...` is deny-by-default. The proxy
   verifies project membership and the required canonical APDL role before
   injecting a server-side API key.
-- Caller-supplied API keys, internal tokens, cookies, and project header/query
-  aliases are discarded or rejected. The BFF injects required legacy upstream
-  project queries from the canonical resource path.
+- Caller-supplied API keys, internal tokens, cookies, and project fields,
+  headers, or query aliases are discarded or rejected. For an explicit route
+  registry only, the BFF injects the required internal-service project body or
+  query value from the canonical resource path. Browser contracts remain
+  path-scoped and never duplicate project identity.
 - GitHub App browser onboarding and callbacks are not exposed in console API
   version 1 because the former flow required browser cookies and URL state.
 - Uvicorn preserves the socket peer instead of trusting forwarded headers.

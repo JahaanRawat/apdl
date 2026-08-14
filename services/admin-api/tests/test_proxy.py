@@ -333,7 +333,6 @@ async def test_llm_connection_mutation_uses_live_dual_role_authority(
             "/api/projects/demo/agents/v1/agents/llm-connections/openai",
             headers={"Origin": "http://admin.test"},
             json={
-                "project_id": "demo",
                 "api_key": "provider-secret",
                 "version": 0,
             },
@@ -388,7 +387,7 @@ async def test_llm_connection_mutation_fails_when_live_authority_is_lost(
         response = client.post(
             "/api/projects/demo/agents/v1/agents/llm-connections/openai/refresh-models",
             headers={"Origin": "http://admin.test"},
-            json={"project_id": "demo", "version": 1},
+            json={"version": 1},
         )
 
     assert response.status_code == 403
@@ -425,7 +424,6 @@ async def test_codegen_llm_connection_mutation_uses_human_bound_ephemeral_creden
             "/api/projects/demo/codegen/v1/llm-connections/openai",
             headers={"Origin": "http://admin.test"},
             json={
-                "project_id": "demo",
                 "api_key": "provider-secret",
                 "version": 0,
             },
@@ -488,7 +486,7 @@ async def test_codegen_llm_connection_mutation_fails_when_live_authority_is_lost
         response = client.post(
             "/api/projects/demo/codegen/v1/llm-connections/openai/refresh-models",
             headers={"Origin": "http://admin.test"},
-            json={"project_id": "demo", "version": 1},
+            json={"version": 1},
         )
 
     assert response.status_code == 403
@@ -636,6 +634,84 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("service", "method", "path"),
+    [
+        ("config", "POST", "/v1/evaluate"),
+        ("query", "POST", "/v1/query/events/count"),
+        ("query", "POST", "/v1/query/events/timeseries"),
+        ("query", "POST", "/v1/query/events/breakdown"),
+        ("query", "POST", "/v1/query/events/names"),
+        ("query", "POST", "/v1/query/funnel"),
+        ("query", "POST", "/v1/query/retention"),
+        ("query", "POST", "/v1/query/cohort"),
+        ("query", "POST", "/v1/query/guardrails/evaluate"),
+        ("agents", "POST", "/v1/agents/trigger"),
+        ("agents", "POST", "/v1/agents/custom/test"),
+        ("agents", "PUT", "/v1/agents/setup"),
+        ("agents", "POST", "/v1/agents/setup/deactivate"),
+        ("codegen", "POST", "/v1/changesets"),
+        ("llm-vault", "POST", "/v1/llm-connections"),
+        ("agents", "PUT", "/v1/agents/llm-connections/openai"),
+        (
+            "agents",
+            "POST",
+            "/v1/agents/llm-connections/google/refresh-models",
+        ),
+        ("agents", "POST", "/v1/agents/llm-connections/xai/revoke"),
+        ("codegen", "PUT", "/v1/llm-connections/anthropic"),
+        ("codegen", "POST", "/v1/llm-connections/openai/refresh-models"),
+        ("codegen", "POST", "/v1/llm-connections/google/revoke"),
+        (
+            "llm-vault",
+            "PUT",
+            "/v1/llm-connections/10000000-0000-4000-8000-000000000001",
+        ),
+        (
+            "llm-vault",
+            "POST",
+            "/v1/llm-connections/10000000-0000-4000-8000-000000000001/refresh",
+        ),
+        (
+            "llm-vault",
+            "POST",
+            "/v1/llm-connections/10000000-0000-4000-8000-000000000001/revoke",
+        ),
+    ],
+)
+def test_upstream_project_body_injection_registry_is_explicit(
+    service: str,
+    method: str,
+    path: str,
+) -> None:
+    assert proxy._requires_upstream_project_body(service, method, path)
+
+
+@pytest.mark.parametrize(
+    ("service", "method", "path"),
+    [
+        ("config", "POST", "/v1/admin/flags"),
+        ("query", "GET", "/v1/query/events/count"),
+        ("agents", "POST", "/v1/agents/custom"),
+        ("agents", "PUT", "/v1/agents/llm-connections/OpenAI"),
+        ("agents", "POST", "/v1/agents/llm-connections/openai/unknown"),
+        ("codegen", "POST", "/v1/changesets/cs_demo/retry"),
+        ("codegen", "PUT", "/v1/llm-connections/openai/models"),
+        (
+            "llm-vault",
+            "PUT",
+            "/v1/llm-connections/not-a-canonical-connection-id",
+        ),
+    ],
+)
+def test_upstream_project_body_injection_registry_rejects_unregistered_routes(
+    service: str,
+    method: str,
+    path: str,
+) -> None:
+    assert not proxy._requires_upstream_project_body(service, method, path)
+
+
 def test_agents_setup_proxy_routes_are_strictly_mapped() -> None:
     assert (
         proxy.required_role("agents", "GET", "/v1/agents/setup")
@@ -762,7 +838,6 @@ async def test_agents_setup_mutation_rechecks_live_dual_role_authority(
             "/api/projects/demo/agents/v1/agents/setup",
             headers={"Origin": "http://admin.test"},
             json={
-                "project_id": "demo",
                 "fast_model": {
                     "provider": "openai",
                     "model": "gpt-5.4-mini",
@@ -1450,6 +1525,87 @@ async def test_proxy_does_not_expose_global_repository_onboarding(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("service", "method", "path", "body"),
+    [
+        (
+            "config",
+            "POST",
+            "/v1/evaluate",
+            {"key": "checkout", "context": {}},
+        ),
+        (
+            "query",
+            "POST",
+            "/v1/query/events/count",
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-02",
+                "selectors": [{"event_name": "checkout", "filters": []}],
+            },
+        ),
+        (
+            "agents",
+            "POST",
+            "/v1/agents/trigger",
+            {"agents": ["behavior_analysis"]},
+        ),
+        (
+            "codegen",
+            "POST",
+            "/v1/changesets",
+            {"proposal_id": "proposal-1"},
+        ),
+    ],
+)
+async def test_proxy_injects_path_project_into_registered_upstream_json_routes(
+    admin_session: AdminSession,
+    service: str,
+    method: str,
+    path: str,
+    body: dict[str, object],
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.request(
+            method,
+            f"/api/projects/demo/{service}{path}",
+            headers={"Origin": "http://admin.test"},
+            json=body,
+        )
+
+    assert response.status_code == 200
+    assert seen == [{**body, "project_id": "demo"}]
+
+
+@pytest.mark.asyncio
+async def test_proxy_does_not_inject_project_into_unregistered_json_body_route(
+    admin_session: AdminSession,
+) -> None:
+    seen: list[dict[str, object]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json={"created": True})
+
+    body = {"key": "checkout", "default_variant": "control"}
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.post(
+            "/api/projects/demo/config/v1/admin/flags",
+            headers={"Origin": "http://admin.test"},
+            json=body,
+        )
+
+    assert response.status_code == 201
+    assert seen == [body]
+
+
+@pytest.mark.asyncio
 async def test_proxy_uses_bearer_authority_and_validates_project_assertions(
     admin_session: AdminSession,
 ) -> None:
@@ -1496,14 +1652,11 @@ async def test_proxy_uses_bearer_authority_and_validates_project_assertions(
         audit_statements = client.app.state.audit_statements
 
     assert bearer_only.status_code == 202
-    assert mismatch.status_code == 403
+    assert mismatch.status_code == 400
     assert query_alias.status_code == 400
     assert header_alias.status_code == 400
-    assert accepted.status_code == 202
-    assert bodies == [
-        {"events": []},
-        {"project_id": "demo", "events": []},
-    ]
+    assert accepted.status_code == 400
+    assert bodies == [{"events": []}]
     insert = next(
         statement for statement in audit_statements if "INSERT INTO" in statement[0]
     )
@@ -1521,6 +1674,50 @@ async def test_proxy_uses_bearer_authority_and_validates_project_assertions(
     )
     assert completed[1][1] == 202
     assert "{'events':" not in repr(insert[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("location", "alias"),
+    [
+        ("body", "projectId"),
+        ("body", "Project-ID"),
+        ("body", "x_apdl_project_id"),
+        ("query", "projectId"),
+        ("query", "Project-ID"),
+        ("query", "x_apdl_project_id"),
+        ("header", "Project_ID"),
+        ("header", "X-ProjectId"),
+        ("header", "X-APDL-Project_ID"),
+    ],
+)
+async def test_proxy_rejects_normalized_project_scope_aliases(
+    admin_session: AdminSession,
+    location: str,
+    alias: str,
+) -> None:
+    called = False
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(202, json={"accepted": 1})
+
+    path = "/api/projects/demo/ingestion/v1/events"
+    headers: dict[str, str] = {"Origin": "http://admin.test"}
+    body: dict[str, object] = {"events": []}
+    if location == "body":
+        body[alias] = "demo"
+    elif location == "query":
+        path = f"{path}?{alias}=demo"
+    else:
+        headers[alias] = "demo"
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.post(path, headers=headers, json=body)
+
+    assert response.status_code == 400
+    assert not called
 
 
 @pytest.mark.asyncio
