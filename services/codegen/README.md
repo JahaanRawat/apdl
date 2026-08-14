@@ -77,11 +77,8 @@ GitHub access.
 | GET | `/v1/connections/{project_id}/tenant-policy` | Read the strict tenant-owned Codegen preferences |
 | PUT | `/v1/connections/{project_id}/tenant-policy` | Replace tenant preferences (tightening only) |
 | GET | `/v1/connections/{project_id}/repo-context` | Strict canonical `repo_profile@1` for planning agents |
-| GET | `/v1/llm-connections?project_id=…` | List the project's active provider connections without credential material |
-| PUT | `/v1/llm-connections/{provider}` | Owner-controlled create or credential replacement with live model discovery |
+| GET | `/v1/llm-connections?project_id=…` | List vault-managed provider projections without credential material |
 | GET | `/v1/llm-connections/{provider}/models?project_id=…` | Read the validated current model inventory |
-| POST | `/v1/llm-connections/{provider}/refresh-models` | Owner-controlled credential revalidation and inventory refresh |
-| POST | `/v1/llm-connections/{provider}/revoke` | Owner-controlled terminal connection revocation |
 | GET | `/v1/capabilities/changeset-creation?project_id=…` | Authenticated project capability and exact blocking reasons |
 | POST | `/v1/changesets` | Enqueue a changeset during a PR publication stage |
 | GET | `/v1/changesets?project_id=…` | List a project's changesets |

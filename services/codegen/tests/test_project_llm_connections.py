@@ -128,7 +128,13 @@ async def test_legacy_mutation_routes_are_not_exposed(
             "/v1/llm-connections/openai/refresh",
             json={"project_id": "demo", "version": 1},
         )
+        malformed = await client.put(
+            "/v1/llm-connections/openai",
+            content=b'{"api_key":',
+            headers={"Content-Type": "application/json"},
+        )
 
     assert replace.status_code == 404
     assert refresh.status_code == 404
+    assert malformed.status_code == 404
     assert connection_store.model_requests == []

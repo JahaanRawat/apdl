@@ -49,11 +49,8 @@ a canonical `admin_project_execution_authorizations` row.
 | `POST` | `/v1/agents/{run_id}/cancel` | Durably cancel an active run and fence further work |
 | `POST` | `/v1/agents/{run_id}/approve` | Validate exact per-item decisions and queue an approval command (`202`) |
 | `GET` | `/v1/agents/{run_id}/approvals/{command_id}` | Command and per-effect retry/manual-intervention status |
-| `GET` | `/v1/agents/llm-connections?project_id=...` | List project provider connections without secret metadata |
-| `PUT` | `/v1/agents/llm-connections/{provider}` | Validate, discover models, and atomically create or replace a connection |
+| `GET` | `/v1/agents/llm-connections?project_id=...` | List vault-managed provider projections without secret metadata |
 | `GET` | `/v1/agents/llm-connections/{provider}/models?project_id=...` | Read the last validated normalized model inventory |
-| `POST` | `/v1/agents/llm-connections/{provider}/refresh-models` | Revalidate a connection and atomically refresh its inventory |
-| `POST` | `/v1/agents/llm-connections/{provider}/revoke` | Revoke and crypto-shred an unassigned provider connection |
 | `GET` | `/health` | Liveness probe |
 | `GET` | `/ready` | Core readiness (runtime initialization and PostgreSQL) |
 | `GET` | `/ready/capabilities` | Non-blocking configured/reachable report for LLM, Query, Config, and Codegen |
@@ -137,9 +134,9 @@ trigger an implicit same-vendor or cross-vendor fallback.
 ### Connect xAI/Grok
 
 1. Apply PostgreSQL migrations with `make migrate-postgres`.
-2. Add the project's xAI connection through the authenticated
-   `/v1/agents/llm-connections/xai` API. The key is validated, encrypted, and
-   never returned to the browser.
+2. Add the project's xAI connection in Project settings through the shared LLM
+   Vault and grant it to Agents. The key is validated, encrypted, and never
+   returned to the browser.
 3. Select eligible fast and reasoning models and activate analysis through
    `PUT /v1/agents/setup`. Pricing, residency, classifications, endpoints, and
    budgets are server-owned and cannot be supplied by the client.

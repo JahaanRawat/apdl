@@ -93,7 +93,6 @@ from app.store import pr_publication as publication_store
 from app.store import repository_authorizations as repository_authorization_store
 from app.store.llm_connections import ProjectConnectionStore
 from app.store.llm_credentials import ProjectCredentialStore
-from app.strict_json import StrictConnectionJsonMiddleware
 
 #: Error recorded on changesets the orphan sweeps fail (startup + periodic).
 _ORPHAN_ERROR = (
@@ -596,7 +595,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(RequestBodyLimitMiddleware)
-app.add_middleware(StrictConnectionJsonMiddleware)
 
 
 @app.exception_handler(RequestValidationError)

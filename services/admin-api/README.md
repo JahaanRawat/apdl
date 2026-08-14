@@ -56,6 +56,10 @@ or rotation, and every request is authorized against a user, project, and role.
   registry only, the BFF injects the required internal-service project body or
   query value from the canonical resource path. Browser contracts remain
   path-scoped and never duplicate project identity.
+- Project LLM credential creation, replacement, refresh, and revocation route
+  only through the shared LLM Vault. Agents and Codegen expose read-only,
+  non-secret connection and model projections; their retired mutation paths
+  are not part of the Admin proxy surface.
 - GitHub App browser onboarding and callbacks are not exposed in console API
   version 1 because the former flow required browser cookies and URL state.
 - Uvicorn preserves the socket peer instead of trusting forwarded headers.

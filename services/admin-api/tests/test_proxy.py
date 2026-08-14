@@ -305,7 +305,7 @@ async def test_llm_connection_read_fails_without_role_or_live_management_authori
 
 
 @pytest.mark.asyncio
-async def test_llm_connection_mutation_uses_live_dual_role_authority(
+async def test_llm_vault_mutation_uses_live_dual_role_authority(
     admin_session: AdminSession,
 ) -> None:
     session = AdminSession(
@@ -316,12 +316,16 @@ async def test_llm_connection_mutation_uses_live_dual_role_authority(
     seen: dict[str, object] = {}
 
     def upstream(request: httpx.Request) -> httpx.Response:
-        seen["key"] = request.headers["x-api-key"]
+        seen["authorization"] = request.headers.get("authorization")
+        seen["api_key_header"] = request.headers.get("x-api-key")
+        seen["project"] = request.headers.get("x-apdl-project-id")
+        seen["actor"] = request.headers.get("x-apdl-actor-user-id")
         seen["body"] = json.loads(request.content)
         return httpx.Response(
-            200,
+            201,
             json={
-                "schema_version": "llm_provider_connection@1",
+                "schema_version": "project_llm_connection@1",
+                "connection_id": "10000000-0000-4000-8000-000000000001",
                 "project_id": "demo",
                 "provider": "openai",
                 "version": 1,
@@ -329,144 +333,49 @@ async def test_llm_connection_mutation_uses_live_dual_role_authority(
         )
 
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        response = client.put(
-            "/api/projects/demo/agents/v1/agents/llm-connections/openai",
-            headers={"Origin": "http://admin.test"},
-            json={
-                "api_key": "provider-secret",
-                "version": 0,
-            },
-        )
-        statements = client.app.state.audit_statements
-
-    assert response.status_code == 200
-    assert seen["body"] == {
-        "project_id": "demo",
-        "api_key": "provider-secret",
-        "version": 0,
-    }
-    assert seen["key"] != TEST_API_KEY
-    authority = next(
-        statement
-        for statement in statements
-        if "AS llm_connection_authorized" in statement[0]
-    )
-    assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
-    credential_insert = next(
-        statement
-        for statement in statements
-        if "INSERT INTO auth_credentials" in statement[0]
-    )
-    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
-    mutation_audit = next(
-        statement
-        for statement in statements
-        if "INSERT INTO admin_proxy_audit" in statement[0]
-    )
-    assert mutation_audit[1][4] == "llm-connections:manage"
-
-
-@pytest.mark.asyncio
-async def test_llm_connection_mutation_fails_when_live_authority_is_lost(
-    admin_session: AdminSession,
-) -> None:
-    session = AdminSession(
-        **{
-            **admin_session.__dict__,
-        }
-    )
-    called = False
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        nonlocal called
-        called = True
-        return httpx.Response(200)
-
-    async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        client.app.state.pg_pool.connection.llm_connection_authorized = False
         response = client.post(
-            "/api/projects/demo/agents/v1/agents/llm-connections/openai/refresh-models",
+            "/api/projects/demo/llm-vault/v1/llm-connections",
             headers={"Origin": "http://admin.test"},
-            json={"version": 1},
-        )
-
-    assert response.status_code == 403
-    assert "ownership" in response.json()["detail"]
-    assert not called
-
-
-@pytest.mark.asyncio
-async def test_codegen_llm_connection_mutation_uses_human_bound_ephemeral_credential(
-    admin_session: AdminSession,
-) -> None:
-    session = AdminSession(
-        **{
-            **admin_session.__dict__,
-        }
-    )
-    seen: dict[str, object] = {}
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        seen["key"] = request.headers["x-api-key"]
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(
-            200,
             json={
-                "schema_version": "codegen_provider_connection@1",
-                "project_id": "demo",
                 "provider": "openai",
-                "version": 1,
-            },
-        )
-
-    async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        response = client.put(
-            "/api/projects/demo/codegen/v1/llm-connections/openai",
-            headers={"Origin": "http://admin.test"},
-            json={
+                "label": "Primary OpenAI",
                 "api_key": "provider-secret",
-                "version": 0,
+                "consumers": ["agents", "codegen"],
             },
         )
         statements = client.app.state.audit_statements
 
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert seen["body"] == {
         "project_id": "demo",
+        "provider": "openai",
+        "label": "Primary OpenAI",
         "api_key": "provider-secret",
-        "version": 0,
+        "consumers": ["agents", "codegen"],
     }
-    assert seen["key"] != TEST_API_KEY
+    assert seen["authorization"] == "Bearer test-vault-admin-token-is-32-bytes-long"
+    assert seen["api_key_header"] is None
+    assert seen["project"] == "demo"
+    assert seen["actor"] == admin_session.user_id
     authority = next(
         statement
         for statement in statements
         if "AS llm_connection_authorized" in statement[0]
     )
     assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
-    credential_insert = next(
-        statement
-        for statement in statements
-        if "INSERT INTO auth_credentials" in statement[0]
-    )
-    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
-    assert credential_insert[1][4] == ["agents:read"]
     mutation_audit = next(
         statement
         for statement in statements
         if "INSERT INTO admin_proxy_audit" in statement[0]
     )
     assert mutation_audit[1][4] == "llm-connections:manage"
+    assert mutation_audit[1][5] == "llm-vault"
+    assert all("INSERT INTO auth_credentials" not in query for query, _ in statements)
     assert all("provider-secret" not in repr(arguments) for _, arguments in statements)
-    removal = next(
-        statement
-        for statement in statements
-        if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
-    )
-    assert removal[1] == (credential_insert[1][0],)
 
 
 @pytest.mark.asyncio
-async def test_codegen_llm_connection_mutation_fails_when_live_authority_is_lost(
+async def test_llm_vault_mutation_fails_when_live_authority_is_lost(
     admin_session: AdminSession,
 ) -> None:
     session = AdminSession(
@@ -484,7 +393,8 @@ async def test_codegen_llm_connection_mutation_fails_when_live_authority_is_lost
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
         client.app.state.pg_pool.connection.llm_connection_authorized = False
         response = client.post(
-            "/api/projects/demo/codegen/v1/llm-connections/openai/refresh-models",
+            "/api/projects/demo/llm-vault/v1/llm-connections/"
+            "10000000-0000-4000-8000-000000000001/refresh",
             headers={"Origin": "http://admin.test"},
             json={"version": 1},
         )
@@ -492,6 +402,51 @@ async def test_codegen_llm_connection_mutation_fails_when_live_authority_is_lost
     assert response.status_code == 403
     assert "ownership" in response.json()["detail"]
     assert not called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("PUT", "/agents/v1/agents/llm-connections/openai"),
+        (
+            "POST",
+            "/agents/v1/agents/llm-connections/openai/refresh-models",
+        ),
+        ("POST", "/agents/v1/agents/llm-connections/openai/revoke"),
+        ("PUT", "/codegen/v1/llm-connections/openai"),
+        ("POST", "/codegen/v1/llm-connections/openai/refresh-models"),
+        ("POST", "/codegen/v1/llm-connections/openai/revoke"),
+    ],
+)
+async def test_consumer_projection_mutations_are_not_exposed(
+    admin_session: AdminSession,
+    method: str,
+    path: str,
+) -> None:
+    called = False
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200)
+
+    async with proxy_client(
+        httpx.MockTransport(upstream), admin_session
+    ) as client:
+        response = client.request(
+            method,
+            f"/api/projects/demo{path}",
+            headers={"Origin": "http://admin.test"},
+            json={"api_key": "provider-secret", "version": 1},
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 404
+    assert not called
+    assert not any(
+        "AS llm_connection_authorized" in query for query, _ in statements
+    )
 
 
 def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
@@ -501,7 +456,7 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
             "PUT",
             "/v1/agents/llm-connections/openai",
         )
-        == "llm-connections:manage"
+        == ""
     )
     assert (
         proxy.required_role(
@@ -509,7 +464,7 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
             "POST",
             "/v1/agents/llm-connections/google/revoke",
         )
-        == "llm-connections:manage"
+        == ""
     )
     assert (
         proxy.required_role(
@@ -574,7 +529,7 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
             "PUT",
             "/v1/llm-connections/openai",
         )
-        == "llm-connections:manage"
+        == ""
     )
     assert (
         proxy.required_role(
@@ -582,7 +537,7 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
             "POST",
             "/v1/llm-connections/google/refresh-models",
         )
-        == "llm-connections:manage"
+        == ""
     )
     assert (
         proxy.required_role(
@@ -590,7 +545,7 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
             "POST",
             "/v1/llm-connections/google/revoke",
         )
-        == "llm-connections:manage"
+        == ""
     )
     assert (
         proxy.required_role(
@@ -600,6 +555,37 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
         )
         == ""
     )
+
+    connection_id = "10000000-0000-4000-8000-000000000001"
+    assert (
+        proxy.required_role("llm-vault", "GET", "/v1/llm-connections")
+        == "llm-connections:read"
+    )
+    assert (
+        proxy.required_role(
+            "llm-vault", "GET", f"/v1/llm-connections/{connection_id}"
+        )
+        == "llm-connections:read"
+    )
+    assert (
+        proxy.required_role("llm-vault", "POST", "/v1/llm-connections")
+        == "llm-connections:manage"
+    )
+    assert (
+        proxy.required_role(
+            "llm-vault", "PUT", f"/v1/llm-connections/{connection_id}"
+        )
+        == "llm-connections:manage"
+    )
+    for action in ("refresh", "revoke"):
+        assert (
+            proxy.required_role(
+                "llm-vault",
+                "POST",
+                f"/v1/llm-connections/{connection_id}/{action}",
+            )
+            == "llm-connections:manage"
+        )
     assert (
         proxy.required_role(
             "codegen",
@@ -652,16 +638,6 @@ def test_llm_connection_proxy_routes_are_strictly_mapped() -> None:
         ("agents", "POST", "/v1/agents/setup/deactivate"),
         ("codegen", "POST", "/v1/changesets"),
         ("llm-vault", "POST", "/v1/llm-connections"),
-        ("agents", "PUT", "/v1/agents/llm-connections/openai"),
-        (
-            "agents",
-            "POST",
-            "/v1/agents/llm-connections/google/refresh-models",
-        ),
-        ("agents", "POST", "/v1/agents/llm-connections/xai/revoke"),
-        ("codegen", "PUT", "/v1/llm-connections/anthropic"),
-        ("codegen", "POST", "/v1/llm-connections/openai/refresh-models"),
-        ("codegen", "POST", "/v1/llm-connections/google/revoke"),
         (
             "llm-vault",
             "PUT",
@@ -693,9 +669,19 @@ def test_upstream_project_body_injection_registry_is_explicit(
         ("config", "POST", "/v1/admin/flags"),
         ("query", "GET", "/v1/query/events/count"),
         ("agents", "POST", "/v1/agents/custom"),
+        ("agents", "PUT", "/v1/agents/llm-connections/openai"),
+        (
+            "agents",
+            "POST",
+            "/v1/agents/llm-connections/google/refresh-models",
+        ),
+        ("agents", "POST", "/v1/agents/llm-connections/xai/revoke"),
         ("agents", "PUT", "/v1/agents/llm-connections/OpenAI"),
         ("agents", "POST", "/v1/agents/llm-connections/openai/unknown"),
         ("codegen", "POST", "/v1/changesets/cs_demo/retry"),
+        ("codegen", "PUT", "/v1/llm-connections/anthropic"),
+        ("codegen", "POST", "/v1/llm-connections/openai/refresh-models"),
+        ("codegen", "POST", "/v1/llm-connections/google/revoke"),
         ("codegen", "PUT", "/v1/llm-connections/openai/models"),
         (
             "llm-vault",

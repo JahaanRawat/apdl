@@ -76,30 +76,6 @@ _UPSTREAM_PROJECT_BODY_ROUTES = frozenset(
 )
 _UPSTREAM_PROJECT_BODY_PATTERNS = (
     (
-        "agents",
-        "PUT",
-        re.compile(r"^/v1/agents/llm-connections/(?:openai|anthropic|google|xai)$"),
-    ),
-    (
-        "agents",
-        "POST",
-        re.compile(
-            r"^/v1/agents/llm-connections/(?:openai|anthropic|google|xai)/(?:refresh-models|revoke)$"
-        ),
-    ),
-    (
-        "codegen",
-        "PUT",
-        re.compile(r"^/v1/llm-connections/(?:openai|anthropic|google|xai)$"),
-    ),
-    (
-        "codegen",
-        "POST",
-        re.compile(
-            r"^/v1/llm-connections/(?:openai|anthropic|google|xai)/(?:refresh-models|revoke)$"
-        ),
-    ),
-    (
         "llm-vault",
         "PUT",
         re.compile(r"^/v1/llm-connections/[0-9a-fA-F-]{36}$"),
@@ -540,17 +516,6 @@ def required_role(service: str, method: str, path: str) -> str | None:
                 or re.fullmatch(provider_path + r"/models", path) is not None
             ):
                 return _LLM_CONNECTION_READER
-            if method == "PUT" and re.fullmatch(provider_path, path) is not None:
-                return _LLM_CONNECTION_MANAGER
-            if (
-                method == "POST"
-                and re.fullmatch(
-                    provider_path + r"/(?:refresh-models|revoke)",
-                    path,
-                )
-                is not None
-            ):
-                return _LLM_CONNECTION_MANAGER
             return ""
         if method == "GET" and path == "/v1/agents/capabilities/execution":
             return "agents:run"
@@ -576,17 +541,6 @@ def required_role(service: str, method: str, path: str) -> str | None:
                 or re.fullmatch(provider_path + r"/models", path) is not None
             ):
                 return "agents:read"
-            if method == "PUT" and re.fullmatch(provider_path, path) is not None:
-                return _LLM_CONNECTION_MANAGER
-            if (
-                method == "POST"
-                and re.fullmatch(
-                    provider_path + r"/(?:refresh-models|revoke)",
-                    path,
-                )
-                is not None
-            ):
-                return _LLM_CONNECTION_MANAGER
             return ""
         if method == "GET" and (
             path.startswith("/v1/changesets") or path.startswith("/v1/connections/")
