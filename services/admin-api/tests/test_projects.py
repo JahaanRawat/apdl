@@ -90,11 +90,12 @@ def test_zero_project_user_creates_project_and_receives_owner_roles() -> None:
 
     assert response.status_code == 201
     identity = response.json()
+    assert identity["schema_version"] == "console_identity@1"
     assert identity["email"] == "admin@example.com"
     assert identity["projects"] == [
         {
             "project_id": "newproject",
-            "roles": sorted(projects.PROJECT_CREATOR_ROLES),
+            "roles": list(projects.PROJECT_CREATOR_ROLES),
         }
     ]
     membership = next(

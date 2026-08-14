@@ -404,6 +404,7 @@ def test_existing_matching_account_accepts_once_with_audited_membership() -> Non
         )
 
     assert accepted.status_code == 200
+    assert accepted.json()["schema_version"] == "console_identity@1"
     assert accepted.json()["projects"] == [
         {"project_id": "demo", "roles": ["config:read"]}
     ]

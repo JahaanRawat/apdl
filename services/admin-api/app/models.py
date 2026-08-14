@@ -1,5 +1,6 @@
 """Canonical admin authentication contracts."""
 
+from collections.abc import Iterable
 from datetime import datetime
 import re
 from typing import Annotated, Literal
@@ -78,6 +79,15 @@ HUMAN_ROLE_ORDER: tuple[HumanRole, ...] = (
 )
 
 
+def canonical_human_roles(roles: Iterable[str]) -> list[HumanRole]:
+    values = list(roles)
+    selected = set(values)
+    allowed = set(HUMAN_ROLE_ORDER)
+    if not values or len(values) != len(selected) or not selected <= allowed:
+        raise ValueError("roles must be non-empty, unique canonical human roles")
+    return [role for role in HUMAN_ROLE_ORDER if role in selected]
+
+
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -113,15 +123,14 @@ class ProjectAccess(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str = Field(pattern=PROJECT_ID_PATTERN)
-    roles: list[str]
+    roles: list[HumanRole] = Field(min_length=1, max_length=len(HUMAN_ROLE_ORDER))
 
-
-class UserIdentity(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    user_id: str
-    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
-    projects: list[ProjectAccess]
+    @field_validator("roles")
+    @classmethod
+    def validate_roles(cls, value: list[HumanRole]) -> list[HumanRole]:
+        if value != canonical_human_roles(value):
+            raise ValueError("roles must be unique and use canonical order")
+        return value
 
 
 class ConsoleIdentity(BaseModel):

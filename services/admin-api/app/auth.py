@@ -25,6 +25,7 @@ from app.models import (
     ConsoleSession,
     LoginRequest,
     ProjectAccess,
+    canonical_human_roles,
     SecurityNotification,
 )
 from app.security import (
@@ -53,7 +54,10 @@ class AdminSession:
             user_id=self.user_id,
             email=self.email,
             projects=[
-                ProjectAccess(project_id=project_id, roles=sorted(roles))
+                ProjectAccess(
+                    project_id=project_id,
+                    roles=canonical_human_roles(roles),
+                )
                 for project_id, roles in sorted(self.projects.items())
             ],
         )

@@ -17,6 +17,7 @@ from app.login_security import (
 from app.models import (
     AuditCursor,
     AuditPageQuery,
+    ConsoleIdentity,
     InvitationAcceptRequest,
     InvitationCreateRequest,
     MemberRolesReplaceRequest,
@@ -27,7 +28,7 @@ from app.models import (
     ProjectInvitationReveal,
     ProjectMember,
     ProjectMembers,
-    UserIdentity,
+    canonical_human_roles,
 )
 from app.security import new_token, token_hash
 
@@ -736,13 +737,13 @@ async def list_membership_audit(
 
 @router.post(
     "/api/invitations/accept",
-    response_model=UserIdentity,
+    response_model=ConsoleIdentity,
 )
 async def accept_invitation(
     body: InvitationAcceptRequest,
     request: Request,
     session: AdminSession = Depends(require_session),
-) -> UserIdentity:
+) -> ConsoleIdentity:
     digest = token_hash(body.invitation_token)
     user_id = uuid.UUID(session.user_id)
     async with request.app.state.pg_pool.acquire() as conn:
@@ -804,11 +805,14 @@ async def accept_invitation(
 
     projects = dict(session.projects)
     projects[str(invitation["project_id"])] = frozenset(invitation["roles"])
-    return UserIdentity(
+    return ConsoleIdentity(
         user_id=session.user_id,
         email=session.email,
         projects=[
-            ProjectAccess(project_id=project_id, roles=sorted(roles))
+            ProjectAccess(
+                project_id=project_id,
+                roles=canonical_human_roles(roles),
+            )
             for project_id, roles in sorted(projects.items())
         ],
     )

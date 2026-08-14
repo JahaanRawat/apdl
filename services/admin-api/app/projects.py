@@ -12,6 +12,7 @@ from app.auth import AdminSession, require_session
 from app.models import (
     AuditCursor,
     AuditPageQuery,
+    ConsoleIdentity,
     ExecutionAuthorizationSummary,
     HumanProjectOwnership,
     OperatorManagedProjectOwnership,
@@ -22,7 +23,7 @@ from app.models import (
     ProjectAuthorizationSummary,
     ProjectCreateRequest,
     ProjectCreator,
-    UserIdentity,
+    canonical_human_roles,
 )
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -114,12 +115,12 @@ async def _fetch_authorization_summary(
     return _authorization_summary(row)
 
 
-@router.post("", response_model=UserIdentity, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ConsoleIdentity, status_code=status.HTTP_201_CREATED)
 async def create_project(
     body: ProjectCreateRequest,
     request: Request,
     session: AdminSession = Depends(require_session),
-) -> UserIdentity | Response:
+) -> ConsoleIdentity | Response:
     settings = request.app.state.settings
 
     async with request.app.state.pg_pool.acquire() as conn:
@@ -193,11 +194,14 @@ async def create_project(
 
     projects = dict(session.projects)
     projects[str(project_id)] = frozenset(PROJECT_CREATOR_ROLES)
-    return UserIdentity(
+    return ConsoleIdentity(
         user_id=session.user_id,
         email=session.email,
         projects=[
-            ProjectAccess(project_id=item_id, roles=sorted(roles))
+            ProjectAccess(
+                project_id=item_id,
+                roles=canonical_human_roles(roles),
+            )
             for item_id, roles in sorted(projects.items())
         ],
     )
