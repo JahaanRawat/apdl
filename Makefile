@@ -171,6 +171,7 @@ run-gateway:
 		INGESTION_SERVICE_URL=http://localhost:8080 \
 		CONFIG_SERVICE_URL=http://localhost:8081 \
 		APDL_GATEWAY_ALLOWED_HOSTS='["localhost:8000"]' \
+		APDL_CONSOLE_ALLOWED_ORIGINS='["https://console.apdl.dev"]' \
 		.venv/bin/python -m uvicorn app.main:app \
 		--reload --port 8000 --no-proxy-headers --no-access-log
 

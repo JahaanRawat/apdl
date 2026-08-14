@@ -16,10 +16,30 @@ from app.main import _response_body, create_app
 
 
 REQUEST_ID = "11111111-1111-4111-8111-111111111111"
+CONSOLE_ORIGIN = "https://console.apdl.dev"
+EXPECTED_CORS_HEADERS = {
+    "access-control-allow-origin": CONSOLE_ORIGIN,
+    "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "access-control-allow-headers": "Authorization, Content-Type, Last-Event-ID",
+    "access-control-expose-headers": "X-Request-ID",
+    "access-control-max-age": "600",
+    "vary": "Origin, Access-Control-Request-Method, Access-Control-Request-Headers",
+}
 
 
 def settings(**changes: object) -> GatewaySettings:
-    return replace(GatewaySettings.from_env({}), **changes)
+    return replace(
+        GatewaySettings.from_env(
+            {"APDL_CONSOLE_ALLOWED_ORIGINS": f'["{CONSOLE_ORIGIN}"]'}
+        ),
+        **changes,
+    )
+
+
+def assert_console_cors(response: httpx.Response) -> None:
+    for name, value in EXPECTED_CORS_HEADERS.items():
+        assert response.headers[name] == value
+    assert "access-control-allow-credentials" not in response.headers
 
 
 @asynccontextmanager
@@ -64,6 +84,9 @@ async def test_api_path_query_and_required_headers_are_preserved() -> None:
             headers={
                 "Connection": "X-Upstream-Hop",
                 "X-Upstream-Hop": "private",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Credentials": "true",
+                "Vary": "Cookie",
                 "Set-Cookie": "internal=secret",
                 "X-Request-ID": "replaced",
             },
@@ -102,6 +125,235 @@ async def test_api_path_query_and_required_headers_are_preserved() -> None:
     assert response.headers["x-request-id"] == REQUEST_ID
     assert "set-cookie" not in response.headers
     assert "x-upstream-hop" not in response.headers
+    assert_console_cors(response)
+
+
+@pytest.mark.asyncio
+async def test_valid_preflight_is_unauthenticated_and_never_reaches_upstream() -> None:
+    calls = 0
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500)
+
+    async with gateway_client(httpx.MockTransport(upstream)) as client:
+        response = await client.options(
+            "/api/projects/demo/config/v1/admin/flags",
+            headers={
+                "Origin": CONSOLE_ORIGIN,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": (
+                    "authorization, Content-Type, LAST-EVENT-ID"
+                ),
+                "X-Request-ID": REQUEST_ID,
+            },
+        )
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert response.headers["x-request-id"] == REQUEST_ID
+    assert_console_cors(response)
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_preflight_requires_both_one_origin_and_one_requested_method() -> None:
+    upstream = httpx.MockTransport(lambda _request: httpx.Response(500))
+    async with gateway_client(upstream) as client:
+        missing_origin = await client.options(
+            "/api/console/v1/manifest",
+            headers={"Access-Control-Request-Method": "GET"},
+        )
+        missing_method = await client.options(
+            "/api/console/v1/manifest",
+            headers={"Origin": CONSOLE_ORIGIN},
+        )
+
+    assert missing_origin.status_code == 400
+    assert missing_origin.json()["code"] == "invalid_cors_preflight"
+    assert "access-control-allow-origin" not in missing_origin.headers
+    assert missing_origin.headers["vary"] == EXPECTED_CORS_HEADERS["vary"]
+    assert missing_method.status_code == 400
+    assert missing_method.json()["code"] == "invalid_cors_preflight"
+    assert_console_cors(missing_method)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "headers"),
+    [
+        ("TRACE", "Authorization"),
+        ("get", "Authorization"),
+        ("GET", "X-CSRF-Token"),
+        ("GET", "Authorization, authorization"),
+        ("GET", "Authorization,"),
+    ],
+)
+async def test_invalid_preflight_is_a_shareable_canonical_error(
+    method: str,
+    headers: str,
+) -> None:
+    calls = 0
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    async with gateway_client(httpx.MockTransport(upstream)) as client:
+        response = await client.options(
+            "/api/console/v1/sessions",
+            headers={
+                "Origin": CONSOLE_ORIGIN,
+                "Access-Control-Request-Method": method,
+                "Access-Control-Request-Headers": headers,
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["schema_version"] == "error@1"
+    assert response.json()["code"] == "invalid_cors_preflight"
+    assert_console_cors(response)
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_actual_browser_method_outside_cors_allowlist_is_rejected() -> None:
+    calls = 0
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    async with gateway_client(httpx.MockTransport(upstream)) as client:
+        response = await client.head(
+            "/api/console/v1/manifest",
+            headers={"Origin": CONSOLE_ORIGIN},
+        )
+
+    assert response.status_code == 405
+    assert response.headers["x-request-id"]
+    assert_console_cors(response)
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "null",
+        "https://console.apdl.dev.attacker.example",
+        "https://attacker-console.apdl.dev",
+        "https://user:secret@console.apdl.dev",
+        "https://console.apdl.dev/path",
+    ],
+)
+async def test_unmatched_and_malformed_browser_origins_are_rejected(
+    origin: str,
+) -> None:
+    calls = 0
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200)
+
+    async with gateway_client(httpx.MockTransport(upstream)) as client:
+        response = await client.get(
+            "/api/console/v1/manifest",
+            headers={"Origin": origin},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["schema_version"] == "error@1"
+    assert response.json()["code"] == "origin_not_allowed"
+    assert response.headers["vary"] == EXPECTED_CORS_HEADERS["vary"]
+    assert "access-control-allow-origin" not in response.headers
+    assert "access-control-allow-credentials" not in response.headers
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_duplicate_origin_headers_are_rejected() -> None:
+    async with gateway_client(
+        httpx.MockTransport(lambda _request: httpx.Response(200))
+    ) as client:
+        response = await client.get(
+            "/api/console/v1/manifest",
+            headers=[("Origin", CONSOLE_ORIGIN), ("Origin", CONSOLE_ORIGIN)],
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "origin_not_allowed"
+    assert "access-control-allow-origin" not in response.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403, 404, 500, 503])
+async def test_allowed_origin_is_attached_to_shareable_api_errors(
+    status_code: int,
+) -> None:
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            json={
+                "schema_version": "error@1",
+                "code": "upstream_error",
+                "message": "Safe upstream error.",
+                "request_id": REQUEST_ID,
+            },
+        )
+
+    async with gateway_client(httpx.MockTransport(upstream)) as client:
+        response = await client.get(
+            "/api/projects/demo/query/v1/admin/funnels",
+            headers={"Origin": CONSOLE_ORIGIN, "X-Request-ID": REQUEST_ID},
+        )
+
+    assert response.status_code == status_code
+    assert_console_cors(response)
+
+
+@pytest.mark.asyncio
+async def test_console_cors_is_never_applied_to_sdk_routes() -> None:
+    seen_origins: list[str | None] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen_origins.append(request.headers.get("origin"))
+        return httpx.Response(200, json={"schema_version": 2, "flags": []})
+
+    async with gateway_client(httpx.MockTransport(upstream)) as client:
+        response = await client.get(
+            "/v1/flags",
+            headers={"Origin": CONSOLE_ORIGIN},
+        )
+
+    assert response.status_code == 200
+    assert seen_origins == [CONSOLE_ORIGIN]
+    assert not any(name.startswith("access-control-") for name in response.headers)
+    assert "vary" not in response.headers
+
+
+@pytest.mark.asyncio
+async def test_api_without_origin_strips_upstream_cors_credentials() -> None:
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Credentials": "true",
+            },
+        )
+
+    async with gateway_client(httpx.MockTransport(upstream)) as client:
+        response = await client.get("/api/console/v1/manifest")
+
+    assert response.status_code == 200
+    assert "access-control-allow-origin" not in response.headers
+    assert "access-control-allow-credentials" not in response.headers
+    assert response.headers["vary"] == EXPECTED_CORS_HEADERS["vary"]
 
 
 @pytest.mark.asyncio
@@ -152,9 +404,7 @@ async def test_api_rate_limit_is_canonical_and_sdk_routes_are_independent() -> N
 
 
 @pytest.mark.asyncio
-async def test_options_does_not_consume_the_future_cors_actual_request_budget() -> (
-    None
-):
+async def test_cors_preflight_does_not_consume_the_actual_request_budget() -> None:
     calls: list[str] = []
 
     def upstream(request: httpx.Request) -> httpx.Response:
@@ -170,12 +420,28 @@ async def test_options_does_not_consume_the_future_cors_actual_request_budget() 
         httpx.MockTransport(upstream),
         configured=configured,
     ) as client:
-        options = await client.options("/api/console/v1/session")
-        allowed = await client.get("/api/console/v1/session")
-        limited = await client.get("/api/console/v1/session")
+        options = await client.options(
+            "/api/console/v1/session",
+            headers={
+                "Origin": CONSOLE_ORIGIN,
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        allowed = await client.get(
+            "/api/console/v1/session",
+            headers={"Origin": CONSOLE_ORIGIN},
+        )
+        limited = await client.get(
+            "/api/console/v1/session",
+            headers={"Origin": CONSOLE_ORIGIN},
+        )
 
     assert options.status_code == allowed.status_code == 204
     assert limited.status_code == 429
+    assert limited.headers["retry-after"] == "60"
+    assert_console_cors(options)
+    assert_console_cors(allowed)
+    assert_console_cors(limited)
     assert calls.count("GET") == 1
 
 
@@ -477,7 +743,10 @@ async def test_gateway_transport_failures_use_canonical_errors(
     async with gateway_client(httpx.MockTransport(upstream)) as client:
         response = await client.get(
             "/api/console/v1/manifest",
-            headers={"X-Request-ID": REQUEST_ID},
+            headers={
+                "Origin": CONSOLE_ORIGIN,
+                "X-Request-ID": REQUEST_ID,
+            },
         )
 
     assert response.status_code == status_code
@@ -492,6 +761,7 @@ async def test_gateway_transport_failures_use_canonical_errors(
         "request_id": REQUEST_ID,
     }
     assert response.headers["x-request-id"] == REQUEST_ID
+    assert_console_cors(response)
 
 
 @pytest.mark.asyncio
@@ -557,6 +827,21 @@ class PausedStream(httpx.AsyncByteStream):
         self.closed = True
 
 
+class IncrementalTransport(httpx.AsyncBaseTransport):
+    def __init__(self, stream: PausedStream) -> None:
+        self.stream = stream
+        self.request: httpx.Request | None = None
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.request = request
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            stream=self.stream,
+            request=request,
+        )
+
+
 @pytest.mark.asyncio
 async def test_upstream_response_iterator_delivers_first_chunk_before_completion() -> (
     None
@@ -573,6 +858,70 @@ async def test_upstream_response_iterator_delivers_first_chunk_before_completion
     assert await asyncio.wait_for(anext(iterator), timeout=0.1) == b": heartbeat\n\n"
     with pytest.raises(StopAsyncIteration):
         await anext(iterator)
+    assert stream.closed
+
+
+@pytest.mark.asyncio
+async def test_api_sse_is_cors_enabled_and_delivered_incrementally() -> None:
+    stream = PausedStream()
+    transport = IncrementalTransport(stream)
+    app = create_app(settings(), transport=transport)
+    first_body_sent = asyncio.Event()
+    receive_blocker = asyncio.Event()
+    messages: list[dict[str, object]] = []
+    received_request = False
+
+    async def receive() -> dict[str, object]:
+        nonlocal received_request
+        if not received_request:
+            received_request = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await receive_blocker.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        messages.append(message)
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_body_sent.set()
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/projects/demo/config/v1/admin/stream",
+        "raw_path": b"/api/projects/demo/config/v1/admin/stream",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"localhost:8000"),
+            (b"origin", CONSOLE_ORIGIN.encode()),
+            (b"accept", b"text/event-stream"),
+            (b"last-event-id", b"event-17"),
+        ],
+        "client": ("127.0.0.1", 1234),
+        "server": ("localhost", 8000),
+    }
+
+    async with app.router.lifespan_context(app):
+        task = asyncio.create_task(app(scope, receive, send))
+        await asyncio.wait_for(first_body_sent.wait(), timeout=0.2)
+        assert not task.done()
+        start = next(
+            message for message in messages if message["type"] == "http.response.start"
+        )
+        response_headers = httpx.Headers(start["headers"])
+        for name, value in EXPECTED_CORS_HEADERS.items():
+            assert response_headers[name] == value
+        assert "access-control-allow-credentials" not in response_headers
+        assert messages[-1]["body"].startswith(b"event: ready")
+        assert transport.request is not None
+        assert transport.request.headers["last-event-id"] == "event-17"
+
+        stream.release.set()
+        await asyncio.wait_for(task, timeout=0.2)
+
     assert stream.closed
 
 

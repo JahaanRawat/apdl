@@ -22,6 +22,10 @@ _HOST_PATTERN = re.compile(
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
     r"(?::\d{1,5})?)$"
 )
+_ORIGIN_HOST_PATTERN = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 
 
 def _positive_float(environment: Mapping[str, str], name: str, default: str) -> float:
@@ -124,6 +128,90 @@ def _trusted_proxy_cidrs(
     return tuple(networks)
 
 
+def _canonical_console_origin(value: str) -> str:
+    if value != value.strip() or value == "null":
+        raise ValueError("Console origins must be canonical HTTP(S) origins")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Console origins must be canonical HTTP(S) origins")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Console origin has an invalid port") from exc
+
+    hostname = parsed.hostname
+    if (
+        hostname is None
+        or hostname != hostname.lower()
+        or len(hostname) > 253
+        or "%" in hostname
+    ):
+        raise ValueError("Console origin has an invalid host")
+    try:
+        hostname.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Console origin host must be ASCII") from exc
+
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        if _ORIGIN_HOST_PATTERN.fullmatch(hostname) is None or (
+            "." in hostname and all(part.isdigit() for part in hostname.split("."))
+        ):
+            raise ValueError("Console origin has an invalid host")
+        canonical_host = hostname
+    else:
+        canonical_host = (
+            f"[{address.compressed}]" if address.version == 6 else str(address)
+        )
+
+    if port is not None and port < 1:
+        raise ValueError("Console origin has an invalid port")
+    if (port == 80 and parsed.scheme == "http") or (
+        port == 443 and parsed.scheme == "https"
+    ):
+        raise ValueError("Console origin must omit its default port")
+    canonical = f"{parsed.scheme}://{canonical_host}"
+    if port is not None:
+        canonical = f"{canonical}:{port}"
+    if value != canonical:
+        raise ValueError("Console origin is not canonical")
+    return canonical
+
+
+def _console_allowed_origins(environment: Mapping[str, str]) -> frozenset[str]:
+    name = "APDL_CONSOLE_ALLOWED_ORIGINS"
+    if name not in environment:
+        raise ValueError(f"{name} is required")
+    raw = environment[name]
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{name} must be a JSON array") from exc
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) for item in value)
+    ):
+        raise ValueError(f"{name} must be a non-empty JSON string array")
+
+    origins: set[str] = set()
+    for item in value:
+        origin = _canonical_console_origin(item)
+        if origin in origins:
+            raise ValueError(f"Duplicate console origin: {origin}")
+        origins.add(origin)
+    return frozenset(origins)
+
+
 @dataclass(frozen=True)
 class GatewaySettings:
     admin_api_origin: str
@@ -133,6 +221,7 @@ class GatewaySettings:
     trusted_proxy_cidrs: tuple[
         ipaddress.IPv4Network | ipaddress.IPv6Network, ...
     ]
+    console_allowed_origins: frozenset[str]
     public_scheme: str
     max_request_body_bytes: int
     max_event_body_bytes: int
@@ -175,6 +264,7 @@ class GatewaySettings:
             ),
             allowed_hosts=_allowed_hosts(values),
             trusted_proxy_cidrs=_trusted_proxy_cidrs(values),
+            console_allowed_origins=_console_allowed_origins(values),
             public_scheme=public_scheme,
             max_request_body_bytes=_positive_int(
                 values,

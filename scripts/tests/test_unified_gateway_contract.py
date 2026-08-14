@@ -53,6 +53,7 @@ class UnifiedGatewayDeploymentTests(unittest.TestCase):
             "      ADMIN_API_URL: http://admin-api-gateway:8085",
             gateway,
         )
+        self.assertIn("      APDL_CONSOLE_ALLOWED_ORIGINS:", gateway)
         self.assertNotIn("nginx", gateway.lower())
 
         manifest = json.loads((ROOT / "release-manifest.json").read_text())

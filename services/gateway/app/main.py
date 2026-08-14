@@ -14,6 +14,7 @@ from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.client_identity import resolve_client_ip
 from app.config import GatewaySettings
@@ -23,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 _ROUTED_METHODS = [*_SUPPORTED_METHODS, "CONNECT", "TRACE"]
+_CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+_CORS_METHODS = frozenset(_CORS_ALLOW_METHODS.split(", "))
+_CORS_ALLOW_HEADERS = "Authorization, Content-Type, Last-Event-ID"
+_CORS_HEADERS = frozenset(header.lower() for header in _CORS_ALLOW_HEADERS.split(", "))
+_CORS_VARY = "Origin, Access-Control-Request-Method, Access-Control-Request-Headers"
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -68,6 +74,123 @@ class UpstreamRoute:
     origin: str
     max_body_bytes: int
     long_read_timeout: bool = False
+
+
+class ConsoleCORSMiddleware:
+    """Own exact-origin CORS for /api/* without buffering streamed bodies."""
+
+    def __init__(self, app: ASGIApp, allowed_origins: frozenset[str]) -> None:
+        self.app = app
+        self.allowed_origins = allowed_origins
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
+        request_id = _canonical_request_id(request)
+        origin_values = request.headers.getlist("origin")
+        cors_origin: str | None = None
+        if origin_values:
+            if len(origin_values) != 1 or origin_values[0] not in self.allowed_origins:
+                response = _error_response(
+                    status_code=403,
+                    code="origin_not_allowed",
+                    message="The browser Origin is not allowed by this APDL backend.",
+                    request_id=request_id,
+                )
+                await response(scope, receive, _cors_send(send, None))
+                return
+            cors_origin = origin_values[0]
+
+        cors_send = _cors_send(send, cors_origin)
+        if cors_origin is not None and request.method not in _CORS_METHODS:
+            response = _error_response(
+                status_code=405,
+                code="cors_method_not_allowed",
+                message="The browser request method is not allowed by console CORS.",
+                request_id=request_id,
+            )
+            await response(scope, receive, cors_send)
+            return
+        if request.method == "OPTIONS":
+            error = _preflight_error(request)
+            if cors_origin is None or error is not None:
+                response = _error_response(
+                    status_code=400,
+                    code="invalid_cors_preflight",
+                    message=error or "CORS preflight requires one allowed Origin.",
+                    request_id=request_id,
+                )
+                await response(scope, receive, cors_send)
+                return
+            response = Response(
+                status_code=204,
+                headers={"X-Request-ID": request_id},
+            )
+            await response(scope, receive, cors_send)
+            return
+
+        await self.app(scope, receive, cors_send)
+
+
+def _cors_send(send: Send, origin: str | None) -> Send:
+    async def send_with_cors(message: Message) -> None:
+        if message["type"] == "http.response.start":
+            headers = [
+                (name, value)
+                for name, value in message.get("headers", [])
+                if name.lower() != b"vary"
+                and not name.lower().startswith(b"access-control-")
+            ]
+            headers.append((b"vary", _CORS_VARY.encode("ascii")))
+            if origin is not None:
+                headers.extend(
+                    (
+                        (b"access-control-allow-origin", origin.encode("ascii")),
+                        (
+                            b"access-control-allow-methods",
+                            _CORS_ALLOW_METHODS.encode("ascii"),
+                        ),
+                        (
+                            b"access-control-allow-headers",
+                            _CORS_ALLOW_HEADERS.encode("ascii"),
+                        ),
+                        (b"access-control-expose-headers", b"X-Request-ID"),
+                        (b"access-control-max-age", b"600"),
+                    )
+                )
+            message = {**message, "headers": headers}
+        await send(message)
+
+    return send_with_cors
+
+
+def _preflight_error(request: Request) -> str | None:
+    method_values = request.headers.getlist("access-control-request-method")
+    if len(method_values) != 1 or method_values[0] not in _CORS_METHODS:
+        return "CORS preflight requested an unsupported method."
+
+    header_values = request.headers.getlist("access-control-request-headers")
+    if len(header_values) > 1:
+        return "CORS preflight must use one requested-headers field."
+    if not header_values:
+        return None
+    requested = [header.strip().lower() for header in header_values[0].split(",")]
+    if (
+        not requested
+        or any(not header for header in requested)
+        or len(requested) != len(set(requested))
+        or any(header not in _CORS_HEADERS for header in requested)
+    ):
+        return "CORS preflight requested an unsupported header."
+    return None
 
 
 def _canonical_request_id(request: Request) -> str:
@@ -420,6 +543,10 @@ def create_app(
     )
     application.state.settings = resolved
     application.state.api_rate_limiter = api_rate_limiter
+    application.middleware_stack = ConsoleCORSMiddleware(
+        application.build_middleware_stack(),
+        resolved.console_allowed_origins,
+    )
     return application
 
 

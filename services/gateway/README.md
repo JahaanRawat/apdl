@@ -46,6 +46,9 @@ The overlay adds a `[::1]:8000` publication while retaining
 `127.0.0.1:8000`. Continue using `http://localhost:8000` so the exact default
 Host contract remains `localhost:8000`.
 
-Exact-origin console CORS is intentionally not configured in this gateway
-revision; it is a separate deployment contract and must not be approximated
-with wildcard or suffix matching.
+`APDL_CONSOLE_ALLOWED_ORIGINS` is a required, non-empty JSON array of canonical
+HTTP(S) origins. The Compose default is `["https://console.apdl.dev"]`. CORS is
+owned only for `/api/*`; exact matches receive the fixed console policy and
+unauthenticated preflight handling, while `/v1/*` retains its independent SDK
+behavior. Wildcards, regexes, suffix matching, `null`, and credentialed or
+path-bearing origins fail closed.
