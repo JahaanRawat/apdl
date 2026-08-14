@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from app import projects
 from app.auth import AdminSession, require_session
-from app.security import token_hash
 from conftest import make_settings
 
 OWNER_ID = UUID("20000000-0000-4000-8000-000000000002")
@@ -131,7 +130,8 @@ def _session(csrf: str, *, user_id: UUID = OWNER_ID) -> AdminSession:
     return AdminSession(
         session_id="10000000-0000-4000-8000-000000000001",
         token_hash="a" * 64,
-        csrf_hash=token_hash(csrf),
+        deployment_id="30000000-0000-4000-8000-000000000003",
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
         user_id=str(user_id),
         email="owner@example.com",
         projects={"demo": frozenset({"config:read", "members:manage"})},
@@ -357,7 +357,7 @@ def test_non_owner_and_ineligible_target_cannot_transfer() -> None:
     assert connection.audits == []
 
 
-def test_transfer_requires_strict_schema_origin_and_csrf() -> None:
+def test_transfer_uses_bearer_authority_and_strict_schema() -> None:
     csrf = "ownership-csrf"
     connection = OwnershipConnection()
     with _client(connection, _session(csrf)) as client:
@@ -366,7 +366,7 @@ def test_transfer_requires_strict_schema_origin_and_csrf() -> None:
             headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
             json={"target_user_id": str(TARGET_ID), "force": True},
         )
-        missing_csrf = client.post(
+        bearer_only = client.post(
             "/api/projects/demo/ownership/transfer",
             headers={"Origin": "http://admin.test"},
             json={"target_user_id": str(TARGET_ID)},
@@ -381,5 +381,5 @@ def test_transfer_requires_strict_schema_origin_and_csrf() -> None:
         )
 
     assert unknown.status_code == 422
-    assert missing_csrf.status_code == 403
+    assert bearer_only.status_code == 200
     assert multiline_reason.status_code == 422

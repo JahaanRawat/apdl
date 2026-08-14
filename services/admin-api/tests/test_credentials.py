@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from app import credentials
 from app.auth import AdminSession, require_session
-from app.security import token_hash
 from conftest import make_settings
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
@@ -120,7 +119,8 @@ def managed_session(csrf: str) -> AdminSession:
     return AdminSession(
         session_id="10000000-0000-4000-8000-000000000001",
         token_hash="a" * 64,
-        csrf_hash=token_hash(csrf),
+        deployment_id="30000000-0000-4000-8000-000000000003",
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
         user_id="20000000-0000-4000-8000-000000000002",
         email="admin@example.com",
         projects={"demo": frozenset({"credentials:manage"})},

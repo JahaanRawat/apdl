@@ -7,13 +7,9 @@ import secrets
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from fastapi import HTTPException, Request, Response, status
+from fastapi import HTTPException, Request, status
 
 from app.config import Settings
-
-SESSION_COOKIE = "apdl_admin_session"
-CSRF_COOKIE = "apdl_admin_csrf"
-CSRF_HEADER = "x-csrf-token"
 
 password_hasher = PasswordHasher(
     time_cost=2,
@@ -52,31 +48,3 @@ def require_allowed_origin(request: Request, settings: Settings) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Origin not allowed"
         )
-
-
-def set_session_cookies(
-    response: Response,
-    session_token: str,
-    csrf_token: str,
-    settings: Settings,
-) -> None:
-    common = {
-        "secure": settings.cookie_secure,
-        "samesite": "strict",
-        "max_age": settings.session_ttl_seconds,
-    }
-    response.set_cookie(
-        SESSION_COOKIE, session_token, httponly=True, path="/api", **common
-    )
-    # The SPA must read the double-submit value from document.cookie while the
-    # actual session remains HttpOnly and restricted to /api.
-    response.set_cookie(CSRF_COOKIE, csrf_token, httponly=False, path="/", **common)
-
-
-def clear_session_cookies(response: Response, settings: Settings) -> None:
-    common = {
-        "secure": settings.cookie_secure,
-        "samesite": "strict",
-    }
-    response.delete_cookie(SESSION_COOKIE, httponly=True, path="/api", **common)
-    response.delete_cookie(CSRF_COOKIE, httponly=False, path="/", **common)

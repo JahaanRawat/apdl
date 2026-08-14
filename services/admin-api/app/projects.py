@@ -8,7 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
-from app.auth import AdminSession, require_csrf, require_session
+from app.auth import AdminSession, require_session
 from app.models import (
     AuditCursor,
     AuditPageQuery,
@@ -123,7 +123,6 @@ async def create_project(
 ) -> UserIdentity | Response:
     settings = request.app.state.settings
     require_allowed_origin(request, settings)
-    require_csrf(request, session)
 
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
@@ -235,7 +234,6 @@ async def transfer_project_ownership(
 ) -> ProjectAuthorizationSummary:
     settings = request.app.state.settings
     require_allowed_origin(request, settings)
-    require_csrf(request, session)
 
     actor_user_id = uuid.UUID(session.user_id)
     if body.target_user_id == actor_user_id:

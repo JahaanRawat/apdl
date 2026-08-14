@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import projects
 from app.auth import AdminSession, require_session
-from app.security import token_hash
 from conftest import make_settings
 
 
@@ -71,7 +71,8 @@ def zero_project_session(csrf: str) -> AdminSession:
     return AdminSession(
         session_id="10000000-0000-4000-8000-000000000001",
         token_hash="a" * 64,
-        csrf_hash=token_hash(csrf),
+        deployment_id="30000000-0000-4000-8000-000000000003",
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
         user_id="20000000-0000-4000-8000-000000000002",
         email="admin@example.com",
         projects={},
@@ -215,7 +216,7 @@ def test_project_creation_revalidates_the_active_user_under_lock() -> None:
     assert not any("INSERT INTO admin_projects" in query for query, _ in connection.statements)
 
 
-def test_project_creation_requires_strict_schema_and_csrf() -> None:
+def test_project_creation_uses_bearer_authority_and_strict_schema() -> None:
     csrf = "project-csrf-token"
     connection = ProjectConnection()
     with make_client(connection, zero_project_session(csrf)) as client:
@@ -229,7 +230,7 @@ def test_project_creation_requires_strict_schema_and_csrf() -> None:
             headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
             json={"project_id": "valid", "owner": "caller"},
         )
-        missing_csrf = client.post(
+        bearer_only = client.post(
             "/api/projects",
             headers={"Origin": "http://admin.test"},
             json={"project_id": "valid"},
@@ -237,5 +238,5 @@ def test_project_creation_requires_strict_schema_and_csrf() -> None:
 
     assert invalid_id.status_code == 422
     assert unknown_field.status_code == 422
-    assert missing_csrf.status_code == 403
-    assert connection.statements == []
+    assert bearer_only.status_code == 201
+    assert any("INSERT INTO admin_projects" in query for query, _ in connection.statements)

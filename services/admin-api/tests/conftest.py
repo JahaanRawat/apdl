@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -112,7 +113,8 @@ def admin_session() -> AdminSession:
     return AdminSession(
         session_id="10000000-0000-4000-8000-000000000001",
         token_hash="a" * 64,
-        csrf_hash="b" * 64,
+        deployment_id="30000000-0000-4000-8000-000000000003",
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
         user_id="20000000-0000-4000-8000-000000000002",
         email="admin@example.com",
         projects={

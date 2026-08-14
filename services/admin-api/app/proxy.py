@@ -16,7 +16,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from starlette.responses import Response, StreamingResponse
 
-from app.auth import AdminSession, require_csrf, require_session
+from app.auth import AdminSession, require_session
 from app.config import PROJECT_ID_PATTERN, SERVICE_NAMES, Settings
 from app.github import bind_repository_authorization_start_response
 from app.request_body_limit import RequestBodyTooLarge
@@ -212,9 +212,9 @@ async def _stream_authority_state(
                     JOIN admin_users AS u ON u.user_id = s.user_id
                     WHERE s.session_id = $1
                       AND s.user_id = $2
+                      AND s.deployment_id = $3
                       AND s.revoked_at IS NULL
                       AND s.expires_at > NOW()
-                      AND s.last_seen_at > NOW() - ($3 * INTERVAL '1 second')
                       AND u.active
                 ) AS session_active,
                 EXISTS (
@@ -230,7 +230,7 @@ async def _stream_authority_state(
             """,
             uuid.UUID(session.session_id),
             uuid.UUID(session.user_id),
-            settings.session_idle_seconds,
+            uuid.UUID(str(settings.deployment_id)),
             project_id,
             required_role,
         )
@@ -724,7 +724,6 @@ async def proxy_service(
 
     if request.method not in _SAFE_METHODS:
         require_allowed_origin(request, settings)
-        require_csrf(request, session)
 
     if "api_key" in request.query_params:
         raise HTTPException(

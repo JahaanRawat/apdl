@@ -13,7 +13,6 @@ import pytest
 
 from app import github, proxy
 from app.auth import AdminSession
-from app.security import token_hash
 from conftest import TEST_API_KEY, make_settings, proxy_client
 
 
@@ -151,7 +150,6 @@ async def test_agents_mutation_uses_human_bound_ephemeral_credential(
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
     seen_key = ""
@@ -278,7 +276,6 @@ async def test_llm_connection_mutation_uses_live_dual_role_authority(
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
     seen: dict[str, object] = {}
@@ -344,7 +341,6 @@ async def test_llm_connection_mutation_fails_when_live_authority_is_lost(
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
     called = False
@@ -376,7 +372,6 @@ async def test_codegen_llm_connection_mutation_uses_human_bound_ephemeral_creden
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
     seen: dict[str, object] = {}
@@ -450,7 +445,6 @@ async def test_codegen_llm_connection_mutation_fails_when_live_authority_is_lost
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
     called = False
@@ -697,7 +691,6 @@ async def test_codegen_repository_authorization_uses_human_bound_read_credential
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
             "projects": {"demo": frozenset({"config:read"})},
         }
     )
@@ -817,7 +810,6 @@ async def test_codegen_authorization_start_rejects_untrusted_installation_state(
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
 
@@ -862,7 +854,6 @@ async def test_codegen_authorization_start_cookie_uses_secure_setting(
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
 
@@ -980,7 +971,6 @@ async def test_agents_setup_mutation_rechecks_live_dual_role_authority(
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
     seen_body: object = None
@@ -1413,14 +1403,13 @@ async def test_proxy_does_not_expose_global_repository_onboarding(
 
 
 @pytest.mark.asyncio
-async def test_proxy_validates_csrf_and_project_assertions(
+async def test_proxy_uses_bearer_authority_and_validates_project_assertions(
     admin_session: AdminSession,
 ) -> None:
     csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
     bodies: list[dict] = []
@@ -1430,7 +1419,7 @@ async def test_proxy_validates_csrf_and_project_assertions(
         return httpx.Response(202, json={"accepted": 1})
 
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        missing_csrf = client.post(
+        bearer_only = client.post(
             "/api/projects/demo/ingestion/v1/events",
             headers={"Origin": "http://admin.test"},
             json={"events": []},
@@ -1448,10 +1437,13 @@ async def test_proxy_validates_csrf_and_project_assertions(
         )
         audit_statements = client.app.state.audit_statements
 
-    assert missing_csrf.status_code == 403
+    assert bearer_only.status_code == 202
     assert mismatch.status_code == 403
     assert accepted.status_code == 202
-    assert bodies == [{"project_id": "demo", "events": []}]
+    assert bodies == [
+        {"events": []},
+        {"project_id": "demo", "events": []},
+    ]
     insert = next(
         statement for statement in audit_statements if "INSERT INTO" in statement[0]
     )
@@ -1488,7 +1480,6 @@ async def test_codegen_proxy_rejects_noncanonical_json_media_types(
     session = AdminSession(
         **{
             **admin_session.__dict__,
-            "csrf_hash": token_hash(csrf),
         }
     )
     called = False

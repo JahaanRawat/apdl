@@ -11,7 +11,6 @@ import pytest
 
 from app import members
 from app.auth import AdminSession, require_session
-from app.login_security import DEVICE_COOKIE
 from app.models import PendingProjectInvitation
 from app.security import token_hash
 from conftest import make_settings
@@ -211,7 +210,8 @@ def _session(
     return AdminSession(
         session_id="10000000-0000-4000-8000-000000000001",
         token_hash="b" * 64,
-        csrf_hash=token_hash(csrf),
+        deployment_id="30000000-0000-4000-8000-000000000003",
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
         user_id=str(user_id),
         email=email,
         projects={
@@ -472,58 +472,17 @@ def test_invitation_rate_limit_does_not_consume_login_buckets() -> None:
     }
 
 
-def test_invitation_registration_is_atomic_when_public_registration_is_disabled(
-    monkeypatch,
-) -> None:
+def test_invitation_registration_alias_is_absent() -> None:
     connection = MemberConnection()
-    built_sources = []
-    build_login_source = members.build_login_source
-
-    def record_login_source(*args, **kwargs):
-        source = build_login_source(*args, **kwargs)
-        built_sources.append(source)
-        return source
-
-    monkeypatch.setattr(
-        members,
-        "hash_password",
-        lambda password: f"$argon2id${password}",
-    )
-    monkeypatch.setattr(members, "build_login_source", record_login_source)
     with _client(connection, session=None) as client:
-        registered = client.post(
+        response = client.post(
             f"/api/invitations/{RAW_TOKEN}/register",
             headers={"Origin": "http://admin.test"},
             json={"password": "invited-password"},
         )
 
-    assert registered.status_code == 201
-    assert registered.json()["email"] == "invitee@example.com"
-    assert registered.json()["projects"] == [
-        {"project_id": "demo", "roles": ["config:read"]}
-    ]
-    sql = [" ".join(query.split()) for query, _ in connection.statements]
-    required_order = [
-        next(i for i, query in enumerate(sql) if "pg_advisory_xact_lock" in query),
-        next(i for i, query in enumerate(sql) if "INSERT INTO admin_users" in query),
-        next(
-            i
-            for i, query in enumerate(sql)
-            if "INSERT INTO admin_user_projects" in query
-        ),
-        next(i for i, query in enumerate(sql) if "SET accepted_at = NOW()" in query),
-        next(
-            i
-            for i, query in enumerate(sql)
-            if "INSERT INTO admin_project_membership_audit" in query
-        ),
-        next(i for i, query in enumerate(sql) if "INSERT INTO admin_sessions" in query),
-    ]
-    assert required_order == sorted(required_order)
-    assert "apdl_admin_session" in registered.cookies
-    assert len(built_sources) == 1
-    assert registered.cookies[DEVICE_COOKIE] == built_sources[0].device_token
-    assert len(connection.audit_calls) == 1
+    assert response.status_code == 404
+    assert connection.statements == []
 
 
 def test_role_replacement_and_removal_cannot_mutate_owner_or_delegated_manager() -> None:
@@ -639,11 +598,11 @@ def test_membership_audit_uses_keyset_pagination() -> None:
     )
 
 
-def test_mutations_require_origin_csrf_and_strict_request_shapes() -> None:
+def test_mutations_use_bearer_authority_and_strict_request_shapes() -> None:
     csrf = "members-csrf"
     connection = MemberConnection()
     with _client(connection, session=_session(csrf)) as client:
-        missing_csrf = client.post(
+        accepted = client.post(
             "/api/projects/demo/invitations",
             headers={"Origin": "http://admin.test"},
             json={"email": "invitee@example.com", "roles": ["config:read"]},
@@ -658,6 +617,5 @@ def test_mutations_require_origin_csrf_and_strict_request_shapes() -> None:
             },
         )
 
-    assert missing_csrf.status_code == 403
+    assert accepted.status_code == 201
     assert unknown.status_code == 422
-    assert connection.statements == []

@@ -85,6 +85,24 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class ConsoleSession(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["console_session@1"] = "console_session@1"
+    access_token: str = Field(
+        min_length=43,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    expires_at: datetime
+
+    @field_validator("expires_at")
+    @classmethod
+    def validate_expires_at(cls, value: datetime) -> datetime:
+        _require_timezone(value, field_name="expires_at")
+        return value
+
+
 class RegistrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -115,6 +133,15 @@ class UserIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_id: str
+    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    projects: list[ProjectAccess]
+
+
+class ConsoleIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["console_identity@1"] = "console_identity@1"
+    user_id: UUID
     email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
     projects: list[ProjectAccess]
 
