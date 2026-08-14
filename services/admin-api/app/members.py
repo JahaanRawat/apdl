@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import re
 from typing import Annotated
 import uuid
 
@@ -18,8 +17,8 @@ from app.login_security import (
 from app.models import (
     AuditCursor,
     AuditPageQuery,
+    InvitationAcceptRequest,
     InvitationCreateRequest,
-    InvitationInspection,
     MemberRolesReplaceRequest,
     MembershipAuditEntry,
     MembershipAuditPage,
@@ -30,10 +29,9 @@ from app.models import (
     ProjectMembers,
     UserIdentity,
 )
-from app.security import new_token, require_allowed_origin, token_hash
+from app.security import new_token, token_hash
 
 router = APIRouter(tags=["project members"])
-TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 MEMBERS_MANAGE_ROLE = "members:manage"
 
 
@@ -330,8 +328,6 @@ async def create_project_invitation(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> ProjectInvitationReveal:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
     actor_user_id = uuid.UUID(session.user_id)
     email = body.email.strip().lower()
     roles = list(body.roles)
@@ -439,7 +435,6 @@ async def create_project_invitation(
                 new_roles=roles,
             )
 
-    origin = request.headers["origin"].rstrip("/")
     return ProjectInvitationReveal(
         **_invitation(
             {
@@ -448,7 +443,7 @@ async def create_project_invitation(
                 "blocked_reason": None,
             }
         ).model_dump(),
-        invitation_url=f"{origin}/invitations/{raw_token}",
+        invitation_token=raw_token,
     )
 
 
@@ -462,8 +457,6 @@ async def revoke_project_invitation(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> Response:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
     actor_user_id = uuid.UUID(session.user_id)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
@@ -528,8 +521,6 @@ async def replace_project_member_roles(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> ProjectMember:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
     actor_user_id = uuid.UUID(session.user_id)
     roles = list(body.roles)
     async with request.app.state.pg_pool.acquire() as conn:
@@ -617,8 +608,6 @@ async def remove_project_member(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> Response:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
     actor_user_id = uuid.UUID(session.user_id)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
@@ -745,49 +734,16 @@ async def list_membership_audit(
     return MembershipAuditPage(entries=entries, next_cursor=next_cursor)
 
 
-@router.get(
-    "/api/invitations/{raw_token}",
-    response_model=InvitationInspection,
-)
-async def inspect_invitation(
-    raw_token: str,
-    request: Request,
-) -> InvitationInspection:
-    if TOKEN_PATTERN.fullmatch(raw_token) is None:
-        raise _unavailable_invitation()
-    digest = token_hash(raw_token)
-    async with request.app.state.pg_pool.acquire() as conn:
-        async with conn.transaction():
-            await _rate_limit_invitation(
-                conn,
-                request=request,
-                digest=digest,
-            )
-            invitation = await _valid_invitation(conn, digest=digest, lock=False)
-    if invitation is None:
-        raise _unavailable_invitation()
-    return InvitationInspection(
-        project_id=str(invitation["project_id"]),
-        email=str(invitation["email"]),
-        roles=list(invitation["roles"]),
-        expires_at=invitation["expires_at"],
-    )
-
-
 @router.post(
-    "/api/invitations/{raw_token}/accept",
+    "/api/invitations/accept",
     response_model=UserIdentity,
 )
 async def accept_invitation(
-    raw_token: str,
+    body: InvitationAcceptRequest,
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> UserIdentity:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
-    if TOKEN_PATTERN.fullmatch(raw_token) is None:
-        raise _unavailable_invitation()
-    digest = token_hash(raw_token)
+    digest = token_hash(body.invitation_token)
     user_id = uuid.UUID(session.user_id)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():

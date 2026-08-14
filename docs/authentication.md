@@ -43,37 +43,31 @@ backend-for-frontend. Human users authenticate with email and password;
 passwords are stored only as Argon2id hashes. Project membership and canonical
 roles live in `admin_user_projects`.
 
-A successful login creates a random opaque session and CSRF token. PostgreSQL
-stores only their SHA-256 digests. The browser receives the session in an
-`HttpOnly`, `SameSite=Strict` cookie, so frontend JavaScript cannot read it.
-Unsafe requests also require an exact allowed `Origin` and the session-bound
-CSRF value. Sessions expire after both an absolute lifetime and an idle window.
+A successful `POST /api/console/v1/sessions` creates one random opaque bearer
+token. PostgreSQL stores only its SHA-256 digest, binds it to the stable
+deployment UUID and human identity, and applies one fixed absolute expiration.
+The browser sends it only as `Authorization: Bearer ...` to protected `/api/*`
+routes. Cookies, CSRF state, refresh tokens, URL tokens, and compatibility auth
+routes are not part of the console contract.
 
 The browser calls only `/api/projects/{project_id}/{service}/...`. The Admin API
 checks the human user's project and role, strips caller-supplied credentials,
 selects the project's configured key or mints a short-lived project key, and
-proxies the request. SSE uses the same cookie-authenticated path, so no key
-appears in the EventSource URL. Codegen receives the same project-scoped key.
+proxies the request. Project authority exists only in the resource path; the
+BFF rejects browser project header/query aliases and injects any required
+legacy upstream project query itself. SSE uses header-capable fetch streaming,
+so neither the human bearer nor a project key appears in a URL. Codegen receives
+the same project-scoped key.
 Every authorized mutation is attributed to the human user in
 `admin_proxy_audit`; the audit stores route metadata and status, never request
 bodies or credentials.
 
-Project authorization does not imply GitHub repository authority. A project
-owner, or a member delegated both `agents:manage` and `credentials:manage`, must
-complete a project-scoped GitHub App user-authorization flow. The browser never
-submits repository or installation coordinates as authority: Codegen uses the
-authenticated GitHub user's short-lived token to discover only App-visible
-repositories the user administers, persists opaque candidates, and revokes the
-token after discovery. The callback relay binds the setup and OAuth legs to the
-initiating browser with a short-lived `HttpOnly` cookie, rotates the one-time
-state between legs, and requires S256 PKCE. Completing a candidate creates the
-grant that binds the APDL project to GitHub's immutable numeric repository ID.
-An organization approval request consumes the pending setup state without
-starting OAuth and returns a project-scoped approval-required status. Successful
-callbacks include Codegen's canonical project ID; Admin validates it against the
-signed-in user's workspace list before switching or issuing an authorization
-query. Recoverable callback failures clear the correlation cookie and expose
-only the fixed `authorization_failed` UI status.
+Direct-console API version 1 does not expose GitHub App onboarding or callbacks.
+The former browser callback required correlation cookies and URL state, which
+would create a second browser authentication architecture. Operators may still
+provision repository authority through trusted internal workflows; a future
+console contract must define a new cookie-free flow before these routes can be
+exposed again.
 
 Admin exposes only the grant projection (`grant_id`, `repository_id`, and
 display-only `repository_full_name`); the installation ID remains inside the
@@ -82,32 +76,14 @@ same-project grant and uses an operation-specific token restricted to that
 immutable repository ID. Repository connection does not grant the separate
 project execution authority required for effectful autonomous runs.
 
-### Canonical GitHub App configuration
+GitHub App credentials and webhook settings remain internal Codegen operator
+configuration. They do not define a browser callback or console route in the
+direct-console contract.
 
-APDL supports one GitHub.com setup. Configure these six required App/OAuth values:
-`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_BASE64`, `GITHUB_APP_SLUG`,
-`GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
-and `GITHUB_APP_CALLBACK_URL`. Register the exact
-`GITHUB_APP_CALLBACK_URL` as both the App setup URL and OAuth callback URL. Keep
-GitHub's automatic **Request user authorization (OAuth) during installation**
-option disabled because APDL starts the state-bound OAuth leg itself after the
-setup callback. For local development the canonical callback is
-`http://localhost:5173/api/github/codegen/callback`.
-
-`GITHUB_WEBHOOK_SECRET` is conditional. Leaving it blank disables inbound
-webhooks and is valid only while `CODEGEN_CI_POLL_INTERVAL` is positive (the
-default is 60 seconds). Setting the polling interval to `0` requires a valid
-webhook secret so Codegen retains a GitHub CI recovery source. Generate the
-secret with `openssl rand -hex 32`.
-
-`POST /api/auth/register` accepts one strict `{email, password}` contract. It
-creates the user and session in one transaction, but deliberately creates no
-`admin_user_projects` rows. A newly registered user is authenticated with
-`projects: []` and cannot call any project-scoped service route until an
-operator grants membership or the user creates a project from Workspace
-settings. Registration requires an exact allowed `Origin` and shares the Admin
-API's application-level request budgets with login. A deployed console edge
-should add its own coarse abuse limits.
+Browser self-registration is not exposed. Operators create users with the
+Admin CLI, and existing authenticated users accept invitation codes in a strict
+JSON request body. Invitation secrets are shown once as codes, stored only as
+hashes, and never placed in a URL.
 
 An authenticated user can create a canonical project from
 `/settings/workspace`. `POST /api/projects` accepts only `{project_id}`, inserts
@@ -165,10 +141,9 @@ human command attribution.
 ## Human login abuse controls
 
 Admin login does not use an email-wide account lock. Before Argon2 verification,
-the Admin API atomically consumes short-window global, canonical-network, and
-opaque-device budgets. Invalid credentials then increase two independent
-per-email progressive-delay records: one for the network and one for the
-device. The first two failures remain the generic `401`; the third and later
+the Admin API atomically consumes short-window global and canonical-network
+budgets. Invalid credentials then increase one per-email, per-network
+progressive-delay record. The first two failures remain the generic `401`; the third and later
 failures return the strict `auth_throttled` envelope and matching
 `Retry-After`.
 
@@ -179,12 +154,11 @@ to the explicit `APDL_ADMIN_TRUSTED_PROXY_CIDRS` JSON array. The OSS Compose
 default is an empty array. Direct peers, malformed addresses, and forwarded
 chains cannot select a different risk identity.
 
-The `apdl_admin_device` cookie is a random HttpOnly, SameSite Strict risk
-signal; it is not an authentication factor. PostgreSQL receives only
-deployment-HMAC digests of the normalized email, client address, and device
-token. A correct password from an unthrottled source creates a session even
-when the account-wide failure score is high, so knowing an email address is not
-enough to deterministically lock out its owner.
+PostgreSQL receives only deployment-HMAC digests of the normalized email and
+client address. Login throttling creates no browser cookie or other persistent
+browser identifier. A correct password from an unthrottled source creates a
+session even when the account-wide failure score is high, so knowing an email
+address is not enough to deterministically lock out its owner.
 
 Fifty failures for one active account within 24 hours create one unread
 `suspicious_login_activity` record. The Admin Console displays the count and
@@ -395,7 +369,6 @@ with the test-only SQL under `scripts/fixtures/`, and destroys the isolated
 volumes when the suite finishes. Production deployments should set
 `APDL_SERVICE_API_KEYS` only on the Admin API and only to confidential project
 keys when persistent proxy credentials are desired. They should also assign a
-unique `APDL_AGENTS_POSTGRES_PASSWORD`, set
-`APDL_ADMIN_COOKIE_SECURE=true`, configure an exact HTTPS origin, disable public
-registration, and provision least-privilege credentials through their normal
+unique `APDL_AGENTS_POSTGRES_PASSWORD`, configure the unified gateway's exact
+console-origin allowlist, and provision least-privilege credentials through their normal
 secret-management workflow.

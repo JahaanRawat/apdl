@@ -42,37 +42,6 @@ def _json_object(name: str, raw: str) -> dict[str, str]:
     return value
 
 
-def _json_origins(raw: str) -> frozenset[str]:
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError("APDL_ADMIN_ALLOWED_ORIGINS must be a JSON array") from exc
-    if (
-        not isinstance(value, list)
-        or not value
-        or not all(isinstance(origin, str) for origin in value)
-    ):
-        raise ValueError("APDL_ADMIN_ALLOWED_ORIGINS must be a non-empty JSON array")
-    origins: set[str] = set()
-    for origin in value:
-        parsed = urlparse(origin)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.path not in {"", "/"}
-        ):
-            raise ValueError(f"Invalid admin origin: {origin}")
-        origins.add(origin.rstrip("/"))
-    return frozenset(origins)
-
-
-def _bool(name: str, default: str) -> bool:
-    value = os.getenv(name, default).lower()
-    if value not in {"true", "false"}:
-        raise ValueError(f"{name} must be true or false")
-    return value == "true"
-
-
 def _positive_int(name: str, default: str) -> int:
     try:
         value = int(os.getenv(name, default))
@@ -199,13 +168,8 @@ class Settings:
     service_urls: Mapping[str, str]
     service_api_keys: Mapping[str, str]
     llm_vault_admin_token: str
-    allowed_origins: frozenset[str]
-    registration_enabled: bool
-    max_accounts: int
     max_projects_per_user: int
-    cookie_secure: bool
     session_ttl_seconds: int
-    session_idle_seconds: int
     login_risk_hmac_key: str
     trusted_proxy_cidrs: tuple[
         ipaddress.IPv4Network | ipaddress.IPv6Network, ...
@@ -213,7 +177,6 @@ class Settings:
     login_rate_window_seconds: int
     login_global_rate_limit: int
     login_network_rate_limit: int
-    login_device_rate_limit: int
     invitation_global_rate_limit: int
     invitation_network_rate_limit: int
     invitation_token_rate_limit: int
@@ -222,7 +185,6 @@ class Settings:
     login_progressive_max_delay_seconds: int
     login_account_notice_threshold: int
     login_account_risk_window_seconds: int
-    login_device_ttl_seconds: int
     max_request_bytes: int
     stream_authority_check_seconds: float
     upstream_read_timeout_seconds: float
@@ -254,25 +216,11 @@ class Settings:
             service_urls=service_urls,
             service_api_keys=_service_keys(),
             llm_vault_admin_token=_secret("LLM_VAULT_ADMIN_TOKEN"),
-            allowed_origins=_json_origins(
-                os.getenv(
-                    "APDL_ADMIN_ALLOWED_ORIGINS",
-                    '["http://localhost:5173","http://localhost:5174"]',
-                )
-            ),
-            registration_enabled=_bool(
-                "APDL_ADMIN_REGISTRATION_ENABLED", "false"
-            ),
-            max_accounts=_positive_int("APDL_ADMIN_MAX_ACCOUNTS", "100"),
             max_projects_per_user=_positive_int(
                 "APDL_ADMIN_MAX_PROJECTS_PER_USER", "5"
             ),
-            cookie_secure=_bool("APDL_ADMIN_COOKIE_SECURE", "true"),
             session_ttl_seconds=_positive_int(
                 "APDL_ADMIN_SESSION_TTL_SECONDS", "28800"
-            ),
-            session_idle_seconds=_positive_int(
-                "APDL_ADMIN_SESSION_IDLE_SECONDS", "1800"
             ),
             login_risk_hmac_key=_secret(
                 "APDL_ADMIN_LOGIN_RISK_HMAC_KEY",
@@ -292,9 +240,6 @@ class Settings:
             ),
             login_network_rate_limit=_positive_int(
                 "APDL_ADMIN_LOGIN_NETWORK_RATE_LIMIT", "30"
-            ),
-            login_device_rate_limit=_positive_int(
-                "APDL_ADMIN_LOGIN_DEVICE_RATE_LIMIT", "20"
             ),
             invitation_global_rate_limit=_positive_int(
                 "APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT", "600"
@@ -320,9 +265,6 @@ class Settings:
             login_account_risk_window_seconds=_positive_int(
                 "APDL_ADMIN_LOGIN_ACCOUNT_RISK_WINDOW_SECONDS", "86400"
             ),
-            login_device_ttl_seconds=_positive_int(
-                "APDL_ADMIN_LOGIN_DEVICE_TTL_SECONDS", "31536000"
-            ),
             max_request_bytes=_positive_int("APDL_ADMIN_MAX_REQUEST_BYTES", "2097152"),
             stream_authority_check_seconds=_positive_float(
                 "APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS", "5"
@@ -342,13 +284,10 @@ class Settings:
                 "APDL_ADMIN_LOGIN_PROGRESSIVE_MAX_DELAY_SECONDS "
                 "must be at least the base delay"
             )
-        if settings.login_global_rate_limit < max(
-            settings.login_network_rate_limit,
-            settings.login_device_rate_limit,
-        ):
+        if settings.login_global_rate_limit < settings.login_network_rate_limit:
             raise ValueError(
                 "APDL_ADMIN_LOGIN_GLOBAL_RATE_LIMIT must be at least "
-                "the network and device limits"
+                "the network limit"
             )
         if settings.invitation_global_rate_limit < max(
             settings.invitation_network_rate_limit,
@@ -357,14 +296,6 @@ class Settings:
             raise ValueError(
                 "APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT must be at least "
                 "the network and token limits"
-            )
-        if (
-            settings.cookie_secure
-            and settings.login_risk_hmac_key == LOCAL_LOGIN_RISK_HMAC_KEY
-        ):
-            raise ValueError(
-                "APDL_ADMIN_LOGIN_RISK_HMAC_KEY must be deployment-unique "
-                "when secure cookies are enabled"
             )
         if settings.max_request_bytes > DEFAULT_MAX_REQUEST_BODY_BYTES:
             raise ValueError(

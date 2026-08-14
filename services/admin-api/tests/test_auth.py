@@ -210,7 +210,7 @@ def test_login_returns_fixed_bearer_and_sets_no_cookie() -> None:
     assert PASSWORD not in repr(connection.executions)
 
 
-def test_login_is_strict_origin_checked_and_has_no_legacy_aliases() -> None:
+def test_login_rejects_unknown_fields_and_has_no_legacy_aliases() -> None:
     connection = LoginConnection()
     with make_client(connection) as client:
         unknown = client.post(
@@ -222,18 +222,12 @@ def test_login_is_strict_origin_checked_and_has_no_legacy_aliases() -> None:
                 "remember_me": True,
             },
         )
-        cross_site = client.post(
-            "/api/console/v1/sessions",
-            headers={"Origin": "https://attacker.example"},
-            json={"email": "admin@example.com", "password": PASSWORD},
-        )
         legacy_login = client.post("/api/auth/login")
         legacy_me = client.get("/api/auth/me")
         legacy_logout = client.post("/api/auth/logout")
         legacy_register = client.post("/api/auth/register")
 
     assert unknown.status_code == 422
-    assert cross_site.status_code == 403
     assert {legacy_login.status_code, legacy_me.status_code, legacy_logout.status_code} == {404}
     assert legacy_register.status_code == 404
 

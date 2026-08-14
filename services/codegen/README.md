@@ -234,7 +234,9 @@ Transitions are enforced by `app/models/changeset.py`; illegal moves raise
 ## Environment
 
 The GitHub integration targets GitHub.com and has one canonical configuration.
-The six App/OAuth `GITHUB_*` values below are always required. Register the
+The five App/OAuth credential values below are required for GitHub operations.
+The callback is optional and enables only the private legacy onboarding flow;
+direct-console API version 1 does not expose it. When enabled, register the
 callback value exactly as both the App setup URL and OAuth callback URL.
 `GITHUB_WEBHOOK_SECRET` may be blank only while CI polling is positive; blank
 disables inbound webhooks. Setting `CODEGEN_CI_POLL_INTERVAL=0` requires a
@@ -247,7 +249,7 @@ GITHUB_APP_PRIVATE_KEY_BASE64=     # standard Base64 of the UTF-8 PEM
 GITHUB_APP_SLUG=
 GITHUB_APP_CLIENT_ID=
 GITHUB_APP_CLIENT_SECRET=
-GITHUB_APP_CALLBACK_URL=http://localhost:5173/api/github/codegen/callback
+GITHUB_APP_CALLBACK_URL=           # private legacy onboarding only; direct-console v1 leaves blank
 GITHUB_WEBHOOK_SECRET=
 CODEGEN_CI_POLL_INTERVAL=60       # 0 requires GITHUB_WEBHOOK_SECRET
 LLM_VAULT_URL=http://localhost:8086
@@ -673,8 +675,10 @@ The autonomous loop runs once these external pieces are set up:
    unverified. Set
    `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_BASE64`, `GITHUB_APP_SLUG`,
    `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`,
-   and `GITHUB_APP_CALLBACK_URL`. Configure the callback URL as both the GitHub
-   App setup URL and an OAuth callback URL.
+   and, only for the private legacy onboarding flow, `GITHUB_APP_CALLBACK_URL`.
+   Direct-console API version 1 exposes no browser callback; leave the callback
+   blank unless that internal flow is deliberately operated. When enabled,
+   configure it as both the GitHub App setup URL and OAuth callback URL.
    Leave GitHub's automatic "Request user authorization (OAuth) during
    installation" option disabled; APDL starts its own state-bound OAuth leg
    after setup. Customers install the App and connect an exact repository from

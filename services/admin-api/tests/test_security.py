@@ -56,8 +56,6 @@ def test_settings_ignore_removed_development_service_key(monkeypatch) -> None:
         "APDL_DEV_API_KEY",
         "proj_demo_0123456789abcdef",
     )
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
-
     assert Settings.from_env().service_api_keys == {}
 
 
@@ -68,30 +66,13 @@ def test_settings_require_an_explicit_vault_admin_token(monkeypatch) -> None:
         Settings.from_env()
 
 
-def test_settings_reject_wildcard_origins(monkeypatch) -> None:
+def test_settings_apply_direct_console_security_defaults(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_ALLOWED_ORIGINS", '["*"]')
-
-    with pytest.raises(ValueError, match="Invalid admin origin"):
-        Settings.from_env()
-
-
-def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None:
-    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_ADMIN_ALLOWED_ORIGINS", raising=False)
-    monkeypatch.delenv("APDL_ADMIN_REGISTRATION_ENABLED", raising=False)
-    monkeypatch.delenv("APDL_ADMIN_MAX_ACCOUNTS", raising=False)
     monkeypatch.delenv("APDL_ADMIN_MAX_PROJECTS_PER_USER", raising=False)
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
 
     settings = Settings.from_env()
 
-    assert settings.allowed_origins == frozenset(
-        {"http://localhost:5173", "http://localhost:5174"}
-    )
     assert settings.trusted_proxy_cidrs == ()
-    assert settings.registration_enabled is False
-    assert settings.max_accounts == 100
     assert settings.max_projects_per_user == 5
     assert settings.login_progressive_failure_threshold == 3
     assert settings.login_account_notice_threshold == 50
@@ -135,7 +116,6 @@ def test_settings_reject_invalid_console_manifest_metadata(
     value: str,
     message: str,
 ) -> None:
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.setenv(name, value)
 
     with pytest.raises(ValueError, match=message):
@@ -155,49 +135,28 @@ def test_settings_require_console_manifest_metadata(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
 ) -> None:
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.delenv(name)
 
     with pytest.raises(ValueError, match=rf"{name} is required"):
         Settings.from_env()
 
 
-def test_settings_reject_invalid_registration_controls(monkeypatch) -> None:
+def test_settings_reject_invalid_project_limit(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_REGISTRATION_ENABLED", "yes")
+    monkeypatch.setenv("APDL_ADMIN_MAX_PROJECTS_PER_USER", "0")
 
-    with pytest.raises(ValueError, match="must be true or false"):
+    with pytest.raises(ValueError, match="must be positive"):
         Settings.from_env()
-
-    monkeypatch.setenv("APDL_ADMIN_REGISTRATION_ENABLED", "false")
-    for name in (
-        "APDL_ADMIN_MAX_ACCOUNTS",
-        "APDL_ADMIN_MAX_PROJECTS_PER_USER",
-    ):
-        monkeypatch.setenv(name, "0")
-        with pytest.raises(ValueError, match="must be positive"):
-            Settings.from_env()
-        monkeypatch.delenv(name)
 
 
 def test_settings_cannot_exceed_outer_request_body_limit(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.setenv(
         "APDL_ADMIN_MAX_REQUEST_BYTES",
         str(DEFAULT_MAX_REQUEST_BODY_BYTES + 1),
     )
 
     with pytest.raises(ValueError, match="cannot exceed the outer"):
-        Settings.from_env()
-
-
-def test_secure_deployment_rejects_the_local_login_risk_key(monkeypatch) -> None:
-    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "true")
-    monkeypatch.delenv("APDL_ADMIN_LOGIN_RISK_HMAC_KEY", raising=False)
-
-    with pytest.raises(ValueError, match="deployment-unique"):
         Settings.from_env()
 
 
@@ -227,7 +186,6 @@ def test_settings_reject_short_login_risk_secret(monkeypatch) -> None:
 
 def test_settings_reject_incoherent_invitation_rate_limits(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.setenv("APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT", "1")
     monkeypatch.setenv("APDL_ADMIN_INVITATION_NETWORK_RATE_LIMIT", "2")
 

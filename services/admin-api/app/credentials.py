@@ -18,7 +18,6 @@ from app.models import (
     ManagedCredentialReveal,
     PROJECT_ID_PATTERN,
 )
-from app.security import require_allowed_origin
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/credentials",
@@ -250,8 +249,6 @@ async def create_credential(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> ManagedCredentialReveal:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
             membership_roles = await _current_membership_roles(
@@ -290,8 +287,6 @@ async def rotate_credential(
     session: AdminSession = Depends(require_session),
 ) -> ManagedCredentialReveal:
     del body
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
             membership_roles = await _current_membership_roles(
@@ -357,8 +352,6 @@ async def revoke_credential(
     session: AdminSession = Depends(require_session),
 ) -> ManagedCredential:
     del body
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
             await _current_membership_roles(conn, session, project_id)

@@ -102,8 +102,9 @@ Redis Streams ──→ ClickHouse Writer (Python) ──→ ClickHouse
                                               Codegen Service (Python/FastAPI :8084)
                                               → GitHub App → customer repos (autonomous PRs)
 
-Separately distributed Admin Console ──same-origin /api──→ Admin API (Python/FastAPI :8085)
-                                                           → project-scoped credentials → core services
+Separately distributed Admin Console ──direct CORS /api──→ Gateway (Python/Starlette :8000)
+                                                             → Admin API (private :8085)
+                                                             → project-scoped credentials → core services
 ```
 
 ### Data Flow
@@ -115,7 +116,7 @@ Separately distributed Admin Console ──same-origin /api──→ Admin API (
 5. **Analytics:** Query Service queries ClickHouse for funnels, cohorts, retention, experiment stats (frequentist/Bayesian/sequential)
 6. **Autonomous agents:** Lightweight graph runner orchestrates LLM-driven workflows — behavior analysis, experiment design, personalization, feature proposals. Actions pass through safety validation with audit logging and rollback support
 7. **Autonomous code:** Codegen Service turns approved feature proposals into tested-green pull requests on connected customer repos via a sandboxed, model-agnostic OSS coding agent (Aider); merge is gated on green CI + autonomy level, audited like every other action
-8. **Admin operations:** the browser console talks only to the Admin API gateway (same-origin `/api`), which authenticates hashed sessions with CSRF/origin enforcement and proxies each call to the core services using server-selected, project-scoped credentials, writing proxy audit records
+8. **Admin operations:** the separately hosted browser console connects directly to one user-selected backend origin, validates its public manifest, and sends a deployment-scoped bearer only to registered `/api` routes. The public gateway enforces exact-origin CORS and forwards to the private Admin API, which authorizes each human and proxies core-service calls with server-selected, project-scoped credentials while writing proxy audit records
 
 ### Tech Stack by Service
 
@@ -126,7 +127,7 @@ Separately distributed Admin Console ──same-origin /api──→ Admin API (
 - **Query** (`services/query/`): Python 3.12, FastAPI, clickhouse-driver/asynch, SciPy, NumPy — uv, pytest-asyncio, ruff
 - **Agents** (`services/agents/`): Python 3.12, FastAPI, openai, anthropic, google-genai, asyncpg, pgvector — uv, pytest-asyncio, ruff
 - **Codegen** (`services/codegen/`): Python 3.12, FastAPI, asyncpg, httpx, pyjwt (GitHub App), Aider (model-agnostic editor via LiteLLM) — uv, pytest-asyncio, ruff. The "hands" of the autonomous loop: opens/merges PRs on customer repos
-- **Admin API** (`services/admin-api/`): Python 3.12, FastAPI, asyncpg, httpx — uv, pytest, ruff. Security gateway for the separately distributed Admin Console: hashed sessions, CSRF/origin enforcement, login lockouts, memberships, and audited proxying to the core services
+- **Admin API** (`services/admin-api/`): Python 3.12, FastAPI, asyncpg, httpx — uv, pytest, ruff. Private BFF for the separately distributed Admin Console: deployment-bound hashed bearer sessions, login throttles, memberships, and audited proxying to the core services
 - **Pipeline** (`pipeline/redis/`): Python 3.12, redis async client, clickhouse-driver
 
 ### Key Ports

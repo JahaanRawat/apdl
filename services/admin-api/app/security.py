@@ -1,4 +1,4 @@
-"""Password, opaque-token, origin, and cookie security primitives."""
+"""Password and opaque bearer-token security primitives."""
 
 from __future__ import annotations
 
@@ -7,9 +7,6 @@ import secrets
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from fastapi import HTTPException, Request, status
-
-from app.config import Settings
 
 password_hasher = PasswordHasher(
     time_cost=2,
@@ -40,11 +37,3 @@ def new_token() -> str:
 
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
-
-
-def require_allowed_origin(request: Request, settings: Settings) -> None:
-    origin = request.headers.get("origin", "").rstrip("/")
-    if origin not in settings.allowed_origins:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Origin not allowed"
-        )

@@ -24,7 +24,6 @@ from app.models import (
     ProjectCreator,
     UserIdentity,
 )
-from app.security import require_allowed_origin
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -122,7 +121,6 @@ async def create_project(
     session: AdminSession = Depends(require_session),
 ) -> UserIdentity | Response:
     settings = request.app.state.settings
-    require_allowed_origin(request, settings)
 
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
@@ -232,9 +230,6 @@ async def transfer_project_ownership(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> ProjectAuthorizationSummary:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
-
     actor_user_id = uuid.UUID(session.user_id)
     if body.target_user_id == actor_user_id:
         raise HTTPException(

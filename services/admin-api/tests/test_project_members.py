@@ -202,7 +202,6 @@ class MemberPool:
 
 
 def _session(
-    csrf: str,
     *,
     user_id: UUID = ACTOR_ID,
     email: str = "owner@example.com",
@@ -229,10 +228,7 @@ def _client(
     settings_overrides: dict[str, object] | None = None,
 ) -> TestClient:
     app = FastAPI()
-    app.state.settings = make_settings(
-        registration_enabled=False,
-        **(settings_overrides or {}),
-    )
+    app.state.settings = make_settings(**(settings_overrides or {}))
     app.state.pg_pool = MemberPool(connection)
     app.include_router(members.router)
     if session is not None:
@@ -241,13 +237,11 @@ def _client(
 
 
 def test_invite_is_revealed_once_and_list_never_contains_secret_material() -> None:
-    csrf = "members-csrf"
     connection = MemberConnection()
-    with _client(connection, session=_session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(connection, session=_session()) as client:
         created = client.post(
             "/api/projects/demo/invitations",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "email": "Invitee@Example.com",
                 "roles": ["config:read", "config:write"],
@@ -258,19 +252,17 @@ def test_invite_is_revealed_once_and_list_never_contains_secret_material() -> No
     assert created.status_code == 201
     reveal = created.json()
     assert reveal["email"] == "invitee@example.com"
-    assert reveal["invitation_url"].startswith(
-        "http://admin.test/invitations/"
-    )
+    assert len(reveal["invitation_token"]) == 43
     insert = next(
         call
         for call in connection.statements
         if "INSERT INTO admin_project_invitations" in call[0]
     )
     stored_digest = insert[1][1]
-    revealed_token = reveal["invitation_url"].rsplit("/", 1)[1]
+    revealed_token = reveal["invitation_token"]
     assert len(stored_digest) == 64
     assert stored_digest == token_hash(revealed_token)
-    assert stored_digest not in reveal["invitation_url"]
+    assert stored_digest != reveal["invitation_token"]
 
     assert listed.status_code == 200
     pending = listed.json()["pending_invitations"][0]
@@ -286,7 +278,7 @@ def test_invite_is_revealed_once_and_list_never_contains_secret_material() -> No
     }
     assert pending["status"] == "valid"
     assert pending["blocked_reason"] is None
-    assert "invitation_url" not in pending
+    assert "invitation_token" not in pending
     assert "token" not in pending
     assert "token_hash" not in pending
 
@@ -302,7 +294,7 @@ def test_pending_invitation_exposes_live_blocked_authority_state() -> None:
         "expires_at": NOW + timedelta(days=7),
         "created_at": NOW,
     }
-    with _client(connection, session=_session("members-csrf")) as client:
+    with _client(connection, session=_session()) as client:
         listed = client.get("/api/projects/demo/members")
 
     assert listed.status_code == 200
@@ -363,26 +355,24 @@ def test_pending_invitation_rejects_incoherent_status(
 
 
 def test_invitation_roles_are_canonical_and_bounded_by_live_authority() -> None:
-    csrf = "members-csrf"
     connection = MemberConnection(
         actor_is_owner=False,
         actor_roles=["config:read", "members:manage"],
     )
-    with _client(connection, session=_session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(connection, session=_session()) as client:
         out_of_order = client.post(
             "/api/projects/demo/invitations",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"email": "invitee@example.com", "roles": ["members:manage", "config:read"]},
         )
         manager_grant = client.post(
             "/api/projects/demo/invitations",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"email": "invitee@example.com", "roles": ["members:manage"]},
         )
         above_ceiling = client.post(
             "/api/projects/demo/invitations",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"email": "invitee@example.com", "roles": ["config:write"]},
         )
 
@@ -396,22 +386,21 @@ def test_invitation_roles_are_canonical_and_bounded_by_live_authority() -> None:
 
 
 def test_existing_matching_account_accepts_once_with_audited_membership() -> None:
-    csrf = "members-csrf"
     session = _session(
-        csrf,
         user_id=TARGET_ID,
         email="invitee@example.com",
     )
     connection = MemberConnection()
     with _client(connection, session=session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
         accepted = client.post(
-            f"/api/invitations/{RAW_TOKEN}/accept",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            "/api/invitations/accept",
+            headers={"Origin": "http://admin.test"},
+            json={"invitation_token": RAW_TOKEN},
         )
         replayed = client.post(
-            f"/api/invitations/{RAW_TOKEN}/accept",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            "/api/invitations/accept",
+            headers={"Origin": "http://admin.test"},
+            json={"invitation_token": RAW_TOKEN},
         )
 
     assert accepted.status_code == 200
@@ -428,19 +417,22 @@ def test_existing_matching_account_accepts_once_with_audited_membership() -> Non
 
 
 def test_wrong_email_and_invalid_lifecycle_use_same_unavailable_response() -> None:
-    csrf = "members-csrf"
     wrong_email = MemberConnection(account_email="other@example.com")
-    session = _session(csrf, user_id=TARGET_ID, email="other@example.com")
+    session = _session(user_id=TARGET_ID, email="other@example.com")
     with _client(wrong_email, session=session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
         mismatched = client.post(
-            f"/api/invitations/{RAW_TOKEN}/accept",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            "/api/invitations/accept",
+            headers={"Origin": "http://admin.test"},
+            json={"invitation_token": RAW_TOKEN},
         )
 
     unavailable = MemberConnection(invitation_available=False)
-    with _client(unavailable, session=None) as client:
-        invalid = client.get(f"/api/invitations/{RAW_TOKEN}")
+    with _client(unavailable, session=session) as client:
+        invalid = client.post(
+            "/api/invitations/accept",
+            headers={"Origin": "http://admin.test"},
+            json={"invitation_token": RAW_TOKEN},
+        )
 
     assert mismatched.status_code == invalid.status_code == 404
     assert mismatched.json() == invalid.json() == {
@@ -452,15 +444,26 @@ def test_invitation_rate_limit_does_not_consume_login_buckets() -> None:
     connection = MemberConnection()
     with _client(
         connection,
-        session=None,
+        session=_session(
+            user_id=TARGET_ID,
+            email="invitee@example.com",
+        ),
         settings_overrides={
             "invitation_global_rate_limit": 100,
             "invitation_network_rate_limit": 100,
             "invitation_token_rate_limit": 1,
         },
     ) as client:
-        accepted = client.get(f"/api/invitations/{RAW_TOKEN}")
-        throttled = client.get(f"/api/invitations/{RAW_TOKEN}")
+        accepted = client.post(
+            "/api/invitations/accept",
+            headers={"Origin": "http://admin.test"},
+            json={"invitation_token": RAW_TOKEN},
+        )
+        throttled = client.post(
+            "/api/invitations/accept",
+            headers={"Origin": "http://admin.test"},
+            json={"invitation_token": RAW_TOKEN},
+        )
 
     assert accepted.status_code == 200
     assert throttled.status_code == 429
@@ -472,32 +475,37 @@ def test_invitation_rate_limit_does_not_consume_login_buckets() -> None:
     }
 
 
-def test_invitation_registration_alias_is_absent() -> None:
+def test_invitation_url_token_and_registration_aliases_are_absent() -> None:
     connection = MemberConnection()
-    with _client(connection, session=None) as client:
-        response = client.post(
+    with _client(connection, session=_session()) as client:
+        inspection = client.get(f"/api/invitations/{RAW_TOKEN}")
+        acceptance = client.post(
+            f"/api/invitations/{RAW_TOKEN}/accept",
+            headers={"Origin": "http://admin.test"},
+        )
+        registration = client.post(
             f"/api/invitations/{RAW_TOKEN}/register",
             headers={"Origin": "http://admin.test"},
             json={"password": "invited-password"},
         )
 
-    assert response.status_code == 404
+    assert inspection.status_code == 404
+    assert acceptance.status_code == 404
+    assert registration.status_code == 404
     assert connection.statements == []
 
 
 def test_role_replacement_and_removal_cannot_mutate_owner_or_delegated_manager() -> None:
-    csrf = "members-csrf"
     owner_target = MemberConnection(target_is_owner=True)
-    with _client(owner_target, session=_session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(owner_target, session=_session()) as client:
         replace_owner = client.put(
             f"/api/projects/demo/members/{TARGET_ID}/roles",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"roles": ["config:read", "config:write"]},
         )
         remove_owner = client.delete(
             f"/api/projects/demo/members/{TARGET_ID}",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
         )
     assert replace_owner.status_code == remove_owner.status_code == 409
 
@@ -506,16 +514,15 @@ def test_role_replacement_and_removal_cannot_mutate_owner_or_delegated_manager()
         actor_roles=["config:read", "members:manage"],
         target_roles=["config:read", "members:manage"],
     )
-    with _client(delegated, session=_session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(delegated, session=_session()) as client:
         replace_manager = client.put(
             f"/api/projects/demo/members/{TARGET_ID}/roles",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"roles": ["config:read"]},
         )
         remove_manager = client.delete(
             f"/api/projects/demo/members/{TARGET_ID}",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
         )
     assert replace_manager.status_code == remove_manager.status_code == 403
 
@@ -552,7 +559,7 @@ def test_membership_audit_uses_keyset_pagination() -> None:
         },
     ]
     connection = MemberConnection(membership_audit_rows=rows)
-    with _client(connection, session=_session("members-csrf")) as client:
+    with _client(connection, session=_session()) as client:
         first = client.get("/api/projects/demo/members/audit?limit=1")
         cursor = first.json()["next_cursor"]
         second = client.get(
@@ -599,9 +606,8 @@ def test_membership_audit_uses_keyset_pagination() -> None:
 
 
 def test_mutations_use_bearer_authority_and_strict_request_shapes() -> None:
-    csrf = "members-csrf"
     connection = MemberConnection()
-    with _client(connection, session=_session(csrf)) as client:
+    with _client(connection, session=_session()) as client:
         accepted = client.post(
             "/api/projects/demo/invitations",
             headers={"Origin": "http://admin.test"},
@@ -609,7 +615,7 @@ def test_mutations_use_bearer_authority_and_strict_request_shapes() -> None:
         )
         unknown = client.post(
             "/api/projects/demo/invitations",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "email": "invitee@example.com",
                 "roles": ["config:read"],

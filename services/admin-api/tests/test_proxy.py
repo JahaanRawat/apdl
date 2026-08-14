@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app import github, proxy
+from app import proxy
 from app.auth import AdminSession
 from conftest import TEST_API_KEY, make_settings, proxy_client
 
@@ -153,7 +153,6 @@ async def test_proxy_mints_and_removes_ephemeral_key_for_dynamic_project(
 async def test_agents_mutation_uses_human_bound_ephemeral_credential(
     admin_session: AdminSession,
 ) -> None:
-    csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
@@ -167,10 +166,9 @@ async def test_agents_mutation_uses_human_bound_ephemeral_credential(
         return httpx.Response(202, json={"status": "queued"})
 
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
         response = client.post(
             "/api/projects/demo/agents/v1/agents/run-1/approve",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"decisions": [{"item_id": "p1", "approved": True}]},
         )
         statements = client.app.state.audit_statements
@@ -219,7 +217,6 @@ async def test_llm_connection_read_uses_live_management_authority_without_agents
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
         response = client.get(
             "/api/projects/demo/agents/v1/agents/llm-connections",
-            params={"project_id": "demo"},
         )
         statements = client.app.state.audit_statements
 
@@ -267,7 +264,6 @@ async def test_llm_connection_read_fails_without_role_or_live_management_authori
         client.app.state.pg_pool.connection.llm_connection_authorized = False
         response = client.get(
             "/api/projects/demo/agents/v1/agents/llm-connections",
-            params={"project_id": "demo"},
         )
 
     assert response.status_code == 403
@@ -279,7 +275,6 @@ async def test_llm_connection_read_fails_without_role_or_live_management_authori
 async def test_llm_connection_mutation_uses_live_dual_role_authority(
     admin_session: AdminSession,
 ) -> None:
-    csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
@@ -301,10 +296,9 @@ async def test_llm_connection_mutation_uses_live_dual_role_authority(
         )
 
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
         response = client.put(
             "/api/projects/demo/agents/v1/agents/llm-connections/openai",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "project_id": "demo",
                 "api_key": "provider-secret",
@@ -344,7 +338,6 @@ async def test_llm_connection_mutation_uses_live_dual_role_authority(
 async def test_llm_connection_mutation_fails_when_live_authority_is_lost(
     admin_session: AdminSession,
 ) -> None:
-    csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
@@ -359,10 +352,9 @@ async def test_llm_connection_mutation_fails_when_live_authority_is_lost(
 
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
         client.app.state.pg_pool.connection.llm_connection_authorized = False
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
         response = client.post(
             "/api/projects/demo/agents/v1/agents/llm-connections/openai/refresh-models",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "demo", "version": 1},
         )
 
@@ -375,7 +367,6 @@ async def test_llm_connection_mutation_fails_when_live_authority_is_lost(
 async def test_codegen_llm_connection_mutation_uses_human_bound_ephemeral_credential(
     admin_session: AdminSession,
 ) -> None:
-    csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
@@ -397,10 +388,9 @@ async def test_codegen_llm_connection_mutation_uses_human_bound_ephemeral_creden
         )
 
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
         response = client.put(
             "/api/projects/demo/codegen/v1/llm-connections/openai",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "project_id": "demo",
                 "api_key": "provider-secret",
@@ -448,7 +438,6 @@ async def test_codegen_llm_connection_mutation_uses_human_bound_ephemeral_creden
 async def test_codegen_llm_connection_mutation_fails_when_live_authority_is_lost(
     admin_session: AdminSession,
 ) -> None:
-    csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
@@ -463,10 +452,9 @@ async def test_codegen_llm_connection_mutation_fails_when_live_authority_is_lost
 
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
         client.app.state.pg_pool.connection.llm_connection_authorized = False
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
         response = client.post(
             "/api/projects/demo/codegen/v1/llm-connections/openai/refresh-models",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "demo", "version": 1},
         )
 
@@ -653,276 +641,17 @@ def test_agents_setup_proxy_routes_are_strictly_mapped() -> None:
     )
 
 
-def test_codegen_repository_authorization_routes_are_strictly_mapped() -> None:
+def test_codegen_repository_authorization_routes_are_not_exposed() -> None:
     authorization_id = "123e4567-e89b-42d3-a456-426614174000"
     base = f"/v1/github/repository-authorizations/{authorization_id}"
 
-    assert (
-        proxy.required_role(
-            "codegen",
-            "POST",
-            "/v1/github/repository-authorizations",
-        )
-        == "repository-connections:manage"
-    )
-    assert (
-        proxy.required_role("codegen", "GET", base)
-        == "repository-connections:manage"
-    )
-    assert (
-        proxy.required_role("codegen", "POST", f"{base}/complete")
-        == "repository-connections:manage"
-    )
     for method, path in (
-        ("GET", "/v1/github/repository-authorizations"),
-        ("POST", base),
-        ("GET", f"{base}/complete"),
-        ("POST", f"{base}/unknown"),
-        ("GET", base.upper()),
+        ("POST", "/v1/github/repository-authorizations"),
+        ("GET", base),
+        ("POST", f"{base}/complete"),
         ("GET", "/v1/github/repos"),
-        ("POST", "/v1/connections"),
     ):
         assert proxy.required_role("codegen", method, path) == ""
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["start", "status", "complete"])
-async def test_codegen_repository_authorization_uses_human_bound_read_credential(
-    admin_session: AdminSession,
-    operation: str,
-) -> None:
-    authorization_id = "123e4567-e89b-42d3-a456-426614174000"
-    csrf = "csrf-token"
-    # A project owner need not also carry the delegated role pair. The fake
-    # live-authority query represents that owner decision.
-    session = AdminSession(
-        **{
-            **admin_session.__dict__,
-            "projects": {"demo": frozenset({"config:read"})},
-        }
-    )
-    seen: dict[str, object] = {}
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        seen["key"] = request.headers["x-api-key"]
-        seen["method"] = request.method
-        seen["path"] = request.url.path
-        seen["query"] = dict(request.url.params)
-        seen["body"] = json.loads(request.content) if request.content else None
-        if operation == "start":
-            return httpx.Response(
-                201,
-                json={
-                    "schema_version": "github_repository_authorization_start@1",
-                    "authorization_id": authorization_id,
-                    "installation_url": (
-                        "https://github.com/apps/apdl-app/installations/new"
-                        f"?state={'s' * 43}"
-                    ),
-                    "expires_at": "2026-08-03T12:10:00Z",
-                },
-            )
-        return httpx.Response(200, json={"status": "ok"})
-
-    async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
-        headers = {"Origin": "http://admin.test", "X-CSRF-Token": csrf}
-        if operation == "start":
-            response = client.post(
-                "/api/projects/demo/codegen/v1/github/repository-authorizations",
-                headers=headers,
-                json={"project_id": "demo"},
-            )
-        elif operation == "status":
-            response = client.get(
-                "/api/projects/demo/codegen"
-                f"/v1/github/repository-authorizations/{authorization_id}",
-                params={"project_id": "demo"},
-            )
-        else:
-            response = client.post(
-                "/api/projects/demo/codegen"
-                f"/v1/github/repository-authorizations/{authorization_id}/complete",
-                headers=headers,
-                json={"project_id": "demo", "candidate_id": "ghrc_candidate"},
-            )
-        statements = client.app.state.audit_statements
-
-    assert response.status_code == (201 if operation == "start" else 200)
-    if operation == "start":
-        cookie = next(
-            value
-            for value in response.headers.get_list("set-cookie")
-            if value.startswith(f"{github.CODEGEN_GITHUB_STATE_COOKIE}=")
-        )
-        assert cookie.startswith(
-            f"{github.CODEGEN_GITHUB_STATE_COOKIE}={'s' * 43};"
-        )
-        assert "HttpOnly" in cookie
-        assert "Max-Age=600" in cookie
-        assert f"Path={github.CODEGEN_GITHUB_CALLBACK_PATH}" in cookie
-        assert "SameSite=lax" in cookie
-        assert "Secure" not in cookie
-        assert response.headers["cache-control"] == "no-store"
-        assert response.headers["pragma"] == "no-cache"
-        assert response.headers["referrer-policy"] == "no-referrer"
-    assert seen["key"] != TEST_API_KEY
-    assert seen["method"] == ("GET" if operation == "status" else "POST")
-    authority = next(
-        statement
-        for statement in statements
-        if "AS repository_connection_authorized" in statement[0]
-    )
-    assert authority[1] == ("demo", uuid.UUID(admin_session.user_id))
-    credential_insert = next(
-        statement
-        for statement in statements
-        if "INSERT INTO auth_credentials" in statement[0]
-    )
-    assert credential_insert[1][4] == ["agents:read"]
-    assert credential_insert[1][5] == uuid.UUID(admin_session.user_id)
-    removal = next(
-        statement
-        for statement in statements
-        if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
-    )
-    assert removal[1] == (credential_insert[1][0],)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "installation_url",
-    [
-        "https://evil.test/apps/apdl-app/installations/new?state=" + "s" * 43,
-        "https://github.com/apps/apdl-app/installations/other?state=" + "s" * 43,
-        (
-            "https://github.com/apps/apdl-app/installations/new?state="
-            + "s" * 43
-            + "&state="
-            + "t" * 43
-        ),
-        (
-            "https://github.com/apps/apdl-app/installations/new?state="
-            + "s" * 43
-            + "&unexpected=value"
-        ),
-        "https://github.com/apps/-bad/installations/new?state=" + "s" * 43,
-    ],
-)
-async def test_codegen_authorization_start_rejects_untrusted_installation_state(
-    admin_session: AdminSession,
-    installation_url: str,
-) -> None:
-    csrf = "csrf-token"
-    session = AdminSession(
-        **{
-            **admin_session.__dict__,
-        }
-    )
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            201,
-            json={
-                "schema_version": "github_repository_authorization_start@1",
-                "authorization_id": "123e4567-e89b-42d3-a456-426614174000",
-                "installation_url": installation_url,
-                "expires_at": "2026-08-03T12:10:00Z",
-            },
-        )
-
-    async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
-        response = client.post(
-            "/api/projects/demo/codegen/v1/github/repository-authorizations",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
-            json={"project_id": "demo"},
-        )
-
-    assert response.status_code == 502
-    assert response.json() == {"detail": "GitHub repository authorization failed"}
-    cookie = next(
-        value
-        for value in response.headers.get_list("set-cookie")
-        if value.startswith(f"{github.CODEGEN_GITHUB_STATE_COOKIE}=")
-    )
-    assert "Max-Age=0" in cookie
-    assert "s" * 43 not in cookie
-    assert response.headers["cache-control"] == "no-store"
-    assert response.headers["pragma"] == "no-cache"
-    assert response.headers["referrer-policy"] == "no-referrer"
-
-
-@pytest.mark.asyncio
-async def test_codegen_authorization_start_cookie_uses_secure_setting(
-    admin_session: AdminSession,
-) -> None:
-    csrf = "csrf-token"
-    session = AdminSession(
-        **{
-            **admin_session.__dict__,
-        }
-    )
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            201,
-            json={
-                "schema_version": "github_repository_authorization_start@1",
-                "authorization_id": "123e4567-e89b-42d3-a456-426614174000",
-                "installation_url": (
-                    "https://github.com/apps/apdl-app/installations/new"
-                    f"?state={'s' * 43}"
-                ),
-                "expires_at": "2026-08-03T12:10:00Z",
-            },
-        )
-
-    async with proxy_client(
-        httpx.MockTransport(upstream),
-        session,
-        make_settings(cookie_secure=True),
-    ) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
-        response = client.post(
-            "/api/projects/demo/codegen/v1/github/repository-authorizations",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
-            json={"project_id": "demo"},
-        )
-
-    assert response.status_code == 201
-    cookie = next(
-        value
-        for value in response.headers.get_list("set-cookie")
-        if value.startswith(f"{github.CODEGEN_GITHUB_STATE_COOKIE}=")
-    )
-    assert "Secure" in cookie
-    assert "HttpOnly" in cookie
-    assert "SameSite=lax" in cookie
-
-
-@pytest.mark.asyncio
-async def test_codegen_repository_authorization_fails_when_live_authority_is_lost(
-    admin_session: AdminSession,
-) -> None:
-    called = False
-
-    def upstream(request: httpx.Request) -> httpx.Response:
-        nonlocal called
-        called = True
-        return httpx.Response(200)
-
-    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
-        client.app.state.pg_pool.connection.repository_connection_authorized = False
-        response = client.get(
-            "/api/projects/demo/codegen/v1/github/repository-authorizations/"
-            "123e4567-e89b-42d3-a456-426614174000",
-            params={"project_id": "demo"},
-        )
-
-    assert response.status_code == 403
-    assert "project ownership" in response.json()["detail"]
-    assert not called
 
 
 @pytest.mark.asyncio
@@ -948,9 +677,7 @@ async def test_agents_setup_status_uses_human_bound_ephemeral_credential(
         httpx.MockTransport(upstream),
         admin_session,
     ) as client:
-        response = client.get(
-            "/api/projects/demo/agents/v1/agents/setup?project_id=demo"
-        )
+        response = client.get("/api/projects/demo/agents/v1/agents/setup")
         statements = client.app.state.audit_statements
 
     assert response.status_code == 200
@@ -974,7 +701,6 @@ async def test_agents_setup_status_uses_human_bound_ephemeral_credential(
 async def test_agents_setup_mutation_rechecks_live_dual_role_authority(
     admin_session: AdminSession,
 ) -> None:
-    csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
@@ -999,10 +725,9 @@ async def test_agents_setup_mutation_rechecks_live_dual_role_authority(
         httpx.MockTransport(upstream),
         session,
     ) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
         response = client.put(
             "/api/projects/demo/agents/v1/agents/setup",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "project_id": "demo",
                 "fast_model": {
@@ -1057,24 +782,23 @@ async def test_agents_setup_mutation_rechecks_live_dual_role_authority(
 async def test_codegen_proxy_uses_project_scoped_service_key(
     admin_session: AdminSession,
 ) -> None:
-    seen: list[tuple[str | None, str | None]] = []
+    seen: list[tuple[str | None, str | None, dict[str, str]]] = []
 
     def upstream(request: httpx.Request) -> httpx.Response:
         seen.append(
             (
                 request.headers.get("x-api-key"),
                 request.headers.get("x-apdl-internal-token"),
+                dict(request.url.params),
             )
         )
         return httpx.Response(200, json=[])
 
     async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
-        response = client.get(
-            "/api/projects/demo/codegen/v1/changesets?project_id=demo"
-        )
+        response = client.get("/api/projects/demo/codegen/v1/changesets")
 
     assert response.status_code == 200
-    assert seen == [(TEST_API_KEY, None)]
+    assert seen == [(TEST_API_KEY, None, {"project_id": "demo"})]
 
 
 @pytest.mark.asyncio
@@ -1413,7 +1137,6 @@ async def test_proxy_does_not_expose_global_repository_onboarding(
 async def test_proxy_uses_bearer_authority_and_validates_project_assertions(
     admin_session: AdminSession,
 ) -> None:
-    csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
@@ -1431,21 +1154,35 @@ async def test_proxy_uses_bearer_authority_and_validates_project_assertions(
             headers={"Origin": "http://admin.test"},
             json={"events": []},
         )
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
         mismatch = client.post(
             "/api/projects/demo/ingestion/v1/events",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "other", "events": []},
+        )
+        query_alias = client.post(
+            "/api/projects/demo/ingestion/v1/events?project_id=demo",
+            headers={"Origin": "http://admin.test"},
+            json={"events": []},
+        )
+        header_alias = client.post(
+            "/api/projects/demo/ingestion/v1/events",
+            headers={
+                "Origin": "http://admin.test",
+                "X-APDL-Project-ID": "demo",
+            },
+            json={"events": []},
         )
         accepted = client.post(
             "/api/projects/demo/ingestion/v1/events",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "demo", "events": []},
         )
         audit_statements = client.app.state.audit_statements
 
     assert bearer_only.status_code == 202
     assert mismatch.status_code == 403
+    assert query_alias.status_code == 400
+    assert header_alias.status_code == 400
     assert accepted.status_code == 202
     assert bodies == [
         {"events": []},
@@ -1483,7 +1220,6 @@ async def test_codegen_proxy_rejects_noncanonical_json_media_types(
     admin_session: AdminSession,
     media_type: str,
 ) -> None:
-    csrf = "csrf-token"
     session = AdminSession(
         **{
             **admin_session.__dict__,
@@ -1497,12 +1233,10 @@ async def test_codegen_proxy_rejects_noncanonical_json_media_types(
         return httpx.Response(201, json={"changeset_id": "changeset-1"})
 
     async with proxy_client(httpx.MockTransport(upstream), session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/api")
         response = client.post(
             "/api/projects/demo/codegen/v1/changesets",
             headers={
                 "Origin": "http://admin.test",
-                "X-CSRF-Token": csrf,
                 "Content-Type": media_type,
             },
             content=json.dumps({"project_id": "other"}),

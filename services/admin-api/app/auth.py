@@ -30,7 +30,6 @@ from app.models import (
 from app.security import (
     DUMMY_PASSWORD_HASH,
     new_token,
-    require_allowed_origin,
     token_hash,
     verify_password,
 )
@@ -194,7 +193,6 @@ async def create_session(
     request: Request,
 ) -> ConsoleSession:
     settings: Settings = request.app.state.settings
-    require_allowed_origin(request, settings)
     email = str(body.email).strip().lower()
     now = datetime.now(timezone.utc)
     source = build_login_source(request, email, settings)
@@ -297,7 +295,6 @@ async def delete_session(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> Response:
-    require_allowed_origin(request, request.app.state.settings)
     async with request.app.state.pg_pool.acquire() as conn:
         await conn.execute(
             "UPDATE admin_sessions SET revoked_at = NOW() WHERE session_id = $1",
@@ -344,7 +341,6 @@ async def acknowledge_security_notification(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> Response:
-    require_allowed_origin(request, request.app.state.settings)
     async with request.app.state.pg_pool.acquire() as conn:
         result = await conn.execute(
             """

@@ -103,19 +103,6 @@ class ConsoleSession(BaseModel):
         return value
 
 
-class RegistrationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
-    password: str = Field(min_length=12, max_length=1024)
-
-
-class AuthCapabilities(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    registration_enabled: bool
-
-
 class ProjectCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -318,10 +305,14 @@ class MemberRolesReplaceRequest(BaseModel):
         return self
 
 
-class InvitationRegistrationRequest(BaseModel):
+class InvitationAcceptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    password: str = Field(min_length=12, max_length=1024)
+    invitation_token: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
 
 
 class ProjectMember(BaseModel):
@@ -365,7 +356,11 @@ class PendingProjectInvitation(BaseModel):
 
 
 class ProjectInvitationReveal(PendingProjectInvitation):
-    invitation_url: str = Field(min_length=1, max_length=2048)
+    invitation_token: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
 
 
 class ProjectMembers(BaseModel):
@@ -373,22 +368,6 @@ class ProjectMembers(BaseModel):
 
     members: list[ProjectMember]
     pending_invitations: list[PendingProjectInvitation]
-
-
-class InvitationInspection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: Literal["valid"] = "valid"
-    project_id: str = Field(pattern=PROJECT_ID_PATTERN)
-    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
-    roles: list[HumanRole] = Field(min_length=1, max_length=11)
-    expires_at: datetime
-
-    @model_validator(mode="after")
-    def validate_roles(self) -> "InvitationInspection":
-        if not _roles_are_canonical(self.roles):
-            raise ValueError("roles must be unique and use canonical order")
-        return self
 
 
 class MembershipAuditEntry(BaseModel):

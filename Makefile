@@ -142,7 +142,7 @@ test-packed-python-sdk:
 
 run-admin-api:
 	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
-	APDL_ADMIN_COOKIE_SECURE=false $(HOST_SERVICE_RUNNER) \
+	$(HOST_SERVICE_RUNNER) \
 		--service admin-api $(HOST_SERVICE_ENV_FILE) \
 		--working-directory services/admin-api -- \
 		.venv/bin/python -m uvicorn app.main:app --reload --port 8085 --no-proxy-headers

@@ -126,7 +126,7 @@ class OwnershipPool:
         yield self.connection
 
 
-def _session(csrf: str, *, user_id: UUID = OWNER_ID) -> AdminSession:
+def _session(*, user_id: UUID = OWNER_ID) -> AdminSession:
     return AdminSession(
         session_id="10000000-0000-4000-8000-000000000001",
         token_hash="a" * 64,
@@ -148,9 +148,8 @@ def _client(connection: OwnershipConnection, session: AdminSession) -> TestClien
 
 
 def test_project_member_can_read_ownership_and_execution_authorization() -> None:
-    csrf = "ownership-csrf"
     connection = OwnershipConnection()
-    with _client(connection, _session(csrf)) as client:
+    with _client(connection, _session()) as client:
         response = client.get("/api/projects/demo/authorization")
 
     assert response.status_code == 200
@@ -173,13 +172,11 @@ def test_project_member_can_read_ownership_and_execution_authorization() -> None
 
 
 def test_owner_transfers_only_owner_column_and_writes_immutable_audit() -> None:
-    csrf = "ownership-csrf"
     connection = OwnershipConnection()
-    with _client(connection, _session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(connection, _session()) as client:
         response = client.post(
             "/api/projects/demo/ownership/transfer",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "target_user_id": str(TARGET_ID),
                 "reason": "  Planned team handoff  ",
@@ -208,13 +205,11 @@ def test_owner_transfers_only_owner_column_and_writes_immutable_audit() -> None:
 
 
 def test_operator_managed_project_cannot_be_claimed_from_human_api() -> None:
-    csrf = "ownership-csrf"
     connection = OwnershipConnection(owner_id=None)
-    with _client(connection, _session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(connection, _session()) as client:
         response = client.post(
             "/api/projects/demo/ownership/transfer",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"target_user_id": str(TARGET_ID)},
         )
 
@@ -224,9 +219,8 @@ def test_operator_managed_project_cannot_be_claimed_from_human_api() -> None:
 
 
 def test_manager_can_read_immutable_ownership_history() -> None:
-    csrf = "ownership-csrf"
     connection = OwnershipConnection()
-    with _client(connection, _session(csrf)) as client:
+    with _client(connection, _session()) as client:
         response = client.get("/api/projects/demo/ownership/audit")
 
     assert response.status_code == 200
@@ -276,7 +270,7 @@ def test_ownership_audit_uses_keyset_pagination() -> None:
         },
     ]
     connection = OwnershipConnection(audit_rows=rows)
-    with _client(connection, _session("ownership-csrf")) as client:
+    with _client(connection, _session()) as client:
         first = client.get("/api/projects/demo/ownership/audit?limit=1")
         cursor = first.json()["next_cursor"]
         second = client.get(
@@ -315,13 +309,11 @@ def test_ownership_audit_uses_keyset_pagination() -> None:
 
 
 def test_transfer_without_reason_records_explicit_marker() -> None:
-    csrf = "ownership-csrf"
     connection = OwnershipConnection()
-    with _client(connection, _session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(connection, _session()) as client:
         response = client.post(
             "/api/projects/demo/ownership/transfer",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"target_user_id": str(TARGET_ID)},
         )
 
@@ -333,24 +325,21 @@ def test_transfer_without_reason_records_explicit_marker() -> None:
 
 
 def test_non_owner_and_ineligible_target_cannot_transfer() -> None:
-    csrf = "ownership-csrf"
     non_owner = UUID("50000000-0000-4000-8000-000000000005")
     connection = OwnershipConnection(actor_id=non_owner)
-    with _client(connection, _session(csrf, user_id=non_owner)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(connection, _session(user_id=non_owner)) as client:
         response = client.post(
             "/api/projects/demo/ownership/transfer",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"target_user_id": str(TARGET_ID)},
         )
     assert response.status_code == 403
 
     connection = OwnershipConnection(target_roles=["config:read"])
-    with _client(connection, _session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with _client(connection, _session()) as client:
         response = client.post(
             "/api/projects/demo/ownership/transfer",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"target_user_id": str(TARGET_ID)},
         )
     assert response.status_code == 409
@@ -358,12 +347,11 @@ def test_non_owner_and_ineligible_target_cannot_transfer() -> None:
 
 
 def test_transfer_uses_bearer_authority_and_strict_schema() -> None:
-    csrf = "ownership-csrf"
     connection = OwnershipConnection()
-    with _client(connection, _session(csrf)) as client:
+    with _client(connection, _session()) as client:
         unknown = client.post(
             "/api/projects/demo/ownership/transfer",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"target_user_id": str(TARGET_ID), "force": True},
         )
         bearer_only = client.post(
@@ -373,7 +361,7 @@ def test_transfer_uses_bearer_authority_and_strict_schema() -> None:
         )
         multiline_reason = client.post(
             "/api/projects/demo/ownership/transfer",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "target_user_id": str(TARGET_ID),
                 "reason": "invalid\nreason",
