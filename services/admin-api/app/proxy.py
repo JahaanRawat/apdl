@@ -18,6 +18,11 @@ from starlette.responses import Response, StreamingResponse
 
 from app.auth import AdminSession, require_session
 from app.config import PROJECT_ID_PATTERN, SERVICE_NAMES, Settings
+from app.error_boundary import (
+    REQUEST_ID_HEADER,
+    error_definition,
+    request_id_for_request,
+)
 from app.github import bind_repository_authorization_start_response
 from app.request_body_limit import RequestBodyTooLarge
 from app.security import require_allowed_origin
@@ -38,6 +43,7 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
         "x-cache",
     }
 )
+_MAX_RETRY_AFTER_LENGTH = 128
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
 _LLM_CONNECTION_READER = "llm-connections:read"
@@ -66,6 +72,54 @@ StreamAuthorityState = Literal[
     "session_expired",
     "project_access_revoked",
 ]
+
+
+def _safe_retry_after(response: httpx.Response) -> dict[str, str] | None:
+    value = response.headers.get("retry-after")
+    if (
+        response.status_code not in {
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        }
+        or value is None
+        or not value
+        or len(value) > _MAX_RETRY_AFTER_LENGTH
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        return None
+    return {"Retry-After": value}
+
+
+def _upstream_response_exception(response: httpx.Response) -> HTTPException:
+    upstream_status = response.status_code
+    if upstream_status in {status.HTTP_408_REQUEST_TIMEOUT, status.HTTP_504_GATEWAY_TIMEOUT}:
+        public_status = status.HTTP_504_GATEWAY_TIMEOUT
+    elif upstream_status >= 500 or upstream_status in {
+        status.HTTP_401_UNAUTHORIZED,
+        status.HTTP_403_FORBIDDEN,
+    }:
+        public_status = status.HTTP_502_BAD_GATEWAY
+    elif 400 <= upstream_status < 500:
+        public_status = upstream_status
+    else:
+        public_status = status.HTTP_502_BAD_GATEWAY
+    return HTTPException(
+        status_code=public_status,
+        detail=error_definition(public_status).message,
+        headers=_safe_retry_after(response),
+    )
+
+
+def _upstream_transport_exception(exception: httpx.RequestError) -> HTTPException:
+    public_status = (
+        status.HTTP_504_GATEWAY_TIMEOUT
+        if isinstance(exception, httpx.TimeoutException)
+        else status.HTTP_502_BAD_GATEWAY
+    )
+    return HTTPException(
+        status_code=public_status,
+        detail=error_definition(public_status).message,
+    )
 
 
 async def _service_credential(
@@ -627,10 +681,16 @@ async def _require_codegen_scope(
     match = _CODEGEN_CHANGESET_PATH.fullmatch(path)
     if match is None:
         return
-    response = await request.app.state.http_client.get(
-        f"{settings.service_urls['codegen'].rstrip('/')}/v1/changesets/{match.group(1)}",
-        headers={"X-API-Key": api_key},
-    )
+    try:
+        response = await request.app.state.http_client.get(
+            f"{settings.service_urls['codegen'].rstrip('/')}/v1/changesets/{match.group(1)}",
+            headers={
+                "X-API-Key": api_key,
+                REQUEST_ID_HEADER: request_id_for_request(request),
+            },
+        )
+    except httpx.RequestError as exc:
+        raise _upstream_transport_exception(exc) from exc
     if response.status_code in {status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND}:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Changeset not found"
@@ -798,6 +858,7 @@ async def proxy_service(
         headers["X-APDL-Actor-User-ID"] = session.user_id
     else:
         headers["X-API-Key"] = api_key
+    headers[REQUEST_ID_HEADER] = request_id_for_request(request)
 
     upstream_url = f"{settings.service_urls[service].rstrip('/')}{upstream_path}"
     upstream_request = request.app.state.http_client.build_request(
@@ -824,11 +885,10 @@ async def proxy_service(
             upstream_request, stream=True
         )
     except httpx.RequestError as exc:
+        failure = _upstream_transport_exception(exc)
         await _remove_ephemeral_credential(request, ephemeral_credential_id)
-        await _finish_mutation_audit(request, audit_id, status.HTTP_502_BAD_GATEWAY)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upstream unavailable"
-        ) from exc
+        await _finish_mutation_audit(request, audit_id, failure.status_code)
+        raise failure from exc
 
     await _finish_mutation_audit(request, audit_id, response.status_code)
 
@@ -838,6 +898,11 @@ async def proxy_service(
         if name.lower() in _FORWARDED_RESPONSE_HEADERS
     }
     if response.headers.get("content-type", "").startswith("text/event-stream"):
+        if response.status_code >= 400:
+            failure = _upstream_response_exception(response)
+            await response.aclose()
+            await _remove_ephemeral_credential(request, ephemeral_credential_id)
+            raise failure
         return StreamingResponse(
             _authorized_sse(
                 response,
@@ -853,17 +918,24 @@ async def proxy_service(
         )
     try:
         content = await response.aread()
+    except httpx.RequestError as exc:
+        failure = _upstream_transport_exception(exc)
+        await _finish_mutation_audit(request, audit_id, failure.status_code)
+        raise failure from exc
     finally:
         await response.aclose()
         await _remove_ephemeral_credential(request, ephemeral_credential_id)
-    outgoing = Response(
-        content=content, status_code=response.status_code, headers=response_headers
-    )
-    if (
+    repository_authorization_start = (
         service == "codegen"
         and request.method == "POST"
         and upstream_path == "/v1/github/repository-authorizations"
-    ):
+    )
+    if response.status_code >= 400 and not repository_authorization_start:
+        raise _upstream_response_exception(response)
+    outgoing = Response(
+        content=content, status_code=response.status_code, headers=response_headers
+    )
+    if repository_authorization_start:
         return bind_repository_authorization_start_response(
             outgoing,
             content,

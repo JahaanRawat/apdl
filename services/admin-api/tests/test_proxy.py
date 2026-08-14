@@ -82,6 +82,7 @@ async def test_proxy_injects_server_key_and_discards_caller_credentials(
         seen["key"] = request.headers.get("x-api-key")
         seen["cookie"] = request.headers.get("cookie")
         seen["authorization"] = request.headers.get("authorization")
+        seen["request_id"] = request.headers.get("x-request-id")
         return httpx.Response(200, json={"flags": []})
 
     async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
@@ -91,11 +92,17 @@ async def test_proxy_injects_server_key_and_discards_caller_credentials(
                 "X-API-Key": "attacker-controlled",
                 "Authorization": "Bearer attacker-controlled",
                 "Cookie": "untrusted=value",
+                "X-Request-ID": "87fab7d6-dba0-4f77-8ffd-00e815fc7303",
             },
         )
 
     assert response.status_code == 200
-    assert seen == {"key": TEST_API_KEY, "cookie": None, "authorization": None}
+    assert seen == {
+        "key": TEST_API_KEY,
+        "cookie": None,
+        "authorization": None,
+        "request_id": "87fab7d6-dba0-4f77-8ffd-00e815fc7303",
+    }
 
 
 @pytest.mark.asyncio

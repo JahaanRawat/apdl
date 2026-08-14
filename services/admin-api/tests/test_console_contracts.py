@@ -219,3 +219,33 @@ def test_openapi_declares_public_and_bearer_operations_without_aliases() -> None
         "cookieAuth",
     ):
         assert forbidden not in serialized
+
+
+def test_openapi_declares_request_identity_and_header_only_retry_guidance() -> None:
+    document = _load_json(OPENAPI_PATH)
+    request_id = {"$ref": "#/components/headers/RequestId"}
+    paths = document["paths"]
+    successful_responses = (
+        paths["/api/console/v1/manifest"]["get"]["responses"]["200"],
+        paths["/api/console/v1/sessions"]["post"]["responses"]["200"],
+        paths["/api/console/v1/session"]["get"]["responses"]["200"],
+        paths["/api/console/v1/session"]["delete"]["responses"]["204"],
+        paths["/api/projects/{project_id}/config/v1/stream"]["get"][
+            "responses"
+        ]["200"],
+    )
+    for response in successful_responses:
+        assert response["headers"]["X-Request-ID"] == request_id
+
+    error_response = document["components"]["responses"]["ConsoleError"]
+    assert error_response["headers"]["X-Request-ID"] == request_id
+    assert error_response["headers"]["Cache-Control"]["schema"]["const"] == (
+        "no-store"
+    )
+    assert "Retry-After" in error_response["headers"]
+    assert set(SCHEMAS["error.schema.json"]["properties"]) == {
+        "schema_version",
+        "code",
+        "message",
+        "request_id",
+    }

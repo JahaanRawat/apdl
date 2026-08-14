@@ -20,6 +20,9 @@
                   "type": "string",
                   "const": "no-store"
                 }
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -54,6 +57,11 @@
         "responses": {
           "200": {
             "description": "A fixed-expiration bearer session",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -92,6 +100,11 @@
         "responses": {
           "200": {
             "description": "The authenticated human identity and project memberships",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -118,7 +131,12 @@
         ],
         "responses": {
           "204": {
-            "description": "The session was revoked"
+            "description": "The session was revoked",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/ConsoleError"
@@ -167,6 +185,9 @@
                   "type": "string",
                   "const": "no-cache, no-transform"
                 }
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
               }
             },
             "content": {
@@ -227,14 +248,34 @@
         "bearerFormat": "opaque"
       }
     },
+    "headers": {
+      "RequestId": {
+        "description": "Canonical request correlation UUID selected by the Admin API boundary",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
     "responses": {
       "ConsoleError": {
         "description": "A safe console-facing error",
         "headers": {
           "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "Cache-Control": {
             "schema": {
               "type": "string",
-              "format": "uuid"
+              "const": "no-store"
+            }
+          },
+          "Retry-After": {
+            "description": "Optional bounded retry guidance for rate-limited or unavailable requests",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             }
           }
         },

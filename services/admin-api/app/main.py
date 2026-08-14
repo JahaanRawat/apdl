@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from app import auth, console, credentials, github, members, projects, proxy
 from app.config import Settings
+from app.error_boundary import install_error_boundary
 from app.request_body_limit import RequestBodyLimitMiddleware
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,9 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+
+install_error_boundary(app)
 
 
 app.include_router(auth.router)
