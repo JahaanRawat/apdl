@@ -114,6 +114,11 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertEqual(len(matrix["include"]), 11)
         by_name = {image["name"]: image for image in matrix["include"]}
         self.assertEqual(
+            by_name["admin-api"]["build_args"],
+            f"APDL_BACKEND_VERSION={VALID_MANIFEST['version']}\n"
+            f"APDL_BUILD_REVISION={revision}",
+        )
+        self.assertEqual(
             by_name["codegen-worker"]["build_args"],
             f"CODEGEN_REVISION={revision}",
         )

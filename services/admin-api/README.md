@@ -104,6 +104,22 @@ for SDK-only development. Self-created projects expose Agents history read-only
 by default and cannot execute LLM or Codegen work until an operator records an
 explicit project execution authorization.
 
+## Console compatibility manifest
+
+`GET /api/console/v1/manifest` is the public, unauthenticated compatibility
+check for a separately deployed Console. It returns only the strict
+`console_manifest@1` deployment identity and build metadata, always with
+`Cache-Control: no-store`. The exact route does not redirect, and the Admin API
+does not expose a trailing-slash alias.
+
+`make setup` generates one deployment UUID in the ignored root `.env` and
+preserves it across upgrades. It refreshes the backend version from
+`release-manifest.json` and the build revision from the checkout's committed
+`HEAD` before host or Compose development starts. Independent deployments must
+not copy `APDL_DEPLOYMENT_ID`. Published Admin API images bake the canonical
+release version and full Git revision; operators still provide a durable
+deployment ID and display name at runtime.
+
 Managed credential routes are:
 
 ```text
@@ -176,6 +192,10 @@ Example degraded response:
 
 | Variable | Purpose |
 |---|---|
+| `APDL_DEPLOYMENT_ID` | Required canonical non-nil UUID that permanently identifies one backend installation; local setup generates and preserves it |
+| `APDL_DISPLAY_NAME` | Required 1-100 character human label shown by the Console connection gate |
+| `APDL_BACKEND_VERSION` | Canonical SemVer sourced from `release-manifest.json` for local runs and baked into release images |
+| `APDL_BUILD_REVISION` | Full lowercase 40-character Git revision sourced from committed `HEAD` for local runs and baked into release images |
 | `POSTGRES_URL` | Admin users, memberships, and sessions through the non-owner runtime role |
 | `APDL_SERVICE_API_KEYS` | Optional Admin API-only JSON object of persistent project-scoped proxy keys; server-only, and not consumed by Agents |
 | `INGESTION_SERVICE_URL` | Private ingestion URL |
@@ -211,4 +231,5 @@ Example degraded response:
 ```bash
 make lint-admin-api
 make test-admin-api
+make test-script-contracts
 ```

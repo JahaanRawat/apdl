@@ -23,7 +23,10 @@
       "repository": "ghcr.io/kuvera-apdl/apdl-admin-api",
       "context": "services/admin-api",
       "dockerfile": "services/admin-api/Dockerfile",
-      "build_args": []
+      "build_args": [
+        "APDL_BACKEND_VERSION",
+        "APDL_BUILD_REVISION"
+      ]
     },
     {
       "name": "agents",

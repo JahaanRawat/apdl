@@ -18,6 +18,10 @@ TEST_API_KEY = "proj_demo_0123456789abcdef"
 
 def make_settings(**overrides) -> Settings:
     values = {
+        "deployment_id": "87fab7d6-dba0-4f77-8ffd-00e815fc7303",
+        "display_name": "Test APDL",
+        "backend_version": "0.3.4",
+        "build_revision": "a" * 40,
         "postgres_url": "postgresql://test",
         "service_urls": {
             "ingestion": "http://ingestion.test",

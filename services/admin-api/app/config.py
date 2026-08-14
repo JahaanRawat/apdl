@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlparse
+from uuid import UUID
 
 from app.request_body_limit import DEFAULT_MAX_REQUEST_BODY_BYTES
 
@@ -21,6 +22,12 @@ SERVICE_NAMES = frozenset(
     {"ingestion", "config", "query", "agents", "codegen", "llm-vault"}
 )
 LOCAL_LOGIN_RISK_HMAC_KEY = "local-admin-login-risk-key-change-me"
+SEMVER_PATTERN = re.compile(
+    r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+FULL_GIT_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _json_object(name: str, raw: str) -> dict[str, str]:
@@ -95,6 +102,53 @@ def _secret(name: str, default: str | None = None) -> str:
     return value
 
 
+def _normalized_required(name: str) -> str:
+    value = os.getenv(name)
+    if value is None or not value:
+        raise ValueError(f"{name} is required")
+    if value != value.strip():
+        raise ValueError(f"{name} must be normalized")
+    return value
+
+
+def _deployment_id() -> str:
+    value = _normalized_required("APDL_DEPLOYMENT_ID")
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise ValueError("APDL_DEPLOYMENT_ID must be a canonical UUID") from exc
+    if parsed.int == 0 or str(parsed) != value:
+        raise ValueError("APDL_DEPLOYMENT_ID must be a canonical non-nil UUID")
+    return value
+
+
+def _display_name() -> str:
+    value = _normalized_required("APDL_DISPLAY_NAME")
+    if len(value) > 100 or any(
+        ord(character) < 32 or ord(character) == 127 for character in value
+    ):
+        raise ValueError(
+            "APDL_DISPLAY_NAME must contain 1-100 normalized printable characters"
+        )
+    return value
+
+
+def _backend_version() -> str:
+    value = _normalized_required("APDL_BACKEND_VERSION")
+    if SEMVER_PATTERN.fullmatch(value) is None:
+        raise ValueError("APDL_BACKEND_VERSION must be canonical SemVer")
+    return value
+
+
+def _build_revision() -> str:
+    value = _normalized_required("APDL_BUILD_REVISION")
+    if FULL_GIT_REVISION_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "APDL_BUILD_REVISION must be a full lowercase 40-character Git revision"
+        )
+    return value
+
+
 def _proxy_cidrs(raw: str) -> tuple[
     ipaddress.IPv4Network | ipaddress.IPv6Network, ...
 ]:
@@ -137,6 +191,10 @@ def _service_keys() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class Settings:
+    deployment_id: str
+    display_name: str
+    backend_version: str
+    build_revision: str
     postgres_url: str
     service_urls: Mapping[str, str]
     service_api_keys: Mapping[str, str]
@@ -185,6 +243,10 @@ class Settings:
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError(f"Invalid {name} service URL")
         settings = cls(
+            deployment_id=_deployment_id(),
+            display_name=_display_name(),
+            backend_version=_backend_version(),
+            build_revision=_build_revision(),
             postgres_url=os.getenv(
                 "POSTGRES_URL",
                 "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",

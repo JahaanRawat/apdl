@@ -1,6 +1,7 @@
 """Static deployment contracts for the Admin API boundary."""
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -32,6 +33,27 @@ def test_compose_exposes_admin_api_on_the_configured_bind_address() -> None:
     )
     assert "admin-edge:" not in compose
     assert "APDL_ADMIN_TRUSTED_PROXY_CIDRS=[]" in environment
+
+
+def test_admin_container_receives_per_install_and_immutable_build_metadata() -> None:
+    compose = (ROOT / "infra/docker/docker-compose.yml").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "services/admin-api/Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    environment = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "APDL_DEPLOYMENT_ID: ${APDL_DEPLOYMENT_ID:-}" in compose
+    assert "APDL_DISPLAY_NAME: ${APDL_DISPLAY_NAME:-Local APDL}" in compose
+    for name in ("APDL_BACKEND_VERSION", "APDL_BUILD_REVISION"):
+        assert f"{name}: ${{{name}:-}}" in compose
+        assert f"ARG {name}" in dockerfile
+    assert "ENV APDL_BACKEND_VERSION=${APDL_BACKEND_VERSION}" in dockerfile
+    assert "APDL_BUILD_REVISION=${APDL_BUILD_REVISION}" in dockerfile
+    assert "APDL_DEPLOYMENT_ID=\n" in environment
+    assert re.search(
+        r"APDL_DEPLOYMENT_ID=[0-9a-f]{8}-[0-9a-f-]{27,}",
+        environment,
+    ) is None
 
 
 def test_compose_fails_closed_while_local_example_enables_bounded_onboarding() -> None:

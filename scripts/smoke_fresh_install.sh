@@ -23,6 +23,7 @@ require() {
 
 require docker
 require python3
+require git
 docker compose version >/dev/null
 docker info >/dev/null
 
@@ -40,6 +41,17 @@ export APDL_RUNTIME_POSTGRES_PASSWORD="apdl_runtime_dev"
 export APDL_AGENTS_POSTGRES_PASSWORD="apdl_agents_dev1"
 export APDL_LLM_VAULT_POSTGRES_PASSWORD="apdl_llm_vault_dev"
 export APDL_BIND_ADDRESS="127.0.0.1"
+# Each hermetic stack is a distinct deployment. Build metadata still comes from
+# canonical release and Git sources instead of a shared placeholder.
+export APDL_DEPLOYMENT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+export APDL_DISPLAY_NAME="APDL fresh-install smoke"
+export APDL_BACKEND_VERSION="$(
+    python3 -c 'import json, pathlib, sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text())["version"])' \
+        "$ROOT_DIR/release-manifest.json"
+)"
+export APDL_BUILD_REVISION="$(
+    git -C "$ROOT_DIR" rev-parse --verify 'HEAD^{commit}'
+)"
 # Use a fresh disposable encryption key for every isolated smoke database.
 export LLM_VAULT_ENCRYPTION_KEY_BASE64="$(
     python3 "$ROOT_DIR/scripts/llm_vault_key.py" generate

@@ -31,7 +31,7 @@ EXPECTED_DOCKER_IMAGES = [
         "repository": "ghcr.io/kuvera-apdl/apdl-admin-api",
         "context": "services/admin-api",
         "dockerfile": "services/admin-api/Dockerfile",
-        "build_args": [],
+        "build_args": ["APDL_BACKEND_VERSION", "APDL_BUILD_REVISION"],
     },
     {
         "name": "agents",
@@ -210,7 +210,7 @@ def render_docker_build_matrix(
 ) -> dict[str, list[dict[str, str]]]:
     """Render validated manifest images into a GitHub Actions build matrix."""
 
-    validate_manifest(manifest)
+    version, _tag = validate_manifest(manifest)
     if FULL_GIT_SHA_RE.fullmatch(revision) is None:
         raise ReleaseContractError(
             "Docker release revision must be a full lowercase Git SHA"
@@ -221,6 +221,8 @@ def render_docker_build_matrix(
         )
 
     values = {
+        "APDL_BACKEND_VERSION": version,
+        "APDL_BUILD_REVISION": revision,
         "CODEGEN_REVISION": revision,
         "CODEGEN_EGRESS_POLICY_SHA256": egress_policy_sha256,
     }

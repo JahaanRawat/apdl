@@ -16,6 +16,13 @@ def explicit_vault_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
         "LLM_VAULT_ADMIN_TOKEN",
         "test-vault-admin-token-is-at-least-32-bytes",
     )
+    monkeypatch.setenv(
+        "APDL_DEPLOYMENT_ID",
+        "87fab7d6-dba0-4f77-8ffd-00e815fc7303",
+    )
+    monkeypatch.setenv("APDL_DISPLAY_NAME", "Test APDL")
+    monkeypatch.setenv("APDL_BACKEND_VERSION", "0.3.4")
+    monkeypatch.setenv("APDL_BUILD_REVISION", "a" * 40)
 
 
 def test_argon2id_password_hash_is_salted_and_verifiable() -> None:
@@ -94,6 +101,65 @@ def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None
     assert settings.stream_authority_check_seconds == 5.0
     assert settings.upstream_read_timeout_seconds == 60.0
     assert settings.readiness_probe_timeout_seconds == 2.0
+    assert settings.deployment_id == "87fab7d6-dba0-4f77-8ffd-00e815fc7303"
+    assert settings.display_name == "Test APDL"
+    assert settings.backend_version == "0.3.4"
+    assert settings.build_revision == "a" * 40
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        (
+            "APDL_DEPLOYMENT_ID",
+            "87FAB7D6-DBA0-4F77-8FFD-00E815FC7303",
+            "canonical non-nil UUID",
+        ),
+        (
+            "APDL_DEPLOYMENT_ID",
+            "00000000-0000-0000-0000-000000000000",
+            "canonical non-nil UUID",
+        ),
+        (
+            "APDL_DISPLAY_NAME",
+            "Invalid\nname",
+            "normalized printable characters",
+        ),
+        ("APDL_BACKEND_VERSION", "v0.3.4", "canonical SemVer"),
+        ("APDL_BUILD_REVISION", "development", "40-character Git revision"),
+    ],
+)
+def test_settings_reject_invalid_console_manifest_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=message):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "APDL_DEPLOYMENT_ID",
+        "APDL_DISPLAY_NAME",
+        "APDL_BACKEND_VERSION",
+        "APDL_BUILD_REVISION",
+    ],
+)
+def test_settings_require_console_manifest_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
+    monkeypatch.delenv(name)
+
+    with pytest.raises(ValueError, match=rf"{name} is required"):
+        Settings.from_env()
 
 
 def test_settings_reject_invalid_registration_controls(monkeypatch) -> None:

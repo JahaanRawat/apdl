@@ -16,6 +16,7 @@ COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(COMPOSE_F
 DEPS_COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(DEPS_COMPOSE_FILE)
 HOST_SERVICE_RUNNER := python3 scripts/run_host_service.py
 HOST_SERVICE_ENV_FILE := $(if $(wildcard .env),--env-file .env,)
+CONSOLE_DEPLOYMENT_PROVISIONER := python3 scripts/console_deployment.py ensure .env --repository-root .
 
 # Build tags are convenient local handles. Tenant deployment resolves and checks
 # each tag's exact local image ID before Compose receives it.
@@ -140,6 +141,7 @@ test-packed-python-sdk:
 # ─── Admin API (Python) ─────────────────────────────────────
 
 run-admin-api:
+	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
 	APDL_ADMIN_COOKIE_SECURE=false $(HOST_SERVICE_RUNNER) \
 		--service admin-api $(HOST_SERVICE_ENV_FILE) \
 		--working-directory services/admin-api -- \
@@ -152,9 +154,11 @@ lint-admin-api:
 	cd services/admin-api && .venv/bin/ruff check app/ scripts/ tests/
 
 create-admin-user:
+	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
 	$(COMPOSE) run --rm --build --no-deps admin-api python -m scripts.create_admin_user $(ARGS)
 
 assign-project-owner:
+	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
 	$(COMPOSE) run --rm --build --no-deps admin-api python -m scripts.assign_project_owner $(ARGS)
 
 # ─── SDK (Python) ────────────────────────────────────────────
@@ -405,6 +409,7 @@ dev:
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-llm-vault, make run-agents, make run-codegen, make run-pipeline"
 
 dev-core:
+	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
 	$(COMPOSE) --profile agents --profile codegen stop -t 30 \
 		ingestion config query llm-vault agents codegen clickhouse-writer admin-api gateway
 	$(COMPOSE) --profile agents --profile codegen rm -f -s agents codegen

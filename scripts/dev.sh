@@ -126,6 +126,8 @@ cmd_setup() {
     fi
     python3 "$ROOT_DIR/scripts/llm_vault_key.py" ensure "$ROOT_DIR/.env"
     ok "Local LLM vault encryption key and admin token are provisioned"
+    python3 "$ROOT_DIR/scripts/console_deployment.py" ensure "$ROOT_DIR/.env"
+    ok "Stable local Console deployment identity and build metadata are provisioned"
 
     setup_python_package "Ingestion Service" "$ROOT_DIR/services/ingestion"
     setup_python_package "Config Service"    "$ROOT_DIR/services/config"
