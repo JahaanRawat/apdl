@@ -20,9 +20,10 @@ or rotation, and every request is authorized against a user, project, and role.
   Registry failures also emit the strict control shape and close fail-closed.
 - Five consecutive failures lock an account for 15 minutes by default. Login
   failures use one generic response to avoid user enumeration.
-- Browser self-registration is absent from console API version 1. Operators
-  provision users with `make create-admin-user`; existing users may accept a
-  reveal-once invitation code in a strict JSON request body.
+- Browser self-registration accepts exactly an email and a 12-1024 character
+  password. It is enabled by default, may be disabled per deployment, and is
+  bounded by the shared authentication rate limits and a hard account cap.
+  New accounts start with no project memberships or service authority.
 - Authenticated users can create a project through `POST /api/projects`. The
   project record and creator membership are committed together, and the
   updated project list is returned to the console. Creator membership includes
@@ -95,11 +96,12 @@ make migrate-postgres
 make run-admin-api
 ```
 
-The normal bootstrap creates no users, projects, or credentials. The browser
-console is maintained and deployed separately; this repository exposes the
-direct backend gateway at `http://localhost:8000` but does not build or serve a
-frontend. Use `make create-admin-user` for bootstrap, recovery, and
-non-browser provisioning, or the documented direct
+The normal bootstrap creates no users, projects, or credentials. The separately
+deployed browser Console can create the first zero-project account through
+`POST /api/console/v1/registrations`; this repository exposes the direct backend
+gateway at `http://localhost:8000` but does not build or serve a frontend. Use
+`make create-admin-user` for recovery and non-browser provisioning, or the
+documented direct
 [credential workflow](../../docs/authentication.md#operator-provision-credentials)
 for SDK-only development. Self-created projects expose Agents history read-only
 by default and cannot execute LLM or Codegen work until an operator records an
@@ -120,6 +122,13 @@ preserves it across upgrades. It refreshes the backend version from
 not copy `APDL_DEPLOYMENT_ID`. Published Admin API images bake the canonical
 release version and full Git revision; operators still provide a durable
 deployment ID and display name at runtime.
+
+`GET /api/console/v1/capabilities` returns the strict
+`console_capabilities@1` feature document. `registration_enabled` tells a
+Console whether to offer account creation without extending the immutable
+manifest shape. A successful `POST /api/console/v1/registrations` returns the
+same deployment-bound `console_session@1` bearer shape as login and creates no
+project membership implicitly.
 
 Managed credential routes are:
 
@@ -199,6 +208,8 @@ Example degraded response:
 | `APDL_BUILD_REVISION` | Full lowercase 40-character Git revision sourced from committed `HEAD` for local runs and baked into release images |
 | `POSTGRES_URL` | Admin users, memberships, and sessions through the non-owner runtime role |
 | `APDL_SERVICE_API_KEYS` | Optional Admin API-only JSON object of persistent project-scoped proxy keys; server-only, and not consumed by Agents |
+| `APDL_ADMIN_REGISTRATION_ENABLED` | Whether public Console registration is available; default `true` for loopback-first local bootstrap. Disable it unless intentional when exposing the gateway beyond loopback. |
+| `APDL_ADMIN_MAX_ACCOUNTS` | Hard deployment account cap enforced under a PostgreSQL advisory transaction lock; default 100 |
 | `INGESTION_SERVICE_URL` | Private ingestion URL |
 | `CONFIG_SERVICE_URL` | Private config URL |
 | `QUERY_SERVICE_URL` | Private query URL |

@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import auth
+from app.error_boundary import install_error_boundary
 from app.security import hash_password
 from conftest import make_settings
 
@@ -230,6 +231,319 @@ def test_login_rejects_unknown_fields_and_has_no_legacy_aliases() -> None:
     assert unknown.status_code == 422
     assert {legacy_login.status_code, legacy_me.status_code, legacy_logout.status_code} == {404}
     assert legacy_register.status_code == 404
+
+
+class RegistrationConnection:
+    def __init__(
+        self,
+        *,
+        account_exists: bool = False,
+        account_count: int = 0,
+        locked_account_count: int | None = None,
+    ) -> None:
+        self.user_id = uuid.UUID("40000000-0000-4000-8000-000000000004")
+        self.account_exists = account_exists
+        self.account_count = account_count
+        self.locked_account_count = locked_account_count
+        self.count_reads = 0
+        self.rate_buckets: dict[tuple[str, str], tuple[datetime, int]] = {}
+        self.executions: list[tuple[str, tuple[object, ...]]] = []
+        self.insert_attempts = 0
+        self.pool_depth = 0
+
+    @asynccontextmanager
+    async def transaction(self):
+        yield
+
+    async def fetchrow(self, query: str, *args):
+        assert "INSERT INTO admin_login_rate_buckets" in query
+        scope, key_hash, window_seconds, now = args
+        key = (str(scope), str(key_hash))
+        previous = self.rate_buckets.get(key)
+        if (
+            previous is None
+            or previous[0] <= now - timedelta(seconds=int(window_seconds))
+        ):
+            value = (now, 1)
+        else:
+            value = (previous[0], previous[1] + 1)
+        self.rate_buckets[key] = value
+        return {"window_started_at": value[0], "attempt_count": value[1]}
+
+    async def fetchval(self, query: str, *args):
+        self.executions.append((query, args))
+        if "SELECT count(*) FROM admin_users" in query:
+            self.count_reads += 1
+            if self.count_reads >= 2 and self.locked_account_count is not None:
+                return self.locked_account_count
+            return self.account_count
+        assert "INSERT INTO admin_users" in query
+        self.insert_attempts += 1
+        assert args[1] == "new-admin@example.com"
+        assert str(args[2]).startswith("$argon2id$")
+        if self.account_exists:
+            return None
+        self.account_count += 1
+        return self.user_id
+
+    async def execute(self, query: str, *args):
+        self.executions.append((query, args))
+        return "OK"
+
+
+class RegistrationPool(FakePool):
+    @asynccontextmanager
+    async def acquire(self):
+        self.connection.pool_depth += 1
+        try:
+            yield self.connection
+        finally:
+            self.connection.pool_depth -= 1
+
+
+def make_registration_client(connection, *, settings=None) -> TestClient:
+    app = FastAPI()
+    app.state.settings = settings or make_settings(deployment_id=DEPLOYMENT_ID)
+    app.state.pg_pool = RegistrationPool(connection)
+    app.include_router(auth.router)
+    return TestClient(app, client=("127.0.0.1", 50000))
+
+
+def test_registration_creates_zero_project_user_and_bearer_session() -> None:
+    connection = RegistrationConnection()
+    with make_registration_client(connection) as client:
+        response = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "NEW-ADMIN@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["schema_version"] == "console_session@1"
+    assert len(payload["access_token"]) == 43
+    assert response.headers.get_list("set-cookie") == []
+    assert connection.insert_attempts == 1
+    assert not any(
+        "admin_user_projects" in query for query, _ in connection.executions
+    )
+    session_insert = next(
+        args
+        for query, args in connection.executions
+        if "INSERT INTO admin_sessions" in query
+    )
+    assert session_insert[1] == connection.user_id
+    assert session_insert[2] == hashlib.sha256(
+        payload["access_token"].encode()
+    ).hexdigest()
+    assert session_insert[3] == DEPLOYMENT_ID
+
+
+def test_registration_is_disabled_before_database_or_hashing(monkeypatch) -> None:
+    connection = RegistrationConnection()
+
+    async def unexpected_hash(*_args):
+        raise AssertionError("disabled registration must not hash")
+
+    monkeypatch.setattr(auth.asyncio, "to_thread", unexpected_hash)
+    settings = make_settings(
+        deployment_id=DEPLOYMENT_ID,
+        registration_enabled=False,
+    )
+    with make_registration_client(connection, settings=settings) as client:
+        response = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert response.status_code == 403
+    assert connection.executions == []
+
+
+def test_registration_rejects_existing_email_without_starting_session() -> None:
+    connection = RegistrationConnection(account_exists=True)
+    with make_registration_client(connection) as client:
+        response = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert response.status_code == 409
+    assert not any(
+        "INSERT INTO admin_sessions" in query for query, _ in connection.executions
+    )
+
+
+def test_registration_conflict_uses_canonical_public_error_without_enumeration() -> None:
+    connection = RegistrationConnection(account_exists=True)
+    app = FastAPI()
+    app.state.settings = make_settings(deployment_id=DEPLOYMENT_ID)
+    app.state.pg_pool = RegistrationPool(connection)
+    install_error_boundary(app)
+    app.include_router(auth.router)
+
+    with TestClient(app, client=("127.0.0.1", 50000)) as client:
+        response = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "schema_version": "error@1",
+        "code": "conflict",
+        "message": "The request conflicts with the current resource state.",
+        "request_id": response.headers["x-request-id"],
+    }
+    assert "account" not in response.text.lower()
+
+
+def test_registration_hashes_without_holding_a_database_connection(monkeypatch) -> None:
+    connection = RegistrationConnection()
+    observed_depths: list[int] = []
+
+    async def checked_to_thread(function, *args):
+        observed_depths.append(connection.pool_depth)
+        return function(*args)
+
+    monkeypatch.setattr(auth.asyncio, "to_thread", checked_to_thread)
+    with make_registration_client(connection) as client:
+        response = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert response.status_code == 201
+    assert observed_depths == [0]
+    statements = [query for query, _ in connection.executions]
+    lock_index = next(
+        index
+        for index, query in enumerate(statements)
+        if "pg_advisory_xact_lock" in query
+    )
+    count_index = next(
+        index
+        for index, query in enumerate(statements[lock_index + 1 :], lock_index + 1)
+        if "SELECT count(*) FROM admin_users" in query
+    )
+    insert_index = next(
+        index
+        for index, query in enumerate(statements)
+        if "INSERT INTO admin_users" in query
+    )
+    assert lock_index < count_index < insert_index
+
+
+def test_registration_enforces_early_and_locked_account_capacity(monkeypatch) -> None:
+    async def unexpected_hash(*_args):
+        raise AssertionError("early capacity rejection must not hash")
+
+    at_capacity = RegistrationConnection(account_count=1)
+    monkeypatch.setattr(auth.asyncio, "to_thread", unexpected_hash)
+    settings = make_settings(deployment_id=DEPLOYMENT_ID, max_accounts=1)
+    with make_registration_client(at_capacity, settings=settings) as client:
+        early = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert early.status_code == 409
+    assert at_capacity.insert_attempts == 0
+
+    raced = RegistrationConnection(account_count=0, locked_account_count=1)
+
+    async def hash_after_preflight(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(auth.asyncio, "to_thread", hash_after_preflight)
+    with make_registration_client(raced, settings=settings) as client:
+        locked = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert locked.status_code == 409
+    assert raced.insert_attempts == 0
+    assert not any(
+        "INSERT INTO admin_sessions" in query for query, _ in raced.executions
+    )
+
+
+def test_registration_uses_shared_auth_rate_limit() -> None:
+    connection = RegistrationConnection()
+    settings = make_settings(
+        deployment_id=DEPLOYMENT_ID,
+        login_global_rate_limit=1,
+    )
+    with make_registration_client(connection, settings=settings) as client:
+        first = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+        second = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert first.status_code == 201
+    assert second.status_code == 429
+    assert second.headers["retry-after"] == "60"
+    assert connection.insert_attempts == 1
+
+
+def test_registration_schema_is_strict_and_has_no_legacy_alias() -> None:
+    connection = RegistrationConnection()
+    with make_registration_client(connection) as client:
+        short_password = client.post(
+            "/api/console/v1/registrations",
+            json={"email": "new-admin@example.com", "password": "too-short"},
+        )
+        unknown = client.post(
+            "/api/console/v1/registrations",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+                "project_id": "demo",
+            },
+        )
+        legacy = client.post(
+            "/api/auth/register",
+            json={
+                "email": "new-admin@example.com",
+                "password": "a-new-correct-horse-password",
+            },
+        )
+
+    assert short_password.status_code == 422
+    assert unknown.status_code == 422
+    assert legacy.status_code == 404
+    assert connection.executions == []
 
 
 def test_invalid_credentials_remain_generic_and_create_no_session() -> None:

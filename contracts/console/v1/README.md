@@ -5,13 +5,18 @@ by an APDL OSS backend. The separately distributed console must generate or
 validate its runtime types from these files and treat contract drift as a
 release failure.
 
-- `openapi.json` defines the public compatibility and browser-session routes,
-  plus the authenticated Config stream exposed through the Admin BFF.
+- `openapi.json` defines the public compatibility, capabilities, registration,
+  and browser-session routes, plus the authenticated Config stream exposed
+  through the Admin BFF.
 - `schemas/` contains the canonical JSON Schema Draft 2020-12 documents used by
   those operations and stream control events.
 - Every object schema rejects unknown fields. Schema versions and the console
   API version are exact constants; there are no fallback shapes or aliases.
 
+`GET /api/console/v1/capabilities` reports whether registration is currently
+enabled without changing the strict `console_manifest@1` compatibility shape.
+`POST /api/console/v1/registrations` accepts exactly an email and password and
+returns a `console_session@1` bearer session for the new zero-project account.
 `GET /api/console/v1/session` returns exactly a `console_identity@1` payload.
 The `console_stream_control@1` payload is emitted as SSE `data` when the BFF
 must terminate a protected stream because session or project authority is no

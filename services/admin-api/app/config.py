@@ -52,6 +52,13 @@ def _positive_int(name: str, default: str) -> int:
     return value
 
 
+def _bool(name: str, default: str) -> bool:
+    value = os.getenv(name, default).lower()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false")
+    return value == "true"
+
+
 def _positive_float(name: str, default: str) -> float:
     try:
         value = float(os.getenv(name, default))
@@ -168,6 +175,8 @@ class Settings:
     service_urls: Mapping[str, str]
     service_api_keys: Mapping[str, str]
     llm_vault_admin_token: str
+    registration_enabled: bool
+    max_accounts: int
     max_projects_per_user: int
     session_ttl_seconds: int
     login_risk_hmac_key: str
@@ -216,6 +225,10 @@ class Settings:
             service_urls=service_urls,
             service_api_keys=_service_keys(),
             llm_vault_admin_token=_secret("LLM_VAULT_ADMIN_TOKEN"),
+            registration_enabled=_bool(
+                "APDL_ADMIN_REGISTRATION_ENABLED", "true"
+            ),
+            max_accounts=_positive_int("APDL_ADMIN_MAX_ACCOUNTS", "100"),
             max_projects_per_user=_positive_int(
                 "APDL_ADMIN_MAX_PROJECTS_PER_USER", "5"
             ),

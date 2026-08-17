@@ -95,6 +95,13 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class RegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(pattern=EMAIL_PATTERN, max_length=320)
+    password: str = Field(min_length=12, max_length=1024)
+
+
 class ConsoleSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

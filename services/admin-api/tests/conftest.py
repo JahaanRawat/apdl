@@ -34,6 +34,8 @@ def make_settings(**overrides) -> Settings:
         },
         "service_api_keys": {"demo": TEST_API_KEY},
         "llm_vault_admin_token": "test-vault-admin-token-is-32-bytes-long",
+        "registration_enabled": True,
+        "max_accounts": 100,
         "max_projects_per_user": 5,
         "session_ttl_seconds": 28_800,
         "login_risk_hmac_key": "test-admin-login-risk-key-32-bytes",

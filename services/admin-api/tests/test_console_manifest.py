@@ -41,6 +41,39 @@ def test_manifest_is_public_exact_and_uncacheable() -> None:
     }
 
 
+@pytest.mark.parametrize("registration_enabled", [True, False])
+def test_capabilities_publicly_report_exact_registration_state(
+    registration_enabled: bool,
+) -> None:
+    app = FastAPI(redirect_slashes=False)
+    app.state.settings = make_settings(
+        deployment_id=DEPLOYMENT_ID,
+        registration_enabled=registration_enabled,
+    )
+    app.include_router(console.router)
+
+    with TestClient(app) as client:
+        response = client.get("/api/console/v1/capabilities")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "schema_version": "console_capabilities@1",
+        "registration_enabled": registration_enabled,
+    }
+
+
+def test_capabilities_model_forbids_unknown_fields() -> None:
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        console.ConsoleCapabilities.model_validate(
+            {
+                "registration_enabled": True,
+                "registration_url": "/api/auth/register",
+            },
+            strict=True,
+        )
+
+
 def test_manifest_route_does_not_redirect_or_accept_an_alternate_method() -> None:
     with manifest_client() as client:
         trailing_slash = client.get(

@@ -56,20 +56,23 @@ def test_admin_container_receives_per_install_and_immutable_build_metadata() -> 
     ) is None
 
 
-def test_direct_console_has_no_browser_registration_or_cookie_controls() -> None:
+def test_direct_console_enables_bounded_registration_without_cookie_controls() -> None:
     compose = (ROOT / "infra/docker/docker-compose.yml").read_text(encoding="utf-8")
     environment = (ROOT / ".env.example").read_text(encoding="utf-8")
 
-    assert "APDL_ADMIN_REGISTRATION_ENABLED" not in compose
-    assert "APDL_ADMIN_MAX_ACCOUNTS" not in compose
+    assert (
+        "APDL_ADMIN_REGISTRATION_ENABLED: "
+        "${APDL_ADMIN_REGISTRATION_ENABLED:-true}"
+    ) in compose
+    assert "APDL_ADMIN_MAX_ACCOUNTS: ${APDL_ADMIN_MAX_ACCOUNTS:-100}" in compose
     assert "APDL_ADMIN_COOKIE_SECURE" not in compose
     assert (
         "APDL_ADMIN_MAX_PROJECTS_PER_USER: "
         "${APDL_ADMIN_MAX_PROJECTS_PER_USER:-5}"
     ) in compose
     assert "APDL_BIND_ADDRESS=127.0.0.1" in environment
-    assert "APDL_ADMIN_REGISTRATION_ENABLED" not in environment
-    assert "APDL_ADMIN_MAX_ACCOUNTS" not in environment
+    assert "APDL_ADMIN_REGISTRATION_ENABLED=true" in environment
+    assert "APDL_ADMIN_MAX_ACCOUNTS=100" in environment
     assert "APDL_ADMIN_COOKIE_SECURE" not in environment
     assert "APDL_ADMIN_MAX_PROJECTS_PER_USER=5" in environment
     assert "APDL_DEV_API_KEY=" not in environment

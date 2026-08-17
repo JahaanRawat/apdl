@@ -3,9 +3,42 @@
   "info": {
     "title": "APDL Console API",
     "version": "1.0.0",
-    "description": "The strict browser-facing compatibility, session, identity, and stream-control contract exposed by an APDL OSS backend."
+    "description": "The strict browser-facing compatibility, capability, registration, session, identity, and stream-control contract exposed by an APDL OSS backend."
   },
   "paths": {
+    "/api/console/v1/capabilities": {
+      "get": {
+        "operationId": "getConsoleCapabilities",
+        "summary": "Inspect deployment features before authentication",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The public feature availability for this deployment",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/console-capabilities.schema.json"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      }
+    },
     "/api/console/v1/manifest": {
       "get": {
         "operationId": "getConsoleManifest",
@@ -32,6 +65,58 @@
                 }
               }
             }
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      }
+    },
+    "/api/console/v1/registrations": {
+      "post": {
+        "operationId": "createConsoleRegistration",
+        "summary": "Create a zero-project human account and bearer session",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "schemas/console-registration-request.schema.json"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "201": {
+            "description": "A fixed-expiration bearer session for the new account",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/console-session.schema.json"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "409": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "422": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "429": {
+            "$ref": "#/components/responses/ConsoleError"
           },
           "500": {
             "$ref": "#/components/responses/ConsoleError"
@@ -222,11 +307,17 @@
   },
   "components": {
     "schemas": {
+      "ConsoleCapabilities": {
+        "$ref": "schemas/console-capabilities.schema.json"
+      },
       "ConsoleManifest": {
         "$ref": "schemas/console-manifest.schema.json"
       },
       "ConsoleLoginRequest": {
         "$ref": "schemas/console-login-request.schema.json"
+      },
+      "ConsoleRegistrationRequest": {
+        "$ref": "schemas/console-registration-request.schema.json"
       },
       "ConsoleSession": {
         "$ref": "schemas/console-session.schema.json"

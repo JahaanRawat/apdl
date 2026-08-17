@@ -6,6 +6,7 @@
     "email": {
       "type": "string",
       "format": "email",
+      "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
       "maxLength": 320
     },
     "humanRole": {

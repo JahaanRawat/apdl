@@ -17,6 +17,7 @@ from app.login_security import (
     THROTTLED_LOGIN_ERROR,
     build_login_source,
     clear_login_source_risk,
+    preflight_auth_rate_limit,
     preflight_login,
     record_failed_login,
 )
@@ -25,11 +26,13 @@ from app.models import (
     ConsoleSession,
     LoginRequest,
     ProjectAccess,
+    RegistrationRequest,
     canonical_human_roles,
     SecurityNotification,
 )
 from app.security import (
     DUMMY_PASSWORD_HASH,
+    hash_password,
     new_token,
     token_hash,
     verify_password,
@@ -37,6 +40,7 @@ from app.security import (
 
 router = APIRouter(tags=["authentication"])
 BEARER_PATTERN = re.compile(r"^Bearer ([A-Za-z0-9_-]{43,128})$")
+ACCOUNT_REGISTRATION_LOCK_ID = 4_704_656_378_673_808_212
 
 
 @dataclass(frozen=True)
@@ -278,6 +282,88 @@ async def create_session(
         _failed_login_response(failure_delay)
 
     access_token, expires_at = login_result
+    return ConsoleSession(access_token=access_token, expires_at=expires_at)
+
+
+@router.post(
+    "/api/console/v1/registrations",
+    response_model=ConsoleSession,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_registration(
+    body: RegistrationRequest,
+    request: Request,
+) -> ConsoleSession:
+    """Create one zero-project account and its first bearer session."""
+    settings: Settings = request.app.state.settings
+    if not settings.registration_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Registration is disabled",
+        )
+
+    email = str(body.email).strip().lower()
+    now = datetime.now(timezone.utc)
+    source = build_login_source(request, email, settings)
+
+    async with request.app.state.pg_pool.acquire() as conn:
+        async with conn.transaction():
+            retry_after = await preflight_auth_rate_limit(
+                conn,
+                source,
+                settings,
+                now,
+            )
+            account_count = int(
+                await conn.fetchval("SELECT count(*) FROM admin_users")
+            )
+
+    if retry_after > 0:
+        _failed_login_response(retry_after)
+    if account_count >= settings.max_accounts:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account capacity reached",
+        )
+
+    password_hash = await asyncio.to_thread(hash_password, body.password)
+    async with request.app.state.pg_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1)",
+                ACCOUNT_REGISTRATION_LOCK_ID,
+            )
+            locked_account_count = int(
+                await conn.fetchval("SELECT count(*) FROM admin_users")
+            )
+            if locked_account_count >= settings.max_accounts:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Account capacity reached",
+                )
+            user_id = await conn.fetchval(
+                """
+                INSERT INTO admin_users (user_id, email, password_hash)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (email) DO NOTHING
+                RETURNING user_id
+                """,
+                uuid.uuid4(),
+                email,
+                password_hash,
+            )
+            if user_id is None:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Account already exists",
+                )
+            access_token, expires_at = await _start_session(
+                conn,
+                user_id,
+                settings,
+                now,
+            )
+
     return ConsoleSession(access_token=access_token, expires_at=expires_at)
 
 

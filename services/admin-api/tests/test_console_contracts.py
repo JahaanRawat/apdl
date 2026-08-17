@@ -35,6 +35,10 @@ for _schema in SCHEMAS.values():
 
 
 VALID_PAYLOADS: dict[str, dict[str, Any]] = {
+    "console-capabilities.schema.json": {
+        "schema_version": "console_capabilities@1",
+        "registration_enabled": True,
+    },
     "console-manifest.schema.json": {
         "schema_version": "console_manifest@1",
         "deployment_id": "87fab7d6-dba0-4f77-8ffd-00e815fc7303",
@@ -45,6 +49,10 @@ VALID_PAYLOADS: dict[str, dict[str, Any]] = {
     },
     "console-login-request.schema.json": {
         "email": "user@example.com",
+        "password": "correct horse battery staple",
+    },
+    "console-registration-request.schema.json": {
+        "email": "new-user@example.com",
         "password": "correct horse battery staple",
     },
     "console-session.schema.json": {
@@ -104,9 +112,11 @@ def _object_schemas(value: Any):
 def test_contract_schema_set_is_explicit_and_meta_valid() -> None:
     assert set(SCHEMAS) == {
         "common.schema.json",
+        "console-capabilities.schema.json",
         "console-identity.schema.json",
         "console-login-request.schema.json",
         "console-manifest.schema.json",
+        "console-registration-request.schema.json",
         "console-session.schema.json",
         "console-stream-control.schema.json",
         "error.schema.json",
@@ -149,6 +159,21 @@ def test_versioned_contracts_require_the_exact_declared_version() -> None:
         _validator("console-manifest.schema.json").validate(manifest)
 
 
+@pytest.mark.parametrize(
+    "schema_name",
+    [
+        "console-login-request.schema.json",
+        "console-registration-request.schema.json",
+    ],
+)
+def test_email_contract_matches_runtime_address_shape(schema_name: str) -> None:
+    payload = copy.deepcopy(VALID_PAYLOADS[schema_name])
+    payload["email"] = "user@localhost"
+
+    with pytest.raises(ValidationError):
+        _validator(schema_name).validate(payload)
+
+
 def test_identity_and_stream_control_use_canonical_project_roles() -> None:
     identity = copy.deepcopy(VALID_PAYLOADS["console-identity.schema.json"])
     identity["projects"][0]["roles"] = ["admin"]
@@ -170,7 +195,9 @@ def test_openapi_references_the_canonical_schema_documents() -> None:
     document = _load_json(OPENAPI_PATH)
     assert document["openapi"] == "3.1.0"
     assert set(document["paths"]) == {
+        "/api/console/v1/capabilities",
         "/api/console/v1/manifest",
+        "/api/console/v1/registrations",
         "/api/console/v1/session",
         "/api/console/v1/sessions",
         "/api/projects/{project_id}/config/v1/stream",
@@ -183,8 +210,10 @@ def test_openapi_references_the_canonical_schema_documents() -> None:
         }
     }
     assert set(document["components"]["schemas"]) == {
+        "ConsoleCapabilities",
         "ConsoleManifest",
         "ConsoleLoginRequest",
+        "ConsoleRegistrationRequest",
         "ConsoleSession",
         "ConsoleIdentity",
         "ConsoleError",
@@ -199,7 +228,9 @@ def test_openapi_references_the_canonical_schema_documents() -> None:
 def test_openapi_declares_public_and_bearer_operations_without_aliases() -> None:
     document = _load_json(OPENAPI_PATH)
     paths = document["paths"]
+    assert paths["/api/console/v1/capabilities"]["get"]["security"] == []
     assert paths["/api/console/v1/manifest"]["get"]["security"] == []
+    assert paths["/api/console/v1/registrations"]["post"]["security"] == []
     assert paths["/api/console/v1/sessions"]["post"]["security"] == []
     assert paths["/api/console/v1/session"]["get"]["security"] == [
         {"consoleBearer": []}
@@ -215,6 +246,7 @@ def test_openapi_declares_public_and_bearer_operations_without_aliases() -> None
         "/api/auth/login",
         "/api/auth/logout",
         "/api/auth/me",
+        "/api/auth/register",
         "X-CSRF-Token",
         "cookieAuth",
     ):
@@ -226,7 +258,9 @@ def test_openapi_declares_request_identity_and_header_only_retry_guidance() -> N
     request_id = {"$ref": "#/components/headers/RequestId"}
     paths = document["paths"]
     successful_responses = (
+        paths["/api/console/v1/capabilities"]["get"]["responses"]["200"],
         paths["/api/console/v1/manifest"]["get"]["responses"]["200"],
+        paths["/api/console/v1/registrations"]["post"]["responses"]["201"],
         paths["/api/console/v1/sessions"]["post"]["responses"]["200"],
         paths["/api/console/v1/session"]["get"]["responses"]["200"],
         paths["/api/console/v1/session"]["delete"]["responses"]["204"],

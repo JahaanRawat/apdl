@@ -80,10 +80,15 @@ GitHub App credentials and webhook settings remain internal Codegen operator
 configuration. They do not define a browser callback or console route in the
 direct-console contract.
 
-Browser self-registration is not exposed. Operators create users with the
-Admin CLI, and existing authenticated users accept invitation codes in a strict
-JSON request body. Invitation secrets are shown once as codes, stored only as
-hashes, and never placed in a URL.
+Browser self-registration uses the public, strict
+`POST /api/console/v1/registrations` contract. It accepts only `email` and
+`password`, creates an active account with no project memberships, and returns
+the same deployment-bound bearer session shape as login. Registration is
+enabled by default, can be disabled with `APDL_ADMIN_REGISTRATION_ENABLED`, and
+is bounded by the shared authentication rate limits and
+`APDL_ADMIN_MAX_ACCOUNTS`. Existing authenticated users accept invitation codes
+in a strict JSON request body. Invitation secrets are shown once as codes,
+stored only as hashes, and never placed in a URL.
 
 An authenticated user can create a canonical project from
 `/settings/workspace`. `POST /api/projects` accepts only `{project_id}`, inserts

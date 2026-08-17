@@ -68,11 +68,15 @@ def test_settings_require_an_explicit_vault_admin_token(monkeypatch) -> None:
 
 def test_settings_apply_direct_console_security_defaults(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.delenv("APDL_ADMIN_REGISTRATION_ENABLED", raising=False)
+    monkeypatch.delenv("APDL_ADMIN_MAX_ACCOUNTS", raising=False)
     monkeypatch.delenv("APDL_ADMIN_MAX_PROJECTS_PER_USER", raising=False)
 
     settings = Settings.from_env()
 
     assert settings.trusted_proxy_cidrs == ()
+    assert settings.registration_enabled is True
+    assert settings.max_accounts == 100
     assert settings.max_projects_per_user == 5
     assert settings.login_progressive_failure_threshold == 3
     assert settings.login_account_notice_threshold == 50
@@ -146,6 +150,26 @@ def test_settings_reject_invalid_project_limit(monkeypatch) -> None:
     monkeypatch.setenv("APDL_ADMIN_MAX_PROJECTS_PER_USER", "0")
 
     with pytest.raises(ValueError, match="must be positive"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("APDL_ADMIN_REGISTRATION_ENABLED", "yes", "true or false"),
+        ("APDL_ADMIN_MAX_ACCOUNTS", "0", "must be positive"),
+    ],
+)
+def test_settings_reject_invalid_registration_controls(
+    monkeypatch,
+    name: str,
+    value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=message):
         Settings.from_env()
 
 
