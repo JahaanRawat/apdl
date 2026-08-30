@@ -71,3 +71,6 @@ local-files/
 
 # graphify (generated knowledge graph — rebuild with: graphify update .)
 graphify-out/
+
+# pr-review (generated per run — rebuild with: scripts/pr-review/collect.sh)
+review-context/
