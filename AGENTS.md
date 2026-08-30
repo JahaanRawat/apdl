@@ -8,6 +8,9 @@ agents when working with code in this repository.
 - Structured PR workflow: follow `docs/agent-workflows/structured-pr.md` when the
   user asks to create a PR, open a pull request, raise a PR, make commits for a
   PR branch, or ship the current branch or changes.
+- PR review workflow: follow `docs/agent-workflows/pr-review.md` when the user
+  asks to review a PR, review a diff, review changes before pushing, or check
+  whether a branch is safe to merge.
 
 ## What is APDL?
 
