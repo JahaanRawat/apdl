@@ -3,16 +3,30 @@ from pathlib import Path
 
 def test_public_gateway_overwrites_client_forwarding_headers():
     repo_root = Path(__file__).resolve().parents[3]
-    config = (repo_root / "infra/docker/gateway/nginx.conf").read_text()
-    ingestion_location = config.split("location = /v1/events {", 1)[1].split(
-        "\n    }",
+    gateway = (repo_root / "services/gateway/app/main.py").read_text()
+    identity = (repo_root / "services/gateway/app/client_identity.py").read_text()
+    denylist = gateway.split("_REQUEST_HEADER_DENYLIST =", 1)[1].split(
+        "_RESPONSE_HEADER_DENYLIST",
+        1,
+    )[0]
+    upstream_headers = gateway.split("def _upstream_headers(", 1)[1].split(
+        "\n\ndef ",
         1,
     )[0]
 
-    assert "$proxy_add_x_forwarded_for" not in config
-    assert "proxy_set_header Forwarded \"\";" in ingestion_location
-    assert "proxy_set_header X-Forwarded-For $remote_addr;" in ingestion_location
-    assert "proxy_set_header X-Real-IP \"\";" in ingestion_location
+    assert '"forwarded"' in denylist
+    assert '"x-forwarded-for"' in denylist
+    assert '"x-real-ip"' in denylist
+    assert (
+        upstream_headers.count('headers.append(("X-Forwarded-For", client_ip))')
+        == 1
+    )
+    assert (
+        "client_ip = resolve_client_ip(request, settings.trusted_proxy_cidrs)"
+        in gateway
+    )
+    assert "len(forwarded_values) == 1" in identity
+    assert "peer_is_trusted" in identity
 
 
 def test_ingestion_runtime_leaves_socket_peer_authority_to_application_policy():

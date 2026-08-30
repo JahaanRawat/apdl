@@ -21,12 +21,12 @@ The `personalization` graph is disabled in 0.3.0. Config has no canonical
 UI-config storage/delivery API, so the trigger API rejects that graph, it is
 hidden from definitions, and custom agents cannot select UI-config tools.
 
-Execution is enabled only for operator-provisioned projects or self-created
-projects with an explicit, audited operator override in the OSS developer
-preview. Projects created through the public workspace flow retain read-only
-definitions, run history, results, and audit access by default. This is
-enforced from canonical project execution authority even when a credential
-incorrectly contains an execution role.
+Projects created through the public workspace flow start with read-only
+definitions, run history, results, and audit access. Owner-controlled setup may
+enable governed L1/L2 analysis with `agents:run` and `agents:manage`.
+Approval, Config mutation, Codegen, repository access, and external effects are
+enabled only for operator-provisioned projects or self-created projects with an
+explicit, audited operator override, even if a credential is overprovisioned.
 
 A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): a
 PostgreSQL-backed dispatcher leases queued runs on any replica, the supervisor
@@ -37,9 +37,10 @@ requeued at the persisted phase rather than terminalized as a failed run.
 ## API
 
 All agent routes require a registered `X-API-Key`. Read, trigger, custom-agent
-management, and approval operations use distinct project-scoped roles. The
-`agents:run`, `agents:manage`, and `agents:approve` roles are honored only for
-projects with a canonical `admin_project_execution_authorizations` row.
+management, and approval operations use distinct project-scoped roles. Active
+owner-controlled setup may grant analysis-only `agents:run` and
+`agents:manage`; `agents:approve` and every external effect additionally require
+a canonical `admin_project_execution_authorizations` row.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -48,11 +49,8 @@ projects with a canonical `admin_project_execution_authorizations` row.
 | `POST` | `/v1/agents/{run_id}/cancel` | Durably cancel an active run and fence further work |
 | `POST` | `/v1/agents/{run_id}/approve` | Validate exact per-item decisions and queue an approval command (`202`) |
 | `GET` | `/v1/agents/{run_id}/approvals/{command_id}` | Command and per-effect retry/manual-intervention status |
-| `GET` | `/v1/agents/llm-connections?project_id=...` | List project provider connections without secret metadata |
-| `PUT` | `/v1/agents/llm-connections/{provider}` | Validate, discover models, and atomically create or replace a connection |
+| `GET` | `/v1/agents/llm-connections?project_id=...` | List vault-managed provider projections without secret metadata |
 | `GET` | `/v1/agents/llm-connections/{provider}/models?project_id=...` | Read the last validated normalized model inventory |
-| `POST` | `/v1/agents/llm-connections/{provider}/refresh-models` | Revalidate a connection and atomically refresh its inventory |
-| `POST` | `/v1/agents/llm-connections/{provider}/revoke` | Revoke and crypto-shred an unassigned provider connection |
 | `GET` | `/health` | Liveness probe |
 | `GET` | `/ready` | Core readiness (runtime initialization and PostgreSQL) |
 | `GET` | `/ready/capabilities` | Non-blocking configured/reachable report for LLM, Query, Config, and Codegen |
@@ -114,21 +112,31 @@ credential version, decrypts it just in time, and revalidates it at the egress
 boundary. It records provider/model, credential ID/version, prompt hash, usage,
 cost, latency, and outcome without storing prompt content or secret material.
 
-Migration 051 moves every fresh or migrated project to one explicit
-`inactive` setup with no fabricated model assignment. A current human owner, or
-an active delegated member holding both `agents:manage` and
-`credentials:manage`, connects one or more reviewed providers and activates the
-project through `/v1/agents/setup`. The server derives fixed endpoints,
-residency, classifications, reviewed prices, and positive project/run ceilings
-from the catalog. Each tier has one exact primary assignment; provider failures
-do not trigger an implicit same-vendor or cross-vendor fallback.
+Migration 051 is an explicit setup cutover. It moves every project to
+`inactive`, removes the old tier assignments and runtime provider-policy
+copies, and discards model inventories created before catalog pricing was
+reviewed. It preserves positive project and per-run limits, replacing only
+non-positive bootstrap values. After upgrading, a current human owner, or an
+active delegated member holding both `agents:manage` and
+`credentials:manage`, must refresh each provider against the current catalog,
+select both tiers again, and reactivate through `/v1/agents/setup`.
+
+APDL release maintainers own the reviewed price metadata in
+`app/llm/provider_catalog.py` and must update both the values and catalog
+version when provider pricing changes. APDL does not fetch live prices from a
+provider billing API. Operators should keep Agents inactive when the deployed
+catalog is not current and refresh project inventories after deploying a new
+catalog. The server derives fixed endpoints, residency, classifications, and
+reviewed prices from that catalog while preserving the project's stored cost
+limits. Each tier has one exact primary assignment; provider failures do not
+trigger an implicit same-vendor or cross-vendor fallback.
 
 ### Connect xAI/Grok
 
 1. Apply PostgreSQL migrations with `make migrate-postgres`.
-2. Add the project's xAI connection through the authenticated
-   `/v1/agents/llm-connections/xai` API. The key is validated, encrypted, and
-   never returned to the browser.
+2. Add the project's xAI connection in Project settings through the shared LLM
+   Vault and grant it to Agents. The key is validated, encrypted, and never
+   returned to the browser.
 3. Select eligible fast and reasoning models and activate analysis through
    `PUT /v1/agents/setup`. Pricing, residency, classifications, endpoints, and
    budgets are server-owned and cannot be supplied by the client.
@@ -212,7 +220,8 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `POSTGRES_URL` | `postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl` | Runs, audit log, and pgvector memory through the non-owner runtime role |
+| `POSTGRES_URL` | `postgresql://apdl_agents:apdl_agents_dev1@localhost:5432/apdl` | Runs, audit log, pgvector memory, and short-lived capability issuance through the dedicated non-owner Agents role |
+| `APDL_AGENTS_POSTGRES_PASSWORD` | `apdl_agents_dev1` | Compose/host-run bootstrap password used to construct the Agents-only database URL; replace it in deployments |
 | `QUERY_SERVICE_URL` | `http://localhost:8082` | Analytics queries |
 | `CONFIG_SERVICE_URL` | `http://localhost:8081` | Flag and experiment CRUD |
 | `CODEGEN_SERVICE_URL` | `http://localhost:8084` | Optional treatment changeset requests |
@@ -222,7 +231,25 @@ no enabled built-in or custom-agent catalog entry can invoke it in 0.3.0.
 | `AGENTS_ENABLE_AUTONOMOUS_MUTATIONS` | `false` | Reserved operator switch for eligible future actions; exact `true` only and does not bypass mandatory gates |
 | `LOCAL_LLM_URL` | — | OpenAI-compatible local server (e.g. Ollama at `http://localhost:11434/v1`) |
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Local fastembed model (dimension must be known or set via `EMBEDDING_DIMENSIONS`) |
-| `APDL_SERVICE_API_KEYS` | — | Canonical project-to-key JSON for scoped Config/Query/Codegen calls |
+
+Agents does not receive `APDL_SERVICE_API_KEYS`. Immediately before an
+eligible leased run, custom-agent test, or approval effect calls Config, Query,
+or Codegen, it creates a random 60-second execution capability. PostgreSQL
+stores only the token hash plus the exact project, execution, lease owner,
+audience, and roles. Mutation rows also store a hash of the exact method, path,
+canonical JSON body, and `Idempotency-Key`. The raw token is sent in
+`X-APDL-Internal-Capability` for that call and its row is deleted when the call
+finishes; expiry remains the fallback if cleanup fails.
+
+Each downstream service hashes the token, verifies its audience and roles,
+revalidates the durable execution lease, and atomically consumes mutation
+authority before accepting it. Ordinary runs and tests can receive read or
+server-side evaluation authority;
+`config:write` and `agents:manage` are limited to a leased approval effect. A
+request cannot combine an internal capability with
+`X-API-Key`, and Config does not accept internal capabilities on its SSE
+stream. External SDK credentials and the Admin API's separate proxy-key flow
+are unchanged.
 
 Remote provider keys are created in the project settings UI and held only by
 the private LLM Vault. Agents stores non-secret connection, inventory, policy,

@@ -6,21 +6,16 @@ import hashlib
 import hmac
 import ipaddress
 import math
-import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from fastapi import Request, Response
-
-from app.security import new_token
+from fastapi import Request
 
 if TYPE_CHECKING:
     from app.config import Settings
 
-DEVICE_COOKIE = "apdl_admin_device"
-DEVICE_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 GENERIC_LOGIN_ERROR = "Invalid email or password"
 THROTTLED_LOGIN_ERROR = "Too many attempts. Try again later."
 
@@ -30,9 +25,6 @@ class LoginSource:
     email_hash: str
     global_hash: str
     network_hash: str
-    device_hash: str
-    device_token: str
-    device_cookie_required: bool
 
 
 def _risk_hash(secret: str, label: str, *values: str) -> str:
@@ -64,39 +56,14 @@ def build_login_source(
     email: str,
     settings: Settings,
 ) -> LoginSource:
-    raw_device = request.cookies.get(DEVICE_COOKIE, "")
-    device_cookie_required = DEVICE_TOKEN_PATTERN.fullmatch(raw_device) is None
-    device_token = new_token() if device_cookie_required else raw_device
     client_ip = resolve_client_ip(request, settings)
     secret = settings.login_risk_hmac_key
     email_hash = _risk_hash(secret, "email", email)
     network_hash = _risk_hash(secret, "network", client_ip)
-    device_hash = _risk_hash(secret, "device", device_token)
     return LoginSource(
         email_hash=email_hash,
         global_hash=_risk_hash(secret, "global", "admin-login"),
         network_hash=network_hash,
-        device_hash=device_hash,
-        device_token=device_token,
-        device_cookie_required=device_cookie_required,
-    )
-
-
-def set_device_cookie(
-    response: Response,
-    source: LoginSource,
-    settings: Settings,
-) -> None:
-    if not source.device_cookie_required:
-        return
-    response.set_cookie(
-        DEVICE_COOKIE,
-        source.device_token,
-        httponly=True,
-        secure=settings.cookie_secure,
-        samesite="strict",
-        max_age=settings.login_device_ttl_seconds,
-        path="/api/auth",
     )
 
 
@@ -153,9 +120,10 @@ async def _consume_rate_bucket(
     return max(1, math.ceil((retry_at - now).total_seconds()))
 
 
-async def preflight_auth_rate_limit(
+async def _preflight_rate_limits(
     conn,
-    source: LoginSource,
+    *,
+    buckets: tuple[tuple[str, str, int], ...],
     settings: Settings,
     now: datetime,
 ) -> int:
@@ -167,11 +135,7 @@ async def preflight_auth_rate_limit(
         now - timedelta(seconds=settings.login_rate_window_seconds * 2),
     )
     retry_after = 0
-    for scope, key_hash, limit in (
-        ("global", source.global_hash, settings.login_global_rate_limit),
-        ("network", source.network_hash, settings.login_network_rate_limit),
-        ("device", source.device_hash, settings.login_device_rate_limit),
-    ):
+    for scope, key_hash, limit in buckets:
         retry_after = max(
             retry_after,
             await _consume_rate_bucket(
@@ -185,6 +149,58 @@ async def preflight_auth_rate_limit(
         )
 
     return retry_after
+
+
+async def preflight_auth_rate_limit(
+    conn,
+    source: LoginSource,
+    settings: Settings,
+    now: datetime,
+) -> int:
+    return await _preflight_rate_limits(
+        conn,
+        buckets=(
+            ("global", source.global_hash, settings.login_global_rate_limit),
+            ("network", source.network_hash, settings.login_network_rate_limit),
+        ),
+        settings=settings,
+        now=now,
+    )
+
+
+async def preflight_invitation_rate_limit(
+    conn,
+    source: LoginSource,
+    settings: Settings,
+    now: datetime,
+) -> int:
+    invitation_global_hash = _risk_hash(
+        settings.login_risk_hmac_key,
+        "global",
+        "admin-invitation",
+    )
+    return await _preflight_rate_limits(
+        conn,
+        buckets=(
+            (
+                "invitation_global",
+                invitation_global_hash,
+                settings.invitation_global_rate_limit,
+            ),
+            (
+                "invitation_network",
+                source.network_hash,
+                settings.invitation_network_rate_limit,
+            ),
+            (
+                "invitation_token",
+                source.email_hash,
+                settings.invitation_token_rate_limit,
+            ),
+        ),
+        settings=settings,
+        now=now,
+    )
 
 
 async def preflight_login(
@@ -207,10 +223,7 @@ async def preflight_login(
         now - timedelta(seconds=settings.login_account_risk_window_seconds * 2),
     )
 
-    for scope, source_hash in (
-        ("network", source.network_hash),
-        ("device", source.device_hash),
-    ):
+    for scope, source_hash in (("network", source.network_hash),):
         next_allowed_at = await conn.fetchval(
             """
             SELECT next_allowed_at
@@ -240,10 +253,7 @@ async def record_failed_login(
     now: datetime,
 ) -> int:
     delay = 0
-    for scope, source_hash in (
-        ("network", source.network_hash),
-        ("device", source.device_hash),
-    ):
+    for scope, source_hash in (("network", source.network_hash),):
         failure_count = int(
             await conn.fetchval(
                 """
@@ -375,12 +385,9 @@ async def clear_login_source_risk(conn, source: LoginSource) -> None:
         """
         DELETE FROM admin_login_source_risk
         WHERE email_hash = $1
-          AND (
-              (scope = 'network' AND source_hash = $2)
-              OR (scope = 'device' AND source_hash = $3)
-          )
+          AND scope = 'network'
+          AND source_hash = $2
         """,
         source.email_hash,
         source.network_hash,
-        source.device_hash,
     )

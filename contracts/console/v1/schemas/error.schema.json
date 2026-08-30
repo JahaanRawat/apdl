@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apdl.dev/contracts/console/v1/schemas/error.schema.json",
+  "title": "APDL Console error envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "code",
+    "message",
+    "request_id"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "error@1"
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "request_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    }
+  }
+}

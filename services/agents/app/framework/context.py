@@ -9,7 +9,7 @@ pattern of smuggling ``_vector_store`` through the state dict.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
@@ -20,6 +20,10 @@ from app.llm.contracts import (
     LlmRequestContext,
 )
 from app.safety.audit import AuditLogger
+from app.service_auth import ServiceCapabilityContext
+
+if TYPE_CHECKING:
+    from app.llm.runtime import LlmRuntime
 
 
 @dataclass
@@ -29,6 +33,7 @@ class AgentContext:
     pool: asyncpg.Pool
     vector_store: PgVectorStore
     audit: AuditLogger
+    llm_runtime: LlmRuntime = field(repr=False, compare=False)
     run_id: str
     project_id: str
     execution_kind: ExecutionKind = "agent_run"
@@ -50,6 +55,7 @@ class AgentContext:
         """Build the required immutable governance scope for one LLM call."""
         return LlmRequestContext(
             pool=self.pool,
+            llm_runtime=self.llm_runtime,
             project_id=self.project_id,
             run_id=self.run_id,
             execution_kind=self.execution_kind,
@@ -60,6 +66,24 @@ class AgentContext:
                 if self.execution_kind == "agent_run"
                 else self.run_id
             ),
+        )
+
+    def service_capability(self) -> ServiceCapabilityContext:
+        """Bind downstream authority to this exact durable execution."""
+        execution_owner_id = (
+            self.lease_owner_id
+            if self.execution_kind == "agent_run"
+            else self.run_id
+        )
+        if execution_owner_id is None:
+            raise RuntimeError("Agent run service authority requires its exact lease owner")
+        return ServiceCapabilityContext(
+            pool=self.pool,
+            project_id=self.project_id,
+            execution_kind=self.execution_kind,
+            execution_id=self.run_id,
+            run_id=self.run_id,
+            execution_owner_id=execution_owner_id,
         )
 
 

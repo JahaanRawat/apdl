@@ -36,11 +36,11 @@ POLICY_PATH = CODEGEN_DIR / "dependency-audit-suppressions.json"
 POLICY_DATE = date(2026, 7, 23)
 EXPECTED_LOCKED_VERSIONS = {
     "aider-chat": "0.86.2",
-    "aiohttp": "3.14.2",
+    "aiohttp": "3.14.3",
     "click": "8.3.3",
     "diskcache": "5.6.3",
     "fastapi": "0.139.2",
-    "gitpython": "3.1.55",
+    "gitpython": "3.1.58",
     "idna": "3.15",
     "importlib-metadata": "8.9.0",
     "litellm": "1.85.0",
@@ -151,10 +151,10 @@ def test_security_inputs_are_exact_and_do_not_duplicate_schema() -> None:
 
     assert constraints == {"aider-chat==0.86.2", "diskcache==5.6.3"}
     assert overrides == {
-        "aiohttp==3.14.2",
+        "aiohttp==3.14.3",
         "click==8.3.3",
         "fastapi==0.139.2",
-        "gitpython==3.1.55",
+        "gitpython==3.1.58",
         "idna==3.15",
         "importlib-metadata>=8,<9",
         "litellm==1.85.0",

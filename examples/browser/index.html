@@ -93,7 +93,7 @@
       log('connected and identified user-42');
       setTimeout(renderGate, 500); // give the initial flag fetch a moment
 
-      // Live updates over SSE — toggle the flag via the Admin Console and watch.
+      // Live updates over SSE — update the flag via Config's Admin API and watch.
       apdl.onVariantChange('new-checkout', (variant) => {
         log(`flag update over SSE: new-checkout -> ${variant}`);
         renderGate();

@@ -19,18 +19,14 @@
   },
   "docker_images": [
     {
-      "name": "admin",
-      "repository": "ghcr.io/kuvera-apdl/apdl-admin",
-      "context": "services/admin",
-      "dockerfile": "services/admin/Dockerfile",
-      "build_args": []
-    },
-    {
       "name": "admin-api",
       "repository": "ghcr.io/kuvera-apdl/apdl-admin-api",
       "context": "services/admin-api",
       "dockerfile": "services/admin-api/Dockerfile",
-      "build_args": []
+      "build_args": [
+        "APDL_BACKEND_VERSION",
+        "APDL_BUILD_REVISION"
+      ]
     },
     {
       "name": "agents",
@@ -76,6 +72,13 @@
       "repository": "ghcr.io/kuvera-apdl/apdl-config",
       "context": "services/config",
       "dockerfile": "services/config/Dockerfile",
+      "build_args": []
+    },
+    {
+      "name": "gateway",
+      "repository": "ghcr.io/kuvera-apdl/apdl-gateway",
+      "context": "services/gateway",
+      "dockerfile": "services/gateway/Dockerfile",
       "build_args": []
     },
     {

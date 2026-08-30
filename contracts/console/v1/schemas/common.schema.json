@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apdl.dev/contracts/console/v1/schemas/common.schema.json",
+  "title": "APDL Console API v1 shared types",
+  "$defs": {
+    "email": {
+      "type": "string",
+      "format": "email",
+      "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+      "maxLength": 320
+    },
+    "humanRole": {
+      "type": "string",
+      "enum": [
+        "events:write",
+        "config:read",
+        "config:write",
+        "config:evaluate",
+        "query:read",
+        "agents:read",
+        "agents:run",
+        "agents:manage",
+        "agents:approve",
+        "credentials:manage",
+        "members:manage"
+      ]
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9]{1,64}$"
+    },
+    "projectAccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "roles"
+      ],
+      "properties": {
+        "project_id": {
+          "$ref": "#/$defs/projectId"
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/humanRole"
+          }
+        }
+      }
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

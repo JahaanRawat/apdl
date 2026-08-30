@@ -44,8 +44,9 @@ disabled. The intended data flow is:
 APDL is an OSS **developer preview**, not a production release. Its
 supported deployment is a fresh, single-node, source-built Docker Compose
 installation. The supported core consists of Ingestion, Config, Query, the
-Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console, together
-with Redis, ClickHouse, and PostgreSQL.
+Redis-to-ClickHouse writer, Gateway, and Admin API, together with Redis,
+ClickHouse, and PostgreSQL. The browser Admin Console is distributed
+separately and is not part of this source release.
 
 The current release publishes exactly these installable artifacts from one
 tested revision:
@@ -69,16 +70,16 @@ Prerequisites: [uv](https://docs.astral.sh/uv/), Docker, Node.js 20.19+, Python 
 
 ```bash
 git clone https://github.com/kuvera-apdl/apdl.git && cd apdl
-cp .env.example .env
-make dev-core            # supported core + local Admin console
+make setup               # dependencies + per-install local secrets
+make dev-core            # supported source-built backend
 ```
 
-The normal bootstrap creates no projects, users, or API credentials. Open
-<http://localhost:5173/register>, create the first local account, then create a
-project in **Workspace settings**. From that project, create reveal-once browser
-or confidential SDK credentials as needed. The example enables registration
-only for the loopback-bound local stack; disable it before exposing Admin
-outside local development.
+The normal bootstrap creates no projects, users, or API credentials. Provision
+the credentials needed by the SDK examples through the documented
+[operator workflow](docs/authentication.md#operator-provision-credentials).
+The separately distributed Admin Console uses `admin-api`; it is not built or
+served by this repository. Connect it through the unified gateway using the
+[Direct Console backend setup and release proof](docs/direct-console-backend.md).
 
 This developer preview supports fresh, single-node databases only. Do not run
 `make dev-core` or the initialization scripts against an existing APDL
@@ -125,9 +126,12 @@ make run-ingestion  # :8080   (also: run-config :8081, run-query :8082,
 
 Browser SDK keys follow `client_{project_id}_{token}` and are restricted to
 event writes plus client-visible config reads. Server SDKs and trusted services
-use confidential `proj_{project_id}_{secret}` keys. Services verify the full key
-against a hashed PostgreSQL record and derive project/role authority from that
-record; see [authentication and tenant authorization](docs/authentication.md).
+use confidential `proj_{project_id}_{secret}` keys. The Agents service instead
+mints hash-only, short-lived internal capabilities for the exact live execution
+and downstream audience; mutation capabilities are bound to and consumed by one
+request. Services verify authority against PostgreSQL and derive project/role
+scope from that record; see
+[authentication and tenant authorization](docs/authentication.md).
 Both SDKs evaluate feature flag variants **locally** with a byte-for-byte identical
 FNV-1a hash — a user buckets the same way in the browser, on your server, and
 in the config service. Runnable samples live in [`examples/`](examples/).
@@ -191,13 +195,12 @@ the agent loop): [docs/architecture.md](docs/architecture.md).
 | `ingestion` | 8080 | Core | Event ingestion → Redis Streams | [README](services/ingestion/README.md) |
 | `config` | 8081 | Core | Feature flags & experiments, SSE | [README](services/config/README.md) |
 | `query` | 8082 | Core | Analytics queries on ClickHouse | [README](services/query/README.md) |
-| `agents` | 8083 | Operator preview | Opt-in LLM workflows; self-registered projects are read-only | [README](services/agents/README.md) |
+| `agents` | 8083 | Operator preview | Opt-in LLM workflows; owner-enabled analysis, operator-gated effects | [README](services/agents/README.md) |
 | `codegen` | 8084 (internal) | Offline preview | Source-only; publication is disabled | [README](services/codegen/README.md) |
-| `admin-api` | 8085 (internal) | Core | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
+| `admin-api` | 8085 | Core | Human sessions, tenant authorization, secure service proxy | [README](services/admin-api/README.md) |
 | `llm-vault` | 8086 (internal) | Core | Shared project LLM credential custody and audited JIT access | [README](services/llm-vault/README.md) |
-| `admin` | 5173 | Core | Browser admin console | [README](services/admin/README.md) |
 | `clickhouse-writer` | — | Core | Redis Streams → ClickHouse pipeline | [README](pipeline/README.md) |
-| `gateway` | 8000 | Local development | nginx routing for the source-built stack; not production ingress | [Compose](infra/docker/docker-compose.yml) |
+| `gateway` | 8000 | Core | Unified `/api/*` and registered `/v1/*` browser boundary; never serves console assets | [README](services/gateway/README.md) |
 | `redis` | 6379 | Core dependency | Event streams + cache | — |
 | `clickhouse` | 8123 / 9000 | Core dependency | Analytics store (HTTP / native) | — |
 | `postgres` | 5432 | Core dependency | Config store + pgvector | — |
@@ -298,7 +301,7 @@ and `curl` examples.
 |---|---|---|
 | `GET` | `/v1/flags` | Flags for a project (SDK bootstrap, Redis-cached) |
 | `GET` | `/v1/stream` | SSE stream for real-time flag updates |
-| `POST` | `/v1/evaluate` | Server-side gate evaluation (project-scoped API key) |
+| `POST` | `/v1/evaluate` | Server-side gate evaluation (project-scoped authority) |
 | `GET/POST` | `/v1/admin/flags` | List / create flags |
 | `PUT/DELETE` | `/v1/admin/flags/:key` | Update / archive flag |
 | `GET/POST` | `/v1/admin/experiments` | List / create experiments |
@@ -469,13 +472,13 @@ Filtered cohort comparison:
 
 ## Agents operator preview
 
-Agents execution is an operator-authorized capability in the OSS developer
-preview. Projects created through public registration keep `agents:read` for
-definitions, history, results, and audit records by default. Execution requires
-either operator-provisioned project provenance or an explicit immutable
+Agents starts read-only for projects created through public registration. An
+owner can activate governed setup to add `agents:run` and `agents:manage` for
+L1/L2 analysis, but this grants no Config mutation, Codegen, repository access,
+or external effect. `agents:approve` and effectful execution require either
+operator-provisioned project provenance or an explicit immutable
 self-registration override with operator actor and reason evidence. Agents,
-Codegen, role storage, and execution-bearing database tables all enforce that
-canonical authorization.
+Codegen, role storage, and effect-bearing database tables enforce that ceiling.
 
 The agents service runs operator-triggered analysis and proposal workflows
 powered by policy-governed LLM reasoning. The safe default permits only the

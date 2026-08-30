@@ -78,15 +78,24 @@ class ProjectLlmVaultStore:
         lock: bool,
     ) -> None:
         del lock
-        authorized = await conn.fetchval(
-            "SELECT apdl_llm_vault_has_management_authority($1, $2)",
+        authority = await conn.fetchval(
+            "SELECT apdl_project_management_authority($1, $2)",
             project_id,
             actor_user_id,
         )
-        if authorized is not True:
+        if str(authority) not in {"owner", "delegated"}:
             raise VaultAuthorizationError(
                 "Connection management requires project ownership or delegated "
                 "agents:manage and credentials:manage roles"
+            )
+
+    async def assert_create_authority(
+        self, *, project_id: str, actor_user_id: UUID
+    ) -> None:
+        """Reject unauthorized create requests before provider network egress."""
+        async with self._pool.acquire() as conn:
+            await self._assert_authority(
+                conn, project_id, actor_user_id, lock=False
             )
 
     @staticmethod

@@ -1,0 +1,16 @@
+services:
+  ingestion:
+    ports:
+      - "127.0.0.1:${APDL_INGESTION_HOST_PORT:-8080}:8080"
+  config:
+    ports:
+      - "127.0.0.1:${APDL_CONFIG_HOST_PORT:-8081}:8081"
+  query:
+    ports:
+      - "127.0.0.1:${APDL_QUERY_HOST_PORT:-8082}:8082"
+  agents:
+    ports:
+      - "127.0.0.1:${APDL_AGENTS_HOST_PORT:-8083}:8083"
+  admin-api:
+    ports:
+      - "127.0.0.1:${APDL_ADMIN_API_HOST_PORT:-8085}:8085"

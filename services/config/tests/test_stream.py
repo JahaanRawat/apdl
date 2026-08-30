@@ -142,6 +142,32 @@ async def test_subscription_precedes_snapshot_and_preserves_exact_interleaving(
 
 
 @pytest.mark.asyncio
+async def test_stream_uses_comment_heartbeats_and_non_transforming_headers(
+    monkeypatch,
+    route_state,
+):
+    broadcaster = SSEBroadcaster()
+    app.state.broadcaster = broadcaster
+    monkeypatch.setattr(
+        stream.pg_store,
+        "get_flag_snapshot",
+        AsyncMock(return_value=([make_flag(version=1)], 1)),
+    )
+
+    response = await stream.sse_stream(make_request())
+    heartbeat = response.ping_message_factory()
+
+    assert heartbeat.encode() == b": heartbeat\r\n\r\n"
+    assert response.headers["cache-control"] == "no-cache, no-transform"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert b"event:" not in heartbeat.encode()
+    assert b"data:" not in heartbeat.encode()
+    await anext(response.body_iterator)
+    await response.body_iterator.aclose()
+    assert await broadcaster.total_connection_count() == 0
+
+
+@pytest.mark.asyncio
 async def test_snapshot_version_suppresses_already_included_queue_event(
     monkeypatch,
     route_state,

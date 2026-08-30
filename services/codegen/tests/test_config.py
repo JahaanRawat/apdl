@@ -101,29 +101,8 @@ def test_base64_key_is_decoded(monkeypatch):
     assert config.github_app_private_key() == _PEM
 
 
-def test_legacy_inputs_cannot_override_canonical_key(monkeypatch):
-    legacy_inline = "GITHUB_APP_" + "PRIVATE_KEY"
-    legacy_path = legacy_inline + "_PATH"
-    monkeypatch.setenv(legacy_inline, "FROM_INLINE")
-    monkeypatch.setenv(legacy_path, "/tmp/from-path.pem")
-    monkeypatch.setenv(
-        _PRIVATE_KEY_SETTING,
-        base64.b64encode(b"FROM_BASE64").decode(),
-    )
-    assert config.github_app_private_key() == "FROM_BASE64"
-
-
 def test_empty_when_nothing_set(monkeypatch):
     monkeypatch.delenv(_PRIVATE_KEY_SETTING, raising=False)
-    assert config.github_app_private_key() == ""
-
-
-def test_legacy_inputs_alone_leave_key_unconfigured(monkeypatch):
-    legacy_inline = "GITHUB_APP_" + "PRIVATE_KEY"
-    legacy_path = legacy_inline + "_PATH"
-    monkeypatch.delenv(_PRIVATE_KEY_SETTING, raising=False)
-    monkeypatch.setenv(legacy_inline, _PEM)
-    monkeypatch.setenv(legacy_path, "/tmp/key.pem")
     assert config.github_app_private_key() == ""
 
 
@@ -133,16 +112,28 @@ def test_legacy_inputs_alone_leave_key_unconfigured(monkeypatch):
         "not%%%base64%%%",
         "TQ",
         "TQ===",
-        "Zm9v\nYmFy",
         "_w==",
     ],
-    ids=["alphabet", "padding-missing", "padding-extra", "whitespace", "url-safe"],
+    ids=["alphabet", "padding-missing", "padding-extra", "url-safe"],
 )
 def test_noncanonical_base64_fails_closed(monkeypatch, caplog, encoded):
     monkeypatch.setenv(_PRIVATE_KEY_SETTING, encoded)
 
     assert config.github_app_private_key() == ""
     assert _PRIVATE_KEY_SETTING in caplog.text
+    assert encoded not in caplog.text
+
+
+def test_wrapped_base64_fails_with_canonical_generation_guidance(
+    monkeypatch,
+    caplog,
+):
+    encoded = "Zm9v\nYmFy"
+    monkeypatch.setenv(_PRIVATE_KEY_SETTING, encoded)
+
+    assert config.github_app_private_key() == ""
+    assert "single unwrapped Base64 line" in caplog.text
+    assert "openssl base64 -A" in caplog.text
     assert encoded not in caplog.text
 
 
@@ -162,6 +153,90 @@ def test_empty_private_key_material_fails_closed(monkeypatch, caplog):
     assert config.github_app_private_key() == ""
     assert _PRIVATE_KEY_SETTING in caplog.text
     assert encoded not in caplog.text
+
+
+def test_github_origins_are_fixed_to_github_dot_com(monkeypatch):
+    monkeypatch.setenv("GITHUB_API_URL", "https://attacker.example")
+    monkeypatch.setenv("GITHUB_WEB_URL", "https://attacker.example")
+
+    assert config.GITHUB_API_URL == "https://api.github.com"
+    assert config.GITHUB_WEB_URL == "https://github.com"
+
+
+@pytest.mark.parametrize("length", [32, 128])
+@pytest.mark.parametrize("poll_interval", [0, 60])
+def test_github_webhook_secret_accepts_canonical_boundaries(
+    monkeypatch,
+    length,
+    poll_interval,
+):
+    secret = "a" * length
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", secret)
+
+    assert (
+        config.github_webhook_secret(ci_poll_interval=poll_interval) == secret
+    )
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["unset", "empty"])
+def test_github_webhook_secret_may_be_blank_while_polling(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
+) -> None:
+    if configured:
+        monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "")
+    else:
+        monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+
+    assert config.github_webhook_secret(ci_poll_interval=60) is None
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["unset", "empty"])
+def test_github_webhook_secret_is_required_when_polling_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
+) -> None:
+    if configured:
+        monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "")
+    else:
+        monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
+
+    with pytest.raises(
+        RuntimeError,
+        match="required when CODEGEN_CI_POLL_INTERVAL is 0",
+    ):
+        config.github_webhook_secret(ci_poll_interval=0)
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "a" * 31,
+        "a" * 129,
+        " leading" + "a" * 32,
+        "a" * 32 + " ",
+        "a" * 16 + "." + "b" * 16,
+        "a" * 31 + "é",
+    ],
+    ids=[
+        "too-short",
+        "too-long",
+        "leading-space",
+        "trailing-space",
+        "punctuation",
+        "non-ascii",
+    ],
+)
+@pytest.mark.parametrize("poll_interval", [0, 60])
+def test_github_webhook_secret_rejects_noncanonical_values(
+    monkeypatch: pytest.MonkeyPatch,
+    secret: str,
+    poll_interval: int,
+) -> None:
+    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", secret)
+
+    with pytest.raises(RuntimeError, match="GITHUB_WEBHOOK_SECRET"):
+        config.github_webhook_secret(ci_poll_interval=poll_interval)
 
 
 @pytest.mark.parametrize(

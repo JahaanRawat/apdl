@@ -23,6 +23,7 @@ require() {
 
 require docker
 require python3
+require git
 docker compose version >/dev/null
 docker info >/dev/null
 
@@ -37,15 +38,31 @@ export APDL_SMOKE_BROWSER_KEY="client_demo_0123456789abcdef0123456789abcdef"
 export APDL_SERVICE_API_KEYS='{}'
 export POSTGRES_PASSWORD="apdl_dev"
 export APDL_RUNTIME_POSTGRES_PASSWORD="apdl_runtime_dev"
+export APDL_AGENTS_POSTGRES_PASSWORD="apdl_agents_dev1"
 export APDL_LLM_VAULT_POSTGRES_PASSWORD="apdl_llm_vault_dev"
 export APDL_BIND_ADDRESS="127.0.0.1"
-# Public, disposable test-only platform keys for the isolated smoke database.
-# Compose exposes each value only to its owning controller.
-export LLM_VAULT_ENCRYPTION_KEY_BASE64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+# Each hermetic stack is a distinct deployment. Build metadata still comes from
+# canonical release and Git sources instead of a shared placeholder.
+export APDL_DEPLOYMENT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+export APDL_DISPLAY_NAME="APDL fresh-install smoke"
+export APDL_BACKEND_VERSION="$(
+    python3 -c 'import json, pathlib, sys; print(json.loads(pathlib.Path(sys.argv[1]).read_text())["version"])' \
+        "$ROOT_DIR/release-manifest.json"
+)"
+export APDL_BUILD_REVISION="$(
+    git -C "$ROOT_DIR" rev-parse --verify 'HEAD^{commit}'
+)"
+# Use a fresh disposable encryption key for every isolated smoke database.
+export LLM_VAULT_ENCRYPTION_KEY_BASE64="$(
+    python3 "$ROOT_DIR/scripts/llm_vault_key.py" generate
+)"
 export LLM_VAULT_ADMIN_TOKEN="smoke-llm-vault-admin-token-change-me"
 export LLM_VAULT_AGENTS_TOKEN="smoke-llm-vault-agents-token-change-me"
 export LLM_VAULT_CODEGEN_TOKEN="smoke-llm-vault-codegen-token-change-me"
 export LLM_VAULT_PROJECTION_TOKEN="smoke-llm-vault-projection-token-change-me"
+# Polling is intentionally disabled in the hermetic smoke stack, so Codegen's
+# conditional recovery contract requires a fixed public test-only webhook key.
+export GITHUB_WEBHOOK_SECRET="smoke_webhook_secret_0123456789abcdef"
 export CODEGEN_CI_POLL_INTERVAL=0
 export CODEGEN_STALE_SWEEP_INTERVAL=0
 
@@ -88,9 +105,14 @@ export APDL_CONFIG_HOST_PORT="${APDL_CONFIG_HOST_PORT:-$((SMOKE_PORT_BASE + 5))}
 export APDL_QUERY_HOST_PORT="${APDL_QUERY_HOST_PORT:-$((SMOKE_PORT_BASE + 6))}"
 export APDL_GATEWAY_HOST_PORT="${APDL_GATEWAY_HOST_PORT:-$((SMOKE_PORT_BASE + 7))}"
 export APDL_AGENTS_HOST_PORT="${APDL_AGENTS_HOST_PORT:-$((SMOKE_PORT_BASE + 8))}"
-export APDL_ADMIN_HOST_PORT="${APDL_ADMIN_HOST_PORT:-$((SMOKE_PORT_BASE + 9))}"
+export APDL_ADMIN_API_HOST_PORT="${APDL_ADMIN_API_HOST_PORT:-$((SMOKE_PORT_BASE + 9))}"
+# The base stack exposes only the unified gateway. This hermetic overlay opens
+# loopback-only diagnostic ports for the smoke runner, and the ephemeral
+# gateway Host allowlist matches its randomized public port exactly.
+export APDL_GATEWAY_ALLOWED_HOSTS="[\"127.0.0.1:$APDL_GATEWAY_HOST_PORT\"]"
 
-COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+SMOKE_HOST_PORTS_FILE="$ROOT_DIR/scripts/fixtures/docker-compose.smoke-host-ports.yml"
+COMPOSE_ARGS=(-f "$COMPOSE_FILE" -f "$SMOKE_HOST_PORTS_FILE")
 if [ -n "${APDL_SMOKE_COMPOSE_OVERRIDE:-}" ]; then
     if [[ "$APDL_SMOKE_COMPOSE_OVERRIDE" != /* ]]; then
         APDL_SMOKE_COMPOSE_OVERRIDE="$ROOT_DIR/$APDL_SMOKE_COMPOSE_OVERRIDE"
@@ -386,7 +408,7 @@ case "${APDL_SMOKE_NO_BUILD:-false}" in
         echo "==> Pulling immutable release images without registry credentials"
         published_compose_services=(
             postgres-migrate ingestion config query clickhouse-writer
-            llm-vault admin-api admin
+            llm-vault admin-api gateway
         )
         if [ "$smoke_all_images" = true ]; then
             published_compose_services+=(agents codegen)
@@ -435,6 +457,7 @@ compose run --rm --no-deps \
     -e APDL_OWNER_POSTGRES_USER=apdl \
     -e APDL_OWNER_POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
     -e APDL_RUNTIME_POSTGRES_PASSWORD="$APDL_RUNTIME_POSTGRES_PASSWORD" \
+    -e APDL_AGENTS_POSTGRES_PASSWORD="$APDL_AGENTS_POSTGRES_PASSWORD" \
     -e APDL_RUNTIME_TEST_POSTGRES_URL=postgresql://apdl_runtime@postgres:5432/apdl \
     -v "$ROOT_DIR/scripts/test_postgres_operator_privileges.sh:/tmp/test_postgres_operator_privileges.sh:ro" \
     postgres-migrate \
@@ -448,7 +471,7 @@ compose run --rm --no-deps \
     /tmp/test_postgres_fence_owner_loss.py
 
 startup_services=(
-    ingestion config query clickhouse-writer admin-api admin gateway
+    ingestion config query clickhouse-writer admin-api gateway
 )
 if [ "$smoke_all_images" = true ]; then
     startup_services+=(agents codegen)
@@ -475,7 +498,7 @@ export APDL_GATEWAY_URL="http://127.0.0.1:$APDL_GATEWAY_HOST_PORT"
 export APDL_INGESTION_URL="http://127.0.0.1:$APDL_INGESTION_HOST_PORT"
 export APDL_CONFIG_URL="http://127.0.0.1:$APDL_CONFIG_HOST_PORT"
 export APDL_QUERY_URL="http://127.0.0.1:$APDL_QUERY_HOST_PORT"
-export APDL_ADMIN_URL="http://127.0.0.1:$APDL_ADMIN_HOST_PORT"
+export APDL_ADMIN_URL="http://127.0.0.1:$APDL_ADMIN_API_HOST_PORT"
 
 if [ "$SMOKE_SUITE" = "core" ]; then
     echo "==> Running exact-one-event core smoke"

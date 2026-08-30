@@ -2,8 +2,9 @@
 
 > **0.3.0 developer-preview boundary:** this document describes the
 > source-built, fresh, single-node Compose runtime. Ingestion, Config, Query,
-> the Redis-to-ClickHouse writer, Gateway, Admin API, and Admin Console are the
-> supported core. Agents is an opt-in operator preview; only the Codegen API
+> the Redis-to-ClickHouse writer, Gateway, and Admin API are the supported
+> source-built core. The browser Admin Console is distributed separately.
+> Agents is an opt-in operator preview; only the Codegen API
 > control plane is a source-only offline preview. Its editor/worker and
 > publication paths are unsupported. Kubernetes, Terraform, multi-replica
 > operation, upgrades, backup, and restore are not supported. Redis Streams is
@@ -28,9 +29,8 @@ feedback cycle remains a product direction rather than a current capability.
 | Query Service | FastAPI, ClickHouse, SciPy | 8082 | Core, source-built | [README](../services/query/README.md) |
 | Agents Service | FastAPI, LLM SDKs, pgvector | 8083 | Operator preview, opt-in | [README](../services/agents/README.md) |
 | Codegen API/control plane | FastAPI, GitHub App | 8084 (internal) | Source-only offline preview; editor/worker unsupported | [README](../services/codegen/README.md) |
-| Admin API | FastAPI, Argon2id, opaque sessions | 8085 (internal) | Core, source-built | [README](../services/admin-api/README.md) |
+| Admin API | FastAPI, Argon2id, opaque sessions | 8085 | Core, source-built | [README](../services/admin-api/README.md) |
 | LLM Credential Vault | FastAPI, asyncpg, AES-256-GCM | 8086 (internal) | Core, private | [README](../services/llm-vault/README.md) |
-| Admin Console | React, Vite, nginx | 5173 | Core, source-built | [README](../services/admin/README.md) |
 | Redis-to-ClickHouse writer | Python, clickhouse-driver | — | Core, source-built | [README](../pipeline/README.md) |
 
 ## The three flows
@@ -58,11 +58,17 @@ SDKs ──POST /v1/events──→ Ingestion ──XADD──→ Redis Streams 
 ### 2. Flags & experiments (config path)
 
 ```
-Admin Browser ──HttpOnly session──→ Admin API ──service key──→ Config / Query
+Separately distributed Admin Console ──HttpOnly session──→ Admin API ──project API key──→ Config / Query
 Operator preview ──→ Agents / offline Codegen
+Leased Agents execution ──60s execution capability──→ Query / Config / Codegen
 Agents ──human-approved inert draft──→ Config ──→ PostgreSQL (canonical) + Redis (60s cache)
 Operator activation ──→ Config ──SSE / poll──→ SDKs
 ```
+
+The Admin API may use an operator-configured key from
+`APDL_SERVICE_API_KEYS`, or create a hash-only five-minute proxy credential for
+one request. This is separate from Agents: Agents receives no project-key map
+and mints a short-lived capability only after it owns a live execution lease.
 
 - PostgreSQL stores canonical flag configs: targeting rules, rollouts,
   lifecycle state (`draft` / `active` / `disabled`, plus archived), guardrails,
@@ -98,6 +104,14 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
   partial/manual-intervention state to operators. Operator cancellation clears
   the run lease, prevents queued approval effects from being claimed, and
   fences later LLM egress against the cancelled execution.
+- Agents uses a dedicated non-owner `apdl_agents` database identity to mint a
+  random 60-second internal capability immediately before a downstream call.
+  PostgreSQL stores only its hash and binds it to the project, execution, lease
+  owner, audiences, and roles. Query, Config, and Codegen revalidate that record
+  and the live execution lease; ordinary runtime identities can validate but
+  cannot mint capabilities. Mutation authority is available only to a leased
+  approval effect, is bound to the exact HTTP request, and is atomically
+  consumed once; the capability row is deleted after the call.
 - The LLM router treats configured providers as candidates, not authority.
   Every call is project/run scoped and classified; an exact provider/model row,
   residency match, and available run/project budget are required before a
@@ -105,9 +119,10 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
   local `gemma4` at `http://localhost:11434/v1`, zero paid spend, and no
   cross-vendor retry. Agent memory is embedded into a pgvector table for
   retrieval across runs.
-- Agents execution is available only to operator-provisioned or explicitly
-  operator-authorized projects; self-created projects retain read-only history
-  and definitions by default. Experiment
+- Self-created projects start with read-only Agents history and definitions.
+  Owner activation may enable governed L1/L2 analysis, while approval, Config
+  mutation, Codegen, and external effects remain available only to
+  operator-provisioned or explicitly operator-authorized projects. Experiment
   proposals receive static shape/blast-radius validation and are audit-logged,
   but every experiment design requires human approval regardless of its stored
   autonomy level. Approval creates a disabled draft; it does not deploy a
@@ -128,7 +143,7 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
 | Store | Holds |
 |---|---|
 | Redis 7 | Event streams (`events:raw:*`), flag-config cache (60 s TTL), rate-limit counters |
-| PostgreSQL 16 + pgvector | Flags, experiments, audit log, agent runs & memory |
+| PostgreSQL 16 + pgvector | Flags, experiments, audit log, agent runs & memory, and hash-only short-lived service capabilities |
 | ClickHouse | Core `events`/session/exposure/health/identity tables and materialized views |
 
 ## Deployment boundary

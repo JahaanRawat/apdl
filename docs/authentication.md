@@ -1,6 +1,7 @@
 # Authentication and tenant authorization
 
-APDL has two strict credential kinds. Send either one only in `X-API-Key`:
+APDL exposes two strict API-key credential kinds. External callers send either
+one only in `X-API-Key`:
 
 ```text
 proj_{project_id}_{secret}     # confidential service credential
@@ -37,42 +38,57 @@ echoes the API key. This endpoint is not a human login system.
 
 ## Admin user sessions
 
-The Admin Console uses the separate `admin-api` backend-for-frontend. Human
-users authenticate with email and password; passwords are stored only as
-Argon2id hashes. Project membership and canonical roles live in
-`admin_user_projects`.
+The separately distributed Admin Console uses the OSS `admin-api`
+backend-for-frontend. Human users authenticate with email and password;
+passwords are stored only as Argon2id hashes. Project membership and canonical
+roles live in `admin_user_projects`.
 
-A successful login creates a random opaque session and CSRF token. PostgreSQL
-stores only their SHA-256 digests. The browser receives the session in an
-`HttpOnly`, `SameSite=Strict` cookie, so frontend JavaScript cannot read it.
-Unsafe requests also require an exact allowed `Origin` and the session-bound
-CSRF value. Sessions expire after both an absolute lifetime and an idle window.
+A successful `POST /api/console/v1/sessions` creates one random opaque bearer
+token. PostgreSQL stores only its SHA-256 digest, binds it to the stable
+deployment UUID and human identity, and applies one fixed absolute expiration.
+The browser sends it only as `Authorization: Bearer ...` to protected `/api/*`
+routes. Cookies, CSRF state, refresh tokens, URL tokens, and compatibility auth
+routes are not part of the console contract.
 
 The browser calls only `/api/projects/{project_id}/{service}/...`. The Admin API
 checks the human user's project and role, strips caller-supplied credentials,
 selects the project's configured key or mints a short-lived project key, and
-proxies the request. SSE uses the same cookie-authenticated path, so no key
-appears in the EventSource URL. Codegen receives the same project-scoped key.
+proxies the request. Project authority exists only in the resource path; the
+BFF rejects browser project header/query aliases and injects any required
+legacy upstream project query itself. SSE uses header-capable fetch streaming,
+so neither the human bearer nor a project key appears in a URL. Codegen receives
+the same project-scoped key.
 Every authorized mutation is attributed to the human user in
 `admin_proxy_audit`; the audit stores route metadata and status, never request
 bodies or credentials.
 
-Project authorization does not imply GitHub repository ownership. Codegen
-accepts no tenant-supplied repository or GitHub App installation coordinates.
-A trusted operator must separately activate a grant binding the APDL project to
-GitHub's immutable numeric repository ID. Admin exposes only the read-only grant
-projection (`grant_id`, `repository_id`, and display-only
-`repository_full_name`); the installation ID remains inside the trusted
-Codegen control plane. Every GitHub token lease revalidates that grant and uses
-an operation-specific token restricted to the immutable repository ID.
+Direct-console API version 1 does not expose GitHub App onboarding or callbacks.
+The former browser callback required correlation cookies and URL state, which
+would create a second browser authentication architecture. Operators may still
+provision repository authority through trusted internal workflows; a future
+console contract must define a new cookie-free flow before these routes can be
+exposed again.
 
-`POST /api/auth/register` accepts one strict `{email, password}` contract. It
-creates the user and session in one transaction, but deliberately creates no
-`admin_user_projects` rows. A newly registered user is authenticated with
-`projects: []` and cannot call any project-scoped service route until an
-operator grants membership or the user creates a project from Workspace
-settings. Registration requires an exact allowed `Origin` and is rate-limited
-with login at the console proxy.
+Admin exposes only the grant projection (`grant_id`, `repository_id`, and
+display-only `repository_full_name`); the installation ID remains inside the
+trusted Codegen control plane. Every GitHub token lease revalidates the active,
+same-project grant and uses an operation-specific token restricted to that
+immutable repository ID. Repository connection does not grant the separate
+project execution authority required for effectful autonomous runs.
+
+GitHub App credentials and webhook settings remain internal Codegen operator
+configuration. They do not define a browser callback or console route in the
+direct-console contract.
+
+Browser self-registration uses the public, strict
+`POST /api/console/v1/registrations` contract. It accepts only `email` and
+`password`, creates an active account with no project memberships, and returns
+the same deployment-bound bearer session shape as login. Registration is
+enabled by default, can be disabled with `APDL_ADMIN_REGISTRATION_ENABLED`, and
+is bounded by the shared authentication rate limits and
+`APDL_ADMIN_MAX_ACCOUNTS`. Existing authenticated users accept invitation codes
+in a strict JSON request body. Invitation secrets are shown once as codes,
+stored only as hashes, and never placed in a URL.
 
 An authenticated user can create a canonical project from
 `/settings/workspace`. `POST /api/projects` accepts only `{project_id}`, inserts
@@ -130,25 +146,24 @@ human command attribution.
 ## Human login abuse controls
 
 Admin login does not use an email-wide account lock. Before Argon2 verification,
-the Admin API atomically consumes short-window global, canonical-network, and
-opaque-device budgets. Invalid credentials then increase two independent
-per-email progressive-delay records: one for the network and one for the
-device. The first two failures remain the generic `401`; the third and later
+the Admin API atomically consumes short-window global and canonical-network
+budgets. Invalid credentials then increase one per-email, per-network
+progressive-delay record. The first two failures remain the generic `401`; the third and later
 failures return the strict `auth_throttled` envelope and matching
 `Retry-After`.
 
-The Admin edge overwrites `X-Forwarded-For` with its direct peer and clears
-other forwarding headers. Uvicorn preserves the socket peer, and the
-application accepts one forwarded address only when that peer belongs to the
-explicit `APDL_ADMIN_TRUSTED_PROXY_CIDRS` JSON array. Direct peers, malformed
-addresses, and forwarded chains cannot select a different risk identity.
+A deployed console edge must overwrite `X-Forwarded-For` with the direct client
+address and clear other forwarding headers. Uvicorn preserves the socket peer,
+and the application accepts one forwarded address only when that peer belongs
+to the explicit `APDL_ADMIN_TRUSTED_PROXY_CIDRS` JSON array. The OSS Compose
+default is an empty array. Direct peers, malformed addresses, and forwarded
+chains cannot select a different risk identity.
 
-The `apdl_admin_device` cookie is a random HttpOnly, SameSite Strict risk
-signal; it is not an authentication factor. PostgreSQL receives only
-deployment-HMAC digests of the normalized email, client address, and device
-token. A correct password from an unthrottled source creates a session even
-when the account-wide failure score is high, so knowing an email address is not
-enough to deterministically lock out its owner.
+PostgreSQL receives only deployment-HMAC digests of the normalized email and
+client address. Login throttling creates no browser cookie or other persistent
+browser identifier. A correct password from an unthrottled source creates a
+session even when the account-wide failure score is high, so knowing an email
+address is not enough to deterministically lock out its owner.
 
 Fifty failures for one active account within 24 hours create one unread
 `suspicious_login_activity` record. The Admin Console displays the count and
@@ -162,23 +177,25 @@ for the upstream call and the row is deleted after the response or SSE stream
 closes. This keeps self-created projects usable without exposing a persistent
 service credential to the browser or storing a recoverable key.
 
-Agents and Codegen execution requires a canonical
+Effectful Agents and Codegen execution requires a canonical
 `admin_project_execution_authorizations` row. Migration 028 backfills and
 automatically records `operator_provisioned` authority only for projects whose
 immutable `admin_projects.created_by` is null. Self-created projects retain
 `agents:read` by default. An operator may authorize one deliberately with the
 `self_registered_override` source, a non-empty actor, reason, and timestamp.
 Agents and Codegen independently load that record, while PostgreSQL rejects
-execution roles and inserts into registered execution-bearing tables when it
-is absent.
+`agents:approve` and inserts into registered effect-bearing tables when it is
+absent. Governed analysis uses `agents:run`/`agents:manage`, requires active
+owner-controlled Agents setup, and cannot mint downstream mutation authority.
 
-Experiment analysis uses synchronous credential delegation: after Query has
-authenticated a confidential `X-API-Key` and enforced `query:read` for its
-project, it forwards that same header to Config's read-only analysis
-projection. Config independently reauthenticates the credential and derives
-the tenant only from it. Query never accepts or selects a second Config key;
-the Admin API keeps an ephemeral proxy credential alive until the nested
-Query-to-Config request and outer response both complete.
+Experiment analysis uses synchronous authority delegation. After Query has
+authenticated either a confidential `X-API-Key` or a Query-and-Config internal
+capability and enforced `query:read`, it forwards that exact header to Config's
+read-only analysis projection. Config independently reauthenticates it and
+derives the tenant only from the verified record. Query never accepts or
+selects a second Config key. For an Admin request, the Admin API keeps its
+ephemeral proxy credential alive until the nested Query-to-Config request and
+outer response both complete.
 
 `make create-admin-user` remains the operator-only bootstrap and recovery path.
 Reprovisioning an existing email rotates its password and revokes active
@@ -189,7 +206,7 @@ requires all three explicit options:
 make create-admin-user ARGS="\
   --email operator@example.com \
   --project-id acme \
-  --roles agents:manage \
+  --roles agents:approve \
   --allow-self-registered-execution \
   --override-actor operator@example.com \
   --override-reason 'Approved production automation boundary'"
@@ -214,18 +231,64 @@ roles and revoking credentials.
 | `agents:approve` | Approve or reject gated agent actions |
 | `credentials:manage` | Human-only creation, rotation, revocation, and audit of restricted SDK credentials |
 
-The three Agents execution roles are valid only for operator-provisioned or
-explicitly authorized self-created projects. Unauthorized self-created
-projects are restricted to `agents:read` at membership, credential,
-service-authorization, and execution-storage boundaries.
+Self-created projects begin with `agents:read`. Owner activation of governed
+setup may add `agents:run` and `agents:manage` for L1/L2 analysis.
+`agents:approve`, Codegen, and external effects remain valid only for
+operator-provisioned or explicitly authorized self-created projects.
+
+## Agents execution capabilities
+
+`admin_projects` is the durable project identity, and
+`admin_project_execution_authorizations` records whether that project may run
+effectful Agents or Codegen work. APDL does not create another project secret or
+capability when a project is initialized. Such a credential would become
+ambient project authority and could outlive the run that needed it.
+
+Instead, a live Agents worker connects to PostgreSQL as the dedicated
+non-owner `apdl_agents` identity. Immediately before one leased `agent_run`,
+`custom_agent_test`, or `approval_effect` makes an internal HTTP call, Agents
+mints a random 60-second token and inserts only its SHA-256 hash into
+`agent_service_capabilities`. The row binds the authority to the exact project,
+execution and run IDs, lease owner, target audiences, canonical roles, and
+expiry. A mutation row additionally stores a SHA-256 binding over the uppercase
+method, exact path, canonical JSON body, and hashed `Idempotency-Key`. The raw
+token exists only in process memory and the
+`X-APDL-Internal-Capability` request header; Agents deletes the row when the
+call ends, with expiry as the cleanup fallback.
+
+Config, Query, and Codegen independently hash the presented token, require
+their audience and the route's role, and revalidate the referenced durable
+execution and live lease. Codegen also rechecks project execution
+authorization. The `config:write` and `agents:manage` roles can be issued only
+for a leased approval effect; ordinary runs and tests receive read or
+server-side evaluation authority. Config rejects internal
+capabilities on its long-lived SSE stream, and every service rejects requests
+that combine `X-API-Key` with `X-APDL-Internal-Capability`.
+
+Config and Codegen recompute the mutation request binding, revalidate the live
+approval-effect lease, and atomically set `consumed_at` through one narrowly
+owned `SECURITY DEFINER` routine. A mismatch, replay, expired token, or
+future-issued token fails closed. Read/query capabilities remain reusable only
+within their short lifetime so Query can delegate the same verified authority
+to Config's read-only experiment projection.
+
+The capability therefore serves both purposes without conflating them: its
+stored project binding identifies the tenant for the one call, while its
+audience, roles, and live execution binding prove the limited authority being
+delegated. It is not a reusable project API key. The ordinary `apdl_runtime`
+database identity may read capability rows to validate them but cannot insert,
+update, or delete them. Only the Agents issuer identity has exact-column insert
+and delete authority. No login role can update a capability; the non-login
+consume-function owner can update only `consumed_at` through the atomic routine.
 
 ## Operator provision credentials
 
 Apply the PostgreSQL migrations first with `make migrate-postgres`. Generate a
-key, hash the full key, and insert only the hash. This direct SQL path is for
-operator-owned infrastructure credentials; normal project members should use
-the audited Admin Console workflow above. A confidential service credential
-declares its kind and non-secret prefix explicitly:
+key, hash the full key, and insert only the hash. This direct SQL path is the
+standalone OSS workflow for operator-owned infrastructure credentials. A
+separately distributed console can instead use the audited Admin API workflow
+above. A confidential service credential declares its kind and non-secret
+prefix explicitly:
 
 ```bash
 api_key="proj_acme_$(openssl rand -hex 24)"
@@ -278,15 +341,18 @@ SQL
 printf 'Browser key (shown once): %s\n' "$client_key"
 ```
 
-Service principals receive only the roles they need. Internal agents read one
-JSON object from `APDL_SERVICE_API_KEYS`, keyed by project, so each automated
-call uses a tenant-scoped credential. Agent-to-Codegen calls use that same
-project scope. Automatic guardrail mutation is disabled in the OSS developer
-preview:
+Service principals receive only the roles they need. `APDL_SERVICE_API_KEYS`
+is an optional Admin API-only map for deployments that choose persistent
+project-scoped proxy credentials instead of the Admin API's per-request
+five-minute credentials:
 
 ```text
 APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 ```
+
+Agents does not read this map. Its Config, Query, and Codegen calls use the
+execution capabilities described above. Automatic guardrail mutation remains
+disabled in the OSS developer preview.
 
 ## Rotation, revocation, and expiry
 
@@ -300,14 +366,14 @@ APDL_SERVICE_API_KEYS={"acme":"proj_acme_<secret>"}
 - Never store the plaintext key in PostgreSQL or logs.
 
 Normal local bootstrap runs only the PostgreSQL schema migrations, so the
-project and credential catalogs start empty. Register through the loopback
-Admin Console, create a project in Project management, and create reveal-once
-browser or confidential credentials there. The isolated fresh-smoke suite owns
-separate `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY` fixtures; it
-first verifies the catalogs are empty, provisions those fixtures with the
-test-only SQL under `scripts/fixtures/`, and destroys the isolated volumes when
-the suite finishes. Production deployments should set
-`APDL_SERVICE_API_KEYS` only to confidential project keys for internal calls,
-set `APDL_ADMIN_COOKIE_SECURE=true`, configure an exact HTTPS origin, disable
-public registration, and provision least-privilege credentials through their
-normal secret-management workflow.
+project and credential catalogs start empty. Provision standalone OSS
+credentials with the operator workflow above. The isolated fresh-smoke suite
+owns separate `APDL_SMOKE_CONFIDENTIAL_KEY` and `APDL_SMOKE_BROWSER_KEY`
+fixtures; it first verifies the catalogs are empty, provisions those fixtures
+with the test-only SQL under `scripts/fixtures/`, and destroys the isolated
+volumes when the suite finishes. Production deployments should set
+`APDL_SERVICE_API_KEYS` only on the Admin API and only to confidential project
+keys when persistent proxy credentials are desired. They should also assign a
+unique `APDL_AGENTS_POSTGRES_PASSWORD`, configure the unified gateway's exact
+console-origin allowlist, and provision least-privilege credentials through their normal
+secret-management workflow.

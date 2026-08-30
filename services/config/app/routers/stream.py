@@ -94,15 +94,12 @@ async def sse_stream(request: Request):
             snapshot_version=snapshot_version,
         ),
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "X-Accel-Buffering": "no",
             "Access-Control-Allow-Origin": "*",
         },
         ping=settings.ping_interval_seconds,
-        ping_message_factory=lambda: ServerSentEvent(
-            event="heartbeat",
-            data="{}",
-        ),
+        ping_message_factory=lambda: ServerSentEvent(comment="heartbeat"),
         send_timeout=settings.send_timeout_seconds,
     )
 

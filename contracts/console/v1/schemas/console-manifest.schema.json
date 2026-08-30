@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apdl.dev/contracts/console/v1/schemas/console-manifest.schema.json",
+  "title": "APDL Console connection manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "deployment_id",
+    "display_name",
+    "backend_version",
+    "build_revision",
+    "console_api_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "console_manifest@1"
+    },
+    "deployment_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "display_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+    },
+    "backend_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "build_revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "console_api_version": {
+      "const": 1
+    }
+  }
+}

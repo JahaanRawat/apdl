@@ -9,13 +9,14 @@ cp .env.example .env  # first time only
 make dev-core         # ingestion :8080, config :8081, query :8082, gateway :8000
 ```
 
-The normal bootstrap is empty. Open <http://localhost:5173/register>, create a
-local account, and create a project from **Workspace settings**. From the same
-page, create two deliberately different reveal-once credentials:
+The normal bootstrap is empty. Follow the documented
+[operator credential workflow](../docs/authentication.md#operator-provision-credentials)
+to create two deliberately different reveal-once credentials:
 
 - A browser credential, restricted to exactly `events:write` and `config:read`.
 - A confidential credential with `events:write`, `config:read`,
-  `config:evaluate`, and `query:read`. Never copy it into browser code.
+  `config:write`, `config:evaluate`, and `query:read`. Never copy it into
+  browser code.
 
 Save the values when they are revealed; APDL stores only their hashes. Export
 the confidential key and your project ID for the commands below:
@@ -27,9 +28,10 @@ export APDL_API_KEY=proj_yourproject_replacewithrevealedkey
 
 ## 2. Create a feature flag
 
-The examples check a gate named `new-checkout`. In the Admin Console, open
-**Flags → New flag** and create it with `control` and `treatment` variants, a
-50% `user_id` rollout, client evaluation mode, and active state.
+The examples check a gate named `new-checkout`. Create it through the
+[Config Admin API](../services/config/README.md#admin-v1admin) with `control`
+and `treatment` variants, a `user_id` rollout, client evaluation mode, and
+active state.
 
 ## 3. Run an example
 
@@ -61,8 +63,8 @@ Open <http://127.0.0.1:4173/> and paste the reveal-once browser credential when
 prompted. The page keeps it only in memory. Only the example directory is
 served; repository secrets such as `.env` remain outside the document root.
 The page auto-captures clicks and page views, lets you fire a manual event, and
-shows the live `new-checkout` gate value—toggle the flag in the Admin Console
-and watch it update over SSE.
+shows the live `new-checkout` gate value—update the flag through the Config
+Admin API and watch it change over SSE.
 
 ## 4. See the data
 

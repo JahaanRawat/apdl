@@ -11,6 +11,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class FreshSmokeContractTests(unittest.TestCase):
+    def test_disabled_codegen_polling_has_webhook_recovery_fixture(self) -> None:
+        script = (ROOT / "scripts" / "smoke_fresh_install.sh").read_text()
+
+        self.assertRegex(
+            script,
+            r'export GITHUB_WEBHOOK_SECRET="[A-Za-z0-9_-]{32,128}"',
+        )
+        self.assertLess(
+            script.index("export GITHUB_WEBHOOK_SECRET="),
+            script.index("export CODEGEN_CI_POLL_INTERVAL=0"),
+        )
+
     def test_empty_bootstrap_precedes_explicit_smoke_fixture_seed(self) -> None:
         script = (ROOT / "scripts" / "smoke_fresh_install.sh").read_text()
         postgres_init = (ROOT / "scripts" / "init-postgres.sh").read_text()
@@ -61,10 +73,6 @@ class FreshSmokeContractTests(unittest.TestCase):
         self.assertIn("APDL_SMOKE_CONFIDENTIAL_KEY", experiment)
         self.assertIn(
             "scripts/dev.sh smoke-fresh Isolated end-to-end fresh-install proof",
-            dev,
-        )
-        self.assertNotIn(
-            'echo "  scripts/dev.sh smoke       End-to-end smoke test"',
             dev,
         )
 

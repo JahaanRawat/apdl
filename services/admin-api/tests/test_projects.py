@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import projects
 from app.auth import AdminSession, require_session
-from app.security import token_hash
 from conftest import make_settings
 
 
@@ -67,11 +67,12 @@ def make_client(connection: ProjectConnection, session: AdminSession) -> TestCli
     return TestClient(app)
 
 
-def zero_project_session(csrf: str) -> AdminSession:
+def zero_project_session() -> AdminSession:
     return AdminSession(
         session_id="10000000-0000-4000-8000-000000000001",
         token_hash="a" * 64,
-        csrf_hash=token_hash(csrf),
+        deployment_id="30000000-0000-4000-8000-000000000003",
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
         user_id="20000000-0000-4000-8000-000000000002",
         email="admin@example.com",
         projects={},
@@ -79,23 +80,22 @@ def zero_project_session(csrf: str) -> AdminSession:
 
 
 def test_zero_project_user_creates_project_and_receives_owner_roles() -> None:
-    csrf = "project-csrf-token"
     connection = ProjectConnection()
-    with make_client(connection, zero_project_session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with make_client(connection, zero_project_session()) as client:
         response = client.post(
             "/api/projects",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "newproject"},
         )
 
     assert response.status_code == 201
     identity = response.json()
+    assert identity["schema_version"] == "console_identity@1"
     assert identity["email"] == "admin@example.com"
     assert identity["projects"] == [
         {
             "project_id": "newproject",
-            "roles": sorted(projects.PROJECT_CREATOR_ROLES),
+            "roles": list(projects.PROJECT_CREATOR_ROLES),
         }
     ]
     membership = next(
@@ -128,8 +128,7 @@ def test_self_registered_project_roles_are_core_only() -> None:
 
 
 def test_project_creation_preserves_existing_profile_projects() -> None:
-    csrf = "project-csrf-token"
-    session = zero_project_session(csrf)
+    session = zero_project_session()
     session = AdminSession(
         **{
             **session.__dict__,
@@ -138,10 +137,9 @@ def test_project_creation_preserves_existing_profile_projects() -> None:
     )
     connection = ProjectConnection()
     with make_client(connection, session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
         response = client.post(
             "/api/projects",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "second"},
         )
 
@@ -152,39 +150,28 @@ def test_project_creation_preserves_existing_profile_projects() -> None:
     ]
 
 
-def test_project_creation_rejects_duplicates_and_cross_site_requests() -> None:
-    csrf = "project-csrf-token"
-    session = zero_project_session(csrf)
+def test_project_creation_rejects_duplicates() -> None:
+    session = zero_project_session()
     duplicate_connection = ProjectConnection(exists=True)
     with make_client(duplicate_connection, session) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
         duplicate = client.post(
             "/api/projects",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "existing"},
         )
-        cross_site = client.post(
-            "/api/projects",
-            headers={"Origin": "https://attacker.example", "X-CSRF-Token": csrf},
-            json={"project_id": "attacker"},
-        )
-
     assert duplicate.status_code == 409
     assert duplicate.json() == {"detail": "Project ID already exists"}
-    assert cross_site.status_code == 403
     assert not any(
         "admin_user_projects" in query for query, _ in duplicate_connection.statements
     )
 
 
 def test_project_creation_enforces_a_serialized_per_user_quota() -> None:
-    csrf = "project-csrf-token"
     connection = ProjectConnection(project_count=5)
-    with make_client(connection, zero_project_session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with make_client(connection, zero_project_session()) as client:
         response = client.post(
             "/api/projects",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "sixth"},
         )
 
@@ -201,13 +188,11 @@ def test_project_creation_enforces_a_serialized_per_user_quota() -> None:
 
 
 def test_project_creation_revalidates_the_active_user_under_lock() -> None:
-    csrf = "project-csrf-token"
     connection = ProjectConnection(active=False)
-    with make_client(connection, zero_project_session(csrf)) as client:
-        client.cookies.set("apdl_admin_csrf", csrf, path="/")
+    with make_client(connection, zero_project_session()) as client:
         response = client.post(
             "/api/projects",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "blocked"},
         )
 
@@ -215,21 +200,20 @@ def test_project_creation_revalidates_the_active_user_under_lock() -> None:
     assert not any("INSERT INTO admin_projects" in query for query, _ in connection.statements)
 
 
-def test_project_creation_requires_strict_schema_and_csrf() -> None:
-    csrf = "project-csrf-token"
+def test_project_creation_uses_bearer_authority_and_strict_schema() -> None:
     connection = ProjectConnection()
-    with make_client(connection, zero_project_session(csrf)) as client:
+    with make_client(connection, zero_project_session()) as client:
         invalid_id = client.post(
             "/api/projects",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "not-valid"},
         )
         unknown_field = client.post(
             "/api/projects",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"project_id": "valid", "owner": "caller"},
         )
-        missing_csrf = client.post(
+        bearer_only = client.post(
             "/api/projects",
             headers={"Origin": "http://admin.test"},
             json={"project_id": "valid"},
@@ -237,5 +221,5 @@ def test_project_creation_requires_strict_schema_and_csrf() -> None:
 
     assert invalid_id.status_code == 422
     assert unknown_field.status_code == 422
-    assert missing_csrf.status_code == 403
-    assert connection.statements == []
+    assert bearer_only.status_code == 201
+    assert any("INSERT INTO admin_projects" in query for query, _ in connection.statements)

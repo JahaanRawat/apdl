@@ -46,55 +46,6 @@ jobs:
       - run: npm run lint:package
         working-directory: sdk/javascript
 
-  admin-console:
-    name: Admin Console
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: services/admin/package-lock.json
-      - run: npm ci
-        working-directory: services/admin
-      - run: npm audit --audit-level=high
-        working-directory: services/admin
-      - run: npm run lint
-        working-directory: services/admin
-      - name: Test with coverage thresholds
-        run: npm run test:coverage
-        working-directory: services/admin
-      - name: Enforce changed-file coverage
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          COVERAGE_BASE: origin/${{ github.base_ref }}
-        run: npm run test:coverage:changed
-        working-directory: services/admin
-      - run: npm run build
-        working-directory: services/admin
-      - name: Enforce Admin bundle size budget
-        run: npm run check:bundle-size
-        working-directory: services/admin
-      - name: Upload full Admin coverage
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: admin-coverage-full
-          path: services/admin/coverage/full
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload changed-file Admin coverage
-        if: ${{ always() && github.event_name == 'pull_request' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: admin-coverage-changed
-          path: services/admin/coverage/changed
-          if-no-files-found: error
-          retention-days: 14
-
   admin-api:
     name: Admin API
     runs-on: ubuntu-latest
@@ -110,6 +61,22 @@ jobs:
         working-directory: services/admin-api
       - run: .venv/bin/python -m pytest -q
         working-directory: services/admin-api
+
+  unified-gateway:
+    name: Unified Gateway
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+        working-directory: services/gateway
+      - run: .venv/bin/ruff check app/ tests/
+        working-directory: services/gateway
+      - run: .venv/bin/python -m pytest -q
+        working-directory: services/gateway
 
   python-sdk:
     name: Python SDK
@@ -207,6 +174,7 @@ jobs:
           --health-retries 5
     env:
       APDL_RUNTIME_POSTGRES_PASSWORD: apdl_runtime_ci_test
+      APDL_AGENTS_POSTGRES_PASSWORD: apdl_agents_ci_test
       APDL_LLM_VAULT_POSTGRES_PASSWORD: apdl_llm_vault_ci_test
       LLM_VAULT_TEST_OWNER_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
       LLM_VAULT_TEST_POSTGRES_URL: postgresql://apdl_llm_vault:apdl_llm_vault_ci_test@localhost:5432/apdl
@@ -226,6 +194,7 @@ jobs:
             -e POSTGRES_PASSWORD=apdl_dev \
             -e POSTGRES_DB=apdl \
             -e APDL_RUNTIME_POSTGRES_PASSWORD \
+            -e APDL_AGENTS_POSTGRES_PASSWORD \
             -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             -v "$PWD/infra/docker/postgres/init-apdl-roles.sh:/tmp/init-apdl-roles.sh:ro" \
             pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb \
@@ -239,6 +208,7 @@ jobs:
             -e PGUSER=apdl \
             -e PGPASSWORD=apdl_dev \
             -e PGDATABASE=apdl \
+            -e APDL_AGENTS_POSTGRES_PASSWORD \
             -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             apdl-postgres-migrate-vault-ci
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
@@ -267,7 +237,9 @@ jobs:
           --health-retries 5
     env:
       APDL_AGENTS_LANE_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
+      APDL_AGENTS_SETUP_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
       APDL_RUNTIME_POSTGRES_PASSWORD: apdl_runtime_ci_test
+      APDL_AGENTS_POSTGRES_PASSWORD: apdl_agents_ci_test
       APDL_LLM_VAULT_POSTGRES_PASSWORD: apdl_llm_vault_ci_test
       APDL_RUNTIME_TEST_POSTGRES_URL: postgresql://apdl_runtime@127.0.0.1:5432/apdl
     steps:
@@ -286,6 +258,7 @@ jobs:
             -e POSTGRES_PASSWORD=apdl_dev \
             -e POSTGRES_DB=apdl \
             -e APDL_RUNTIME_POSTGRES_PASSWORD \
+            -e APDL_AGENTS_POSTGRES_PASSWORD \
             -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             -v "$PWD/infra/docker/postgres/init-apdl-roles.sh:/tmp/init-apdl-roles.sh:ro" \
             pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb \
@@ -299,6 +272,7 @@ jobs:
             -e PGUSER=apdl \
             -e PGPASSWORD=apdl_dev \
             -e PGDATABASE=apdl \
+            -e APDL_AGENTS_POSTGRES_PASSWORD \
             -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             apdl-postgres-migrate-ci
       - name: Prove PostgreSQL runtime/operator privilege separation
@@ -311,6 +285,7 @@ jobs:
             -e APDL_OWNER_POSTGRES_USER=apdl \
             -e APDL_OWNER_POSTGRES_PASSWORD=apdl_dev \
             -e APDL_RUNTIME_POSTGRES_PASSWORD \
+            -e APDL_AGENTS_POSTGRES_PASSWORD \
             -e APDL_RUNTIME_TEST_POSTGRES_URL \
             -v "$PWD/scripts/test_postgres_operator_privileges.sh:/tmp/test-postgres-operator-privileges.sh:ro" \
             pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb \
@@ -319,10 +294,16 @@ jobs:
         working-directory: services/agents
       - run: .venv/bin/ruff check app/
         working-directory: services/agents
-      - run: .venv/bin/python -m pytest -q --ignore=tests/test_execution_lane_postgres.py
+      - run: >-
+          .venv/bin/python -m pytest -q
+          --ignore=tests/test_execution_lane_postgres.py
+          --ignore=tests/test_llm_setup_postgres.py
         working-directory: services/agents
-      - name: Run live PostgreSQL execution-lane race tests
-        run: .venv/bin/python -m pytest -q tests/test_execution_lane_postgres.py
+      - name: Run live PostgreSQL Agents invariant tests
+        run: >-
+          .venv/bin/python -m pytest -q
+          tests/test_execution_lane_postgres.py
+          tests/test_llm_setup_postgres.py
         working-directory: services/agents
 
   codegen-service:
@@ -345,6 +326,7 @@ jobs:
     env:
       CODEGEN_TEST_POSTGRES_URL: postgresql://apdl:apdl_dev@localhost:5432/apdl
       APDL_RUNTIME_POSTGRES_PASSWORD: apdl_runtime_ci_test
+      APDL_AGENTS_POSTGRES_PASSWORD: apdl_agents_ci_test
       APDL_LLM_VAULT_POSTGRES_PASSWORD: apdl_llm_vault_ci_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -362,6 +344,7 @@ jobs:
             -e POSTGRES_PASSWORD=apdl_dev \
             -e POSTGRES_DB=apdl \
             -e APDL_RUNTIME_POSTGRES_PASSWORD \
+            -e APDL_AGENTS_POSTGRES_PASSWORD \
             -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             -v "$PWD/infra/docker/postgres/init-apdl-roles.sh:/tmp/init-apdl-roles.sh:ro" \
             pgvector/pgvector:pg16@sha256:1d533553fefe4f12e5d80c7b80622ba0c382abb5758856f52983d8789179f0fb \
@@ -375,6 +358,7 @@ jobs:
             -e PGUSER=apdl \
             -e PGPASSWORD=apdl_dev \
             -e PGDATABASE=apdl \
+            -e APDL_AGENTS_POSTGRES_PASSWORD \
             -e APDL_LLM_VAULT_POSTGRES_PASSWORD \
             apdl-postgres-migrate-codegen-ci
       - run: uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
@@ -440,6 +424,7 @@ jobs:
             services/agents/requirements.lock \
             services/llm-vault/requirements.lock \
             services/admin-api/requirements.lock \
+            services/gateway/requirements.lock \
             services/codegen/requirements.lock \
             pipeline/redis/requirements.lock
           do

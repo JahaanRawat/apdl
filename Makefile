@@ -1,4 +1,4 @@
-.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin build-admin test-admin lint-admin clean-admin run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
+.PHONY: all setup deps build test clean lint check audit-dependencies fmt fmt-check dev dev-core dev-all dev-down smoke-fresh smoke-experiment-fresh verify-direct-console test-clickhouse-upgrade test-boundary-markers test-query-clickhouse install-hooks lint-staged migrate-clickhouse migrate-postgres test-script-contracts test-sdk-python lint-sdk-python setup-sdk release-sdk verify-release test-packed-sdk-contract test-packed-python-sdk status smoke run-admin-api test-admin-api lint-admin-api create-admin-user assign-project-owner run-gateway test-gateway lint-gateway test-writer lint-writer run-llm-vault test-llm-vault lint-llm-vault rotate-llm-vault-key build-codegen-controller build-codegen-sandbox build-codegen-egress-proxy build-codegen-runtime codegen-development-prepare codegen-tenant-config codegen-tenant-up grant-codegen-repository revoke-codegen-repository
 
 # ─── Top-Level ───────────────────────────────────────────────
 
@@ -16,6 +16,7 @@ COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(COMPOSE_F
 DEPS_COMPOSE := docker compose $(if $(wildcard .env),--env-file .env,) -f $(DEPS_COMPOSE_FILE)
 HOST_SERVICE_RUNNER := python3 scripts/run_host_service.py
 HOST_SERVICE_ENV_FILE := $(if $(wildcard .env),--env-file .env,)
+CONSOLE_DEPLOYMENT_PROVISIONER := python3 scripts/console_deployment.py ensure .env --repository-root .
 
 # Build tags are convenient local handles. Tenant deployment resolves and checks
 # each tag's exact local image ID before Compose receives it.
@@ -67,10 +68,10 @@ lint-staged:
 deps:
 	@echo "==> Installing SDK dependencies"
 	cd sdk/javascript && npm install
-	@echo "==> Installing Admin Console dependencies"
-	cd services/admin && npm install
 	@echo "==> Setting up Admin API"
 	cd services/admin-api && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
+	@echo "==> Setting up unified gateway"
+	cd services/gateway && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Ingestion service"
 	cd services/ingestion && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 	@echo "==> Setting up Config service"
@@ -88,13 +89,13 @@ deps:
 	@echo "==> Setting up Python SDK"
 	cd sdk/python && uv venv --python 3.12 .venv && uv pip install -e ".[dev]" --python .venv/bin/python
 
-build: build-sdk build-admin
+build: build-sdk
 
-test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-llm-vault test-codegen test-writer test-admin-api test-admin
+test: test-script-contracts test-sdk test-sdk-python test-ingestion test-config test-query test-agents test-llm-vault test-codegen test-writer test-admin-api test-gateway
 
-lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-llm-vault lint-codegen lint-writer lint-admin-api lint-admin
+lint: lint-sdk lint-sdk-python lint-ingestion lint-config lint-query lint-agents lint-llm-vault lint-codegen lint-writer lint-admin-api lint-gateway
 
-clean: clean-sdk clean-admin
+clean: clean-sdk
 
 # Parallel local CI mirror: lint + test every package at once.
 check:
@@ -139,28 +140,11 @@ verify-release:
 test-packed-python-sdk:
 	./scripts/test-packed-python-sdk.sh
 
-# ─── Admin Console (TypeScript) ──────────────────────────────
-
-run-admin:
-	$(HOST_SERVICE_RUNNER) --service admin \
-		--working-directory services/admin -- npm run dev
-
-build-admin:
-	cd services/admin && npm run build
-
-test-admin:
-	cd services/admin && npm test
-
-lint-admin:
-	cd services/admin && npm run lint
-
-clean-admin:
-	rm -rf services/admin/dist services/admin/node_modules
-
 # ─── Admin API (Python) ─────────────────────────────────────
 
 run-admin-api:
-	APDL_ADMIN_COOKIE_SECURE=false $(HOST_SERVICE_RUNNER) \
+	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
+	$(HOST_SERVICE_RUNNER) \
 		--service admin-api $(HOST_SERVICE_ENV_FILE) \
 		--working-directory services/admin-api -- \
 		.venv/bin/python -m uvicorn app.main:app --reload --port 8085 --no-proxy-headers
@@ -172,10 +156,30 @@ lint-admin-api:
 	cd services/admin-api && .venv/bin/ruff check app/ scripts/ tests/
 
 create-admin-user:
+	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
 	$(COMPOSE) run --rm --build --no-deps admin-api python -m scripts.create_admin_user $(ARGS)
 
 assign-project-owner:
+	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
 	$(COMPOSE) run --rm --build --no-deps admin-api python -m scripts.assign_project_owner $(ARGS)
+
+# ─── Unified Gateway (Python) ───────────────────────────────
+
+run-gateway:
+	cd services/gateway && \
+		ADMIN_API_URL=http://localhost:8085 \
+		INGESTION_SERVICE_URL=http://localhost:8080 \
+		CONFIG_SERVICE_URL=http://localhost:8081 \
+		APDL_GATEWAY_ALLOWED_HOSTS='["localhost:8000"]' \
+		APDL_CONSOLE_ALLOWED_ORIGINS='["https://console.apdl.dev"]' \
+		.venv/bin/python -m uvicorn app.main:app \
+		--reload --port 8000 --no-proxy-headers --no-access-log
+
+test-gateway:
+	cd services/gateway && .venv/bin/python -m pytest -q
+
+lint-gateway:
+	cd services/gateway && .venv/bin/ruff check app/ tests/
 
 # ─── SDK (Python) ────────────────────────────────────────────
 
@@ -425,14 +429,15 @@ dev:
 	@echo "    Run services individually: make run-ingestion, make run-config, make run-query, make run-llm-vault, make run-agents, make run-codegen, make run-pipeline"
 
 dev-core:
+	@$(CONSOLE_DEPLOYMENT_PROVISIONER)
 	$(COMPOSE) --profile agents --profile codegen stop -t 30 \
-		ingestion config query agents codegen clickhouse-writer admin-api admin gateway
+		ingestion config query llm-vault agents codegen clickhouse-writer admin-api gateway
 	$(COMPOSE) --profile agents --profile codegen rm -f -s agents codegen
 	$(COMPOSE) up -d --build redis clickhouse postgres
 	@$(MAKE) --no-print-directory migrate-clickhouse CLICKHOUSE_COMPOSE_FILE=$(COMPOSE_FILE)
 	@$(MAKE) --no-print-directory migrate-postgres POSTGRES_COMPOSE_FILE=$(COMPOSE_FILE)
 	$(COMPOSE) up -d --build --wait --wait-timeout 120 \
-		ingestion config query clickhouse-writer admin-api admin gateway
+		ingestion config query clickhouse-writer admin-api gateway
 	@echo "==> Core development stack is ready"
 	@echo "    Agents and Codegen are stopped; run make dev-all to opt into their offline services."
 
@@ -453,6 +458,9 @@ smoke-fresh:
 
 smoke-experiment-fresh:
 	@bash scripts/smoke_fresh_install.sh experiment
+
+verify-direct-console:
+	@python3 scripts/verify_direct_console.py $(ARGS)
 
 test-clickhouse-upgrade:
 	@bash scripts/test_clickhouse_upgrade.sh

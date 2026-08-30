@@ -48,7 +48,6 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertEqual(
             repositories,
             {
-                "admin": "ghcr.io/kuvera-apdl/apdl-admin",
                 "admin-api": "ghcr.io/kuvera-apdl/apdl-admin-api",
                 "agents": "ghcr.io/kuvera-apdl/apdl-agents",
                 "clickhouse-writer": "ghcr.io/kuvera-apdl/apdl-clickhouse-writer",
@@ -56,6 +55,7 @@ class ReleaseManifestTests(unittest.TestCase):
                 "codegen-egress": "ghcr.io/kuvera-apdl/apdl-codegen-egress",
                 "codegen-worker": "ghcr.io/kuvera-apdl/apdl-codegen-worker",
                 "config": "ghcr.io/kuvera-apdl/apdl-config",
+                "gateway": "ghcr.io/kuvera-apdl/apdl-gateway",
                 "ingestion": "ghcr.io/kuvera-apdl/apdl-ingestion",
                 "llm-vault": "ghcr.io/kuvera-apdl/apdl-llm-vault",
                 "postgres-migrate": "ghcr.io/kuvera-apdl/apdl-postgres-migrate",
@@ -114,6 +114,11 @@ class ReleaseManifestTests(unittest.TestCase):
 
         self.assertEqual(len(matrix["include"]), 12)
         by_name = {image["name"]: image for image in matrix["include"]}
+        self.assertEqual(
+            by_name["admin-api"]["build_args"],
+            f"APDL_BACKEND_VERSION={VALID_MANIFEST['version']}\n"
+            f"APDL_BUILD_REVISION={revision}",
+        )
         self.assertEqual(
             by_name["codegen-worker"]["build_args"],
             f"CODEGEN_REVISION={revision}",

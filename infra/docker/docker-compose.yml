@@ -52,6 +52,7 @@ services:
       POSTGRES_USER: apdl
       POSTGRES_PASSWORD: apdl_dev
       APDL_RUNTIME_POSTGRES_PASSWORD: ${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}
+      APDL_AGENTS_POSTGRES_PASSWORD: ${APDL_AGENTS_POSTGRES_PASSWORD:-apdl_agents_dev1}
       APDL_LLM_VAULT_POSTGRES_PASSWORD: ${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}
     healthcheck:
       test:
@@ -79,6 +80,7 @@ services:
       PGUSER: apdl
       PGPASSWORD: apdl_dev
       PGDATABASE: apdl
+      APDL_AGENTS_POSTGRES_PASSWORD: ${APDL_AGENTS_POSTGRES_PASSWORD:-apdl_agents_dev1}
       APDL_LLM_VAULT_POSTGRES_PASSWORD: ${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}
       POSTGRES_MIGRATIONS_DIR: /migrations
     depends_on:
@@ -91,8 +93,8 @@ services:
     build:
       context: ../../services/ingestion
       dockerfile: Dockerfile
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_INGESTION_HOST_PORT:-8080}:8080"
+    expose:
+      - "8080"
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
@@ -123,8 +125,8 @@ services:
     build:
       context: ../../services/config
       dockerfile: Dockerfile
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_CONFIG_HOST_PORT:-8081}:8081"
+    expose:
+      - "8081"
     environment:
       REDIS_URL: redis://redis:6379
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
@@ -158,8 +160,8 @@ services:
     build:
       context: ../../services/query
       dockerfile: Dockerfile
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_QUERY_HOST_PORT:-8082}:8082"
+    expose:
+      - "8082"
     environment:
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_HOST: clickhouse
@@ -201,8 +203,8 @@ services:
       - "8086"
     environment:
       POSTGRES_URL: postgresql://apdl_llm_vault:${APDL_LLM_VAULT_POSTGRES_PASSWORD:-apdl_llm_vault_dev}@postgres:5432/apdl
-      LLM_VAULT_ENCRYPTION_KEY_BASE64: ${LLM_VAULT_ENCRYPTION_KEY_BASE64:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
-      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-local-llm-vault-admin-token-change-me}
+      LLM_VAULT_ENCRYPTION_KEY_BASE64: ${LLM_VAULT_ENCRYPTION_KEY_BASE64:-}
+      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-}
       LLM_VAULT_AGENTS_TOKEN: ${LLM_VAULT_AGENTS_TOKEN:-local-llm-vault-agents-token-change-me}
       LLM_VAULT_CODEGEN_TOKEN: ${LLM_VAULT_CODEGEN_TOKEN:-local-llm-vault-codegen-token-change-me}
       LLM_VAULT_PROJECTION_TOKEN: ${LLM_VAULT_PROJECTION_TOKEN:-local-llm-vault-projection-token-change-me}
@@ -230,19 +232,18 @@ services:
     build:
       context: ../../services/agents
       dockerfile: Dockerfile
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_AGENTS_HOST_PORT:-8083}:8083"
+    expose:
+      - "8083"
     environment:
       LLM_VAULT_URL: http://llm-vault:8086
       LLM_VAULT_AGENTS_TOKEN: ${LLM_VAULT_AGENTS_TOKEN:-local-llm-vault-agents-token-change-me}
       LLM_VAULT_PROJECTION_TOKEN: ${LLM_VAULT_PROJECTION_TOKEN:-local-llm-vault-projection-token-change-me}
-      POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
+      POSTGRES_URL: postgresql://apdl_agents:${APDL_AGENTS_POSTGRES_PASSWORD:-apdl_agents_dev1}@postgres:5432/apdl
       REDIS_URL: redis://redis:6379
       CLICKHOUSE_URL: http://clickhouse:8123
       QUERY_SERVICE_URL: http://query:8082
       CONFIG_SERVICE_URL: http://config:8081
       CODEGEN_SERVICE_URL: http://codegen:8084
-      APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
       LOCAL_LLM_URL: ${LOCAL_LLM_URL:-}
     healthcheck:
       test:
@@ -278,11 +279,16 @@ services:
       - "8084"
     environment:
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
+      # Canonical GitHub.com App configuration; the six App/OAuth values are required.
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       # Canonical single-line Base64-encoded PEM (see .env.example).
       GITHUB_APP_PRIVATE_KEY_BASE64: ${GITHUB_APP_PRIVATE_KEY_BASE64:-}
-      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
-      # Empty disables the webhook endpoint; the CI poller remains available.
+      GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      # Direct-console v1 has no public browser callback.
+      GITHUB_APP_CALLBACK_URL: ${GITHUB_APP_CALLBACK_URL:-}
+      # Blank disables inbound webhooks while CI polling remains positive.
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
       LLM_VAULT_URL: http://llm-vault:8086
       LLM_VAULT_CODEGEN_TOKEN: ${LLM_VAULT_CODEGEN_TOKEN:-local-llm-vault-codegen-token-change-me}
@@ -332,8 +338,8 @@ services:
       # on a host with cores to spare. Excess jobs wait in `queued`.
       CODEGEN_MAX_CONCURRENT_JOBS: ${CODEGEN_MAX_CONCURRENT_JOBS:-1}
       # CI-status poll interval (seconds). The zero-config trigger that advances
-      # open changesets without an inbound webhook. Default 60; set 0 to disable
-      # (e.g. once a low-latency GitHub webhook is wired as the sole driver).
+      # open changesets without an inbound webhook. Default 60; setting 0
+      # requires GITHUB_WEBHOOK_SECRET so webhooks become the recovery driver.
       CODEGEN_CI_POLL_INTERVAL: ${CODEGEN_CI_POLL_INTERVAL:-60}
       CODEGEN_CI_REPAIR_RETRIES: ${CODEGEN_CI_REPAIR_RETRIES:-2}
       CODEGEN_CI_REPAIR_BUDGET_SECONDS: ${CODEGEN_CI_REPAIR_BUDGET_SECONDS:-3600}
@@ -395,11 +401,16 @@ services:
     stop_grace_period: 30s
 
   # Admin backend-for-frontend. Human sessions and tenant roles live in
-  # PostgreSQL; project service credentials never enter the SPA.
+  # PostgreSQL; project service credentials never enter browser applications.
   admin-api:
     build:
       context: ../../services/admin-api
       dockerfile: Dockerfile
+      args:
+        APDL_BACKEND_VERSION: ${APDL_BACKEND_VERSION:-}
+        APDL_BUILD_REVISION: ${APDL_BUILD_REVISION:-}
+    expose:
+      - "8085"
     environment:
       POSTGRES_URL: postgresql://apdl_runtime:${APDL_RUNTIME_POSTGRES_PASSWORD:-apdl_runtime_dev}@postgres:5432/apdl
       INGESTION_SERVICE_URL: http://ingestion:8080
@@ -408,14 +419,14 @@ services:
       AGENTS_SERVICE_URL: http://agents:8083
       CODEGEN_SERVICE_URL: http://codegen:8084
       LLM_VAULT_URL: http://llm-vault:8086
-      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-local-llm-vault-admin-token-change-me}
+      LLM_VAULT_ADMIN_TOKEN: ${LLM_VAULT_ADMIN_TOKEN:-}
       APDL_SERVICE_API_KEYS: '${APDL_SERVICE_API_KEYS:-{}}'
-      APDL_ADMIN_ALLOWED_ORIGINS: '${APDL_ADMIN_ALLOWED_ORIGINS:-["http://localhost:5173","http://localhost:5174"]}'
-      APDL_ADMIN_COOKIE_SECURE: ${APDL_ADMIN_COOKIE_SECURE:-false}
-      APDL_ADMIN_REGISTRATION_ENABLED: ${APDL_ADMIN_REGISTRATION_ENABLED:-false}
+      APDL_DEPLOYMENT_ID: ${APDL_DEPLOYMENT_ID:-}
+      APDL_DISPLAY_NAME: ${APDL_DISPLAY_NAME:-Local APDL}
+      APDL_ADMIN_REGISTRATION_ENABLED: ${APDL_ADMIN_REGISTRATION_ENABLED:-true}
       APDL_ADMIN_MAX_ACCOUNTS: ${APDL_ADMIN_MAX_ACCOUNTS:-100}
       APDL_ADMIN_MAX_PROJECTS_PER_USER: ${APDL_ADMIN_MAX_PROJECTS_PER_USER:-5}
-      APDL_ADMIN_TRUSTED_PROXY_CIDRS: '${APDL_ADMIN_TRUSTED_PROXY_CIDRS:-["172.30.255.0/28"]}'
+      APDL_ADMIN_TRUSTED_PROXY_CIDRS: '["172.30.255.3/32"]'
       APDL_ADMIN_LOGIN_RISK_HMAC_KEY: ${APDL_ADMIN_LOGIN_RISK_HMAC_KEY:-local-admin-login-risk-key-change-me}
       APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS: ${APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS:-5}
       APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS: ${APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS:-60}
@@ -445,46 +456,48 @@ services:
       llm-vault:
         condition: service_healthy
     networks:
-      - default
-      - admin-edge
+      default:
+      admin-gateway:
+        ipv4_address: 172.30.255.2
+        aliases:
+          - admin-api-gateway
 
-  # Admin console — static SPA served by nginx. Only /api is dynamic, and it is
-  # forwarded to admin-api on the private Compose network.
-  admin:
+  # Gateway — the only browser-visible backend boundary. It preserves /api/*
+  # for the Admin API and retains the three registered SDK routes. It never
+  # serves the console SPA or any other UI assets.
+  gateway:
     build:
-      context: ../../services/admin
+      context: ../../services/gateway
       dockerfile: Dockerfile
     ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_ADMIN_HOST_PORT:-5173}:80"
+      - "127.0.0.1:${APDL_GATEWAY_HOST_PORT:-8000}:8000"
+    environment:
+      ADMIN_API_URL: http://admin-api-gateway:8085
+      INGESTION_SERVICE_URL: http://ingestion:8080
+      CONFIG_SERVICE_URL: http://config:8081
+      APDL_GATEWAY_ALLOWED_HOSTS: '${APDL_GATEWAY_ALLOWED_HOSTS:-["localhost:8000"]}'
+      APDL_GATEWAY_TRUSTED_PROXY_CIDRS: '${APDL_GATEWAY_TRUSTED_PROXY_CIDRS:-[]}'
+      APDL_GATEWAY_PUBLIC_SCHEME: ${APDL_GATEWAY_PUBLIC_SCHEME:-http}
+      APDL_GATEWAY_MAX_REQUEST_BYTES: ${APDL_GATEWAY_MAX_REQUEST_BYTES:-2097152}
+      APDL_GATEWAY_MAX_EVENT_BYTES: ${APDL_GATEWAY_MAX_EVENT_BYTES:-524288}
+      APDL_GATEWAY_CONNECT_TIMEOUT_SECONDS: ${APDL_GATEWAY_CONNECT_TIMEOUT_SECONDS:-5}
+      APDL_GATEWAY_READ_TIMEOUT_SECONDS: ${APDL_GATEWAY_READ_TIMEOUT_SECONDS:-60}
+      APDL_GATEWAY_STREAM_READ_TIMEOUT_SECONDS: ${APDL_GATEWAY_STREAM_READ_TIMEOUT_SECONDS:-3600}
+      APDL_GATEWAY_WRITE_TIMEOUT_SECONDS: ${APDL_GATEWAY_WRITE_TIMEOUT_SECONDS:-30}
+      APDL_GATEWAY_POOL_TIMEOUT_SECONDS: ${APDL_GATEWAY_POOL_TIMEOUT_SECONDS:-5}
+      APDL_GATEWAY_MAX_CONNECTIONS: ${APDL_GATEWAY_MAX_CONNECTIONS:-100}
+      APDL_GATEWAY_MAX_KEEPALIVE_CONNECTIONS: ${APDL_GATEWAY_MAX_KEEPALIVE_CONNECTIONS:-20}
+      APDL_GATEWAY_API_RATE_LIMIT: ${APDL_GATEWAY_API_RATE_LIMIT:-300}
+      APDL_GATEWAY_API_RATE_WINDOW_SECONDS: ${APDL_GATEWAY_API_RATE_WINDOW_SECONDS:-60}
+      APDL_GATEWAY_API_RATE_MAX_CLIENTS: ${APDL_GATEWAY_API_RATE_MAX_CLIENTS:-10000}
+      APDL_CONSOLE_ALLOWED_ORIGINS: '${APDL_CONSOLE_ALLOWED_ORIGINS:-["https://console.apdl.dev"]}'
     healthcheck:
       test:
         [
-          "CMD-SHELL",
-          "wget -q -O - http://127.0.0.1/api/ready | grep -q '\"status\":\"ready\"'",
-        ]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    depends_on:
-      admin-api:
-        condition: service_healthy
-    networks:
-      - admin-edge
-
-  # Gateway — single SDK front door. Routes /v1/events to ingestion and
-  # /v1/flags + /v1/stream to config, so an SDK connects with one `endpoint`
-  # URL (http://<host>:8000) instead of separate ingestion + config URLs.
-  gateway:
-    image: nginx:1.31-alpine@sha256:7068961d45b07b2af510ac002e9daa63a1d3eba2111202d6768798690800fffd
-    ports:
-      - "${APDL_BIND_ADDRESS:-127.0.0.1}:${APDL_GATEWAY_HOST_PORT:-8000}:80"
-    volumes:
-      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "wget -q -O - http://127.0.0.1/ | grep -qx 'apdl gateway ok'",
+          "CMD",
+          "python",
+          "-m",
+          "app.healthcheck",
         ]
       interval: 5s
       timeout: 3s
@@ -494,6 +507,12 @@ services:
         condition: service_healthy
       config:
         condition: service_healthy
+      admin-api:
+        condition: service_healthy
+    networks:
+      default:
+      admin-gateway:
+        ipv4_address: 172.30.255.3
 
 volumes:
   redis-data:
@@ -501,7 +520,9 @@ volumes:
   postgres-data:
 
 networks:
-  admin-edge:
+  default:
+  admin-gateway:
+    internal: true
     ipam:
       config:
-        - subnet: 172.30.255.0/28
+        - subnet: 172.30.255.0/29

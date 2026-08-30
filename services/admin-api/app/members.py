@@ -2,48 +2,37 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
-import re
+from typing import Annotated
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
-from app.auth import (
-    ACCOUNT_REGISTRATION_LOCK_ID,
-    AdminSession,
-    _start_session,
-    require_csrf,
-    require_session,
-)
+from app.auth import AdminSession, require_session
 from app.login_security import (
+    LoginSource,
     build_login_source,
-    preflight_auth_rate_limit,
-    set_device_cookie,
+    preflight_invitation_rate_limit,
 )
 from app.models import (
+    AuditCursor,
+    AuditPageQuery,
+    ConsoleIdentity,
+    InvitationAcceptRequest,
     InvitationCreateRequest,
-    InvitationInspection,
-    InvitationRegistrationRequest,
     MemberRolesReplaceRequest,
     MembershipAuditEntry,
+    MembershipAuditPage,
     PendingProjectInvitation,
     ProjectAccess,
     ProjectInvitationReveal,
     ProjectMember,
     ProjectMembers,
-    UserIdentity,
+    canonical_human_roles,
 )
-from app.security import (
-    hash_password,
-    new_token,
-    require_allowed_origin,
-    set_session_cookies,
-    token_hash,
-)
+from app.security import new_token, token_hash
 
 router = APIRouter(tags=["project members"])
-TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 MEMBERS_MANAGE_ROLE = "members:manage"
 
 
@@ -59,17 +48,23 @@ async def _rate_limit_invitation(
     *,
     request: Request,
     digest: str,
-) -> None:
+) -> LoginSource:
     settings = request.app.state.settings
     now = datetime.now(timezone.utc)
     source = build_login_source(request, f"invitation:{digest}", settings)
-    retry_after = await preflight_auth_rate_limit(conn, source, settings, now)
+    retry_after = await preflight_invitation_rate_limit(
+        conn,
+        source,
+        settings,
+        now,
+    )
     if retry_after > 0:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many invitation attempts. Try again later.",
             headers={"Retry-After": str(retry_after)},
         )
+    return source
 
 
 async def _manager_context(
@@ -187,11 +182,14 @@ def _member(row) -> ProjectMember:
 
 
 def _invitation(row) -> PendingProjectInvitation:
+    blocked_reason = row["blocked_reason"]
     return PendingProjectInvitation(
         invitation_id=row["invitation_id"],
         email=str(row["email"]),
         roles=[str(role) for role in row["roles"]],
         inviter_email=str(row["inviter_email"]),
+        status="valid" if blocked_reason is None else "blocked",
+        blocked_reason=blocked_reason,
         expires_at=row["expires_at"],
         created_at=row["created_at"],
     )
@@ -275,17 +273,37 @@ async def list_project_members(
             project_id,
         )
         invitation_rows = await conn.fetch(
-            """
+            f"""
             SELECT
                 invitation.invitation_id,
                 invitation.email,
                 invitation.roles,
                 inviter.email AS inviter_email,
+                CASE
+                    WHEN NOT inviter.active THEN 'inviter_inactive'
+                    WHEN inviter_membership.user_id IS NULL
+                        THEN 'inviter_not_project_member'
+                    WHEN NOT (
+                        '{MEMBERS_MANAGE_ROLE}' = ANY(inviter_membership.roles)
+                    ) THEN 'inviter_lacks_members_manage'
+                    WHEN NOT (invitation.roles <@ inviter_membership.roles)
+                        THEN 'roles_exceed_inviter_authority'
+                    WHEN '{MEMBERS_MANAGE_ROLE}' = ANY(invitation.roles)
+                     AND project.owner_user_id IS DISTINCT FROM
+                         invitation.inviter_user_id
+                        THEN 'members_manage_requires_owner'
+                    ELSE NULL
+                END AS blocked_reason,
                 invitation.expires_at,
                 invitation.created_at
             FROM admin_project_invitations AS invitation
+            JOIN admin_projects AS project
+              ON project.project_id = invitation.project_id
             JOIN admin_users AS inviter
               ON inviter.user_id = invitation.inviter_user_id
+            LEFT JOIN admin_user_projects AS inviter_membership
+              ON inviter_membership.user_id = invitation.inviter_user_id
+             AND inviter_membership.project_id = invitation.project_id
             WHERE invitation.project_id = $1
               AND invitation.accepted_at IS NULL
               AND invitation.revoked_at IS NULL
@@ -311,9 +329,6 @@ async def create_project_invitation(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> ProjectInvitationReveal:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
-    require_csrf(request, session)
     actor_user_id = uuid.UUID(session.user_id)
     email = body.email.strip().lower()
     roles = list(body.roles)
@@ -421,15 +436,15 @@ async def create_project_invitation(
                 new_roles=roles,
             )
 
-    origin = request.headers["origin"].rstrip("/")
     return ProjectInvitationReveal(
         **_invitation(
             {
                 **dict(row),
                 "inviter_email": session.email,
+                "blocked_reason": None,
             }
         ).model_dump(),
-        invitation_url=f"{origin}/invitations/{raw_token}",
+        invitation_token=raw_token,
     )
 
 
@@ -443,9 +458,6 @@ async def revoke_project_invitation(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> Response:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
-    require_csrf(request, session)
     actor_user_id = uuid.UUID(session.user_id)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
@@ -510,9 +522,6 @@ async def replace_project_member_roles(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> ProjectMember:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
-    require_csrf(request, session)
     actor_user_id = uuid.UUID(session.user_id)
     roles = list(body.roles)
     async with request.app.state.pg_pool.acquire() as conn:
@@ -600,9 +609,6 @@ async def remove_project_member(
     request: Request,
     session: AdminSession = Depends(require_session),
 ) -> Response:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
-    require_csrf(request, session)
     actor_user_id = uuid.UUID(session.user_id)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
@@ -670,13 +676,14 @@ async def remove_project_member(
 
 @router.get(
     "/api/projects/{project_id}/members/audit",
-    response_model=list[MembershipAuditEntry],
+    response_model=MembershipAuditPage,
 )
 async def list_membership_audit(
     project_id: str,
     request: Request,
+    page: Annotated[AuditPageQuery, Query()],
     session: AdminSession = Depends(require_session),
-) -> list[MembershipAuditEntry]:
+) -> MembershipAuditPage:
     async with request.app.state.pg_pool.acquire() as conn:
         await _manager_context(
             conn,
@@ -702,58 +709,42 @@ async def list_membership_audit(
             JOIN admin_users AS actor
               ON actor.user_id = audit.actor_user_id
             WHERE audit.project_id = $1
+              AND (
+                  $2::TIMESTAMPTZ IS NULL
+                  OR (audit.created_at, audit.audit_id)
+                     < ($2::TIMESTAMPTZ, $3::UUID)
+              )
             ORDER BY audit.created_at DESC, audit.audit_id DESC
-            LIMIT 200
+            LIMIT $4
             """,
             project_id,
+            page.before_created_at,
+            page.before_audit_id,
+            page.limit + 1,
         )
-    return [MembershipAuditEntry(**dict(row)) for row in rows]
-
-
-@router.get(
-    "/api/invitations/{raw_token}",
-    response_model=InvitationInspection,
-)
-async def inspect_invitation(
-    raw_token: str,
-    request: Request,
-) -> InvitationInspection:
-    if TOKEN_PATTERN.fullmatch(raw_token) is None:
-        raise _unavailable_invitation()
-    digest = token_hash(raw_token)
-    async with request.app.state.pg_pool.acquire() as conn:
-        async with conn.transaction():
-            await _rate_limit_invitation(
-                conn,
-                request=request,
-                digest=digest,
-            )
-            invitation = await _valid_invitation(conn, digest=digest, lock=False)
-    if invitation is None:
-        raise _unavailable_invitation()
-    return InvitationInspection(
-        project_id=str(invitation["project_id"]),
-        email=str(invitation["email"]),
-        roles=list(invitation["roles"]),
-        expires_at=invitation["expires_at"],
+    page_rows = rows[: page.limit]
+    entries = [MembershipAuditEntry(**dict(row)) for row in page_rows]
+    next_cursor = (
+        AuditCursor(
+            created_at=page_rows[-1]["created_at"],
+            audit_id=page_rows[-1]["audit_id"],
+        )
+        if len(rows) > page.limit
+        else None
     )
+    return MembershipAuditPage(entries=entries, next_cursor=next_cursor)
 
 
 @router.post(
-    "/api/invitations/{raw_token}/accept",
-    response_model=UserIdentity,
+    "/api/invitations/accept",
+    response_model=ConsoleIdentity,
 )
 async def accept_invitation(
-    raw_token: str,
+    body: InvitationAcceptRequest,
     request: Request,
     session: AdminSession = Depends(require_session),
-) -> UserIdentity:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
-    require_csrf(request, session)
-    if TOKEN_PATTERN.fullmatch(raw_token) is None:
-        raise _unavailable_invitation()
-    digest = token_hash(raw_token)
+) -> ConsoleIdentity:
+    digest = token_hash(body.invitation_token)
     user_id = uuid.UUID(session.user_id)
     async with request.app.state.pg_pool.acquire() as conn:
         async with conn.transaction():
@@ -814,123 +805,14 @@ async def accept_invitation(
 
     projects = dict(session.projects)
     projects[str(invitation["project_id"])] = frozenset(invitation["roles"])
-    return UserIdentity(
+    return ConsoleIdentity(
         user_id=session.user_id,
         email=session.email,
         projects=[
-            ProjectAccess(project_id=project_id, roles=sorted(roles))
-            for project_id, roles in sorted(projects.items())
-        ],
-    )
-
-
-@router.post(
-    "/api/invitations/{raw_token}/register",
-    response_model=UserIdentity,
-    status_code=status.HTTP_201_CREATED,
-)
-async def register_with_invitation(
-    raw_token: str,
-    body: InvitationRegistrationRequest,
-    request: Request,
-    response: Response,
-) -> UserIdentity:
-    settings = request.app.state.settings
-    require_allowed_origin(request, settings)
-    if TOKEN_PATTERN.fullmatch(raw_token) is None:
-        raise _unavailable_invitation()
-    digest = token_hash(raw_token)
-    source = build_login_source(request, f"invitation:{digest}", settings)
-
-    async with request.app.state.pg_pool.acquire() as conn:
-        async with conn.transaction():
-            await _rate_limit_invitation(conn, request=request, digest=digest)
-            inspection = await _valid_invitation(conn, digest=digest, lock=False)
-    if inspection is None:
-        raise _unavailable_invitation()
-
-    password_hash = await asyncio.to_thread(hash_password, body.password)
-    now = datetime.now(timezone.utc)
-    async with request.app.state.pg_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock($1)",
-                ACCOUNT_REGISTRATION_LOCK_ID,
-            )
-            invitation = await _valid_invitation(conn, digest=digest, lock=True)
-            if invitation is None:
-                raise _unavailable_invitation()
-            existing_account = await conn.fetchval(
-                "SELECT user_id FROM admin_users WHERE email = $1 FOR UPDATE",
-                invitation["email"],
-            )
-            if existing_account is not None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="An account already exists for this invitation email",
-                )
-            account_count = int(await conn.fetchval("SELECT count(*) FROM admin_users"))
-            if account_count >= settings.max_accounts:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="This deployment has reached its account limit",
-                )
-
-            user_id = uuid.uuid4()
-            await conn.execute(
-                """
-                INSERT INTO admin_users (user_id, email, password_hash)
-                VALUES ($1, $2, $3)
-                """,
-                user_id,
-                invitation["email"],
-                password_hash,
-            )
-            await conn.execute(
-                """
-                INSERT INTO admin_user_projects (user_id, project_id, roles)
-                VALUES ($1, $2, $3)
-                """,
-                user_id,
-                invitation["project_id"],
-                list(invitation["roles"]),
-            )
-            await conn.execute(
-                """
-                UPDATE admin_project_invitations
-                SET accepted_at = NOW(),
-                    accepted_by_user_id = $2
-                WHERE invitation_id = $1
-                """,
-                invitation["invitation_id"],
-                user_id,
-            )
-            await _record_membership_audit(
-                conn,
-                project_id=str(invitation["project_id"]),
-                action="invitation_accept",
-                actor_user_id=user_id,
-                subject_user_id=user_id,
-                subject_email=str(invitation["email"]),
-                invitation_id=invitation["invitation_id"],
-                new_roles=list(invitation["roles"]),
-            )
-            session_token, csrf_token = await _start_session(
-                conn,
-                user_id,
-                settings,
-                now,
-            )
-
-    set_device_cookie(response, source, settings)
-    set_session_cookies(response, session_token, csrf_token, settings)
-    return UserIdentity(
-        user_id=str(user_id),
-        email=str(invitation["email"]),
-        projects=[
             ProjectAccess(
-                project_id=str(invitation["project_id"]),
-                roles=list(invitation["roles"]),
+                project_id=project_id,
+                roles=canonical_human_roles(roles),
             )
+            for project_id, roles in sorted(projects.items())
         ],
     )

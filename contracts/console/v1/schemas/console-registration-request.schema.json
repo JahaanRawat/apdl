@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apdl.dev/contracts/console/v1/schemas/console-registration-request.schema.json",
+  "title": "APDL Console account registration request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "email",
+    "password"
+  ],
+  "properties": {
+    "email": {
+      "$ref": "common.schema.json#/$defs/email"
+    },
+    "password": {
+      "type": "string",
+      "minLength": 12,
+      "maxLength": 1024
+    }
+  }
+}

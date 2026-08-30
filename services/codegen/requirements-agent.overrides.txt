@@ -2,10 +2,10 @@
 #
 # Keep this list exact. requirements-agent.constraints.txt documents the full
 # regeneration command and separately preserves the two approved no-fix pins.
-aiohttp==3.14.2
+aiohttp==3.14.3
 click==8.3.3
 fastapi==0.139.2
-gitpython==3.1.55
+gitpython==3.1.58
 idna==3.15
 importlib-metadata>=8,<9
 litellm==1.85.0

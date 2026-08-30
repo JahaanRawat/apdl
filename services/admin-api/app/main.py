@@ -13,8 +13,9 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app import auth, credentials, members, projects, proxy
+from app import auth, console, credentials, members, projects, proxy
 from app.config import Settings
+from app.error_boundary import install_error_boundary
 from app.request_body_limit import RequestBodyLimitMiddleware
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,7 @@ app = FastAPI(
     title="APDL Admin API",
     version="0.1.0",
     lifespan=lifespan,
+    redirect_slashes=False,
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
@@ -239,7 +241,11 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+install_error_boundary(app)
+
+
 app.include_router(auth.router)
+app.include_router(console.router)
 app.include_router(projects.router)
 app.include_router(members.router)
 app.include_router(credentials.router)

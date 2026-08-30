@@ -10,6 +10,21 @@ from app.request_body_limit import DEFAULT_MAX_REQUEST_BODY_BYTES
 from app.security import hash_password, token_hash, verify_password
 
 
+@pytest.fixture(autouse=True)
+def explicit_vault_admin_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "LLM_VAULT_ADMIN_TOKEN",
+        "test-vault-admin-token-is-at-least-32-bytes",
+    )
+    monkeypatch.setenv(
+        "APDL_DEPLOYMENT_ID",
+        "87fab7d6-dba0-4f77-8ffd-00e815fc7303",
+    )
+    monkeypatch.setenv("APDL_DISPLAY_NAME", "Test APDL")
+    monkeypatch.setenv("APDL_BACKEND_VERSION", "0.3.4")
+    monkeypatch.setenv("APDL_BUILD_REVISION", "a" * 40)
+
+
 def test_argon2id_password_hash_is_salted_and_verifiable() -> None:
     first = hash_password("a-correct-horse-battery-staple")
     second = hash_password("a-correct-horse-battery-staple")
@@ -41,79 +56,131 @@ def test_settings_ignore_removed_development_service_key(monkeypatch) -> None:
         "APDL_DEV_API_KEY",
         "proj_demo_0123456789abcdef",
     )
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
-
     assert Settings.from_env().service_api_keys == {}
 
 
-def test_settings_reject_wildcard_origins(monkeypatch) -> None:
-    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_ALLOWED_ORIGINS", '["*"]')
+def test_settings_require_an_explicit_vault_admin_token(monkeypatch) -> None:
+    monkeypatch.delenv("LLM_VAULT_ADMIN_TOKEN")
 
-    with pytest.raises(ValueError, match="Invalid admin origin"):
+    with pytest.raises(ValueError, match="LLM_VAULT_ADMIN_TOKEN is required"):
         Settings.from_env()
 
 
-def test_settings_allow_both_local_console_ports_by_default(monkeypatch) -> None:
+def test_settings_apply_direct_console_security_defaults(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.delenv("APDL_ADMIN_ALLOWED_ORIGINS", raising=False)
     monkeypatch.delenv("APDL_ADMIN_REGISTRATION_ENABLED", raising=False)
     monkeypatch.delenv("APDL_ADMIN_MAX_ACCOUNTS", raising=False)
     monkeypatch.delenv("APDL_ADMIN_MAX_PROJECTS_PER_USER", raising=False)
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
 
     settings = Settings.from_env()
 
-    assert settings.allowed_origins == frozenset(
-        {"http://localhost:5173", "http://localhost:5174"}
-    )
     assert settings.trusted_proxy_cidrs == ()
-    assert settings.registration_enabled is False
+    assert settings.registration_enabled is True
     assert settings.max_accounts == 100
     assert settings.max_projects_per_user == 5
     assert settings.login_progressive_failure_threshold == 3
     assert settings.login_account_notice_threshold == 50
+    assert settings.invitation_global_rate_limit == 600
+    assert settings.invitation_network_rate_limit == 30
+    assert settings.invitation_token_rate_limit == 20
     assert settings.stream_authority_check_seconds == 5.0
     assert settings.upstream_read_timeout_seconds == 60.0
     assert settings.readiness_probe_timeout_seconds == 2.0
+    assert settings.deployment_id == "87fab7d6-dba0-4f77-8ffd-00e815fc7303"
+    assert settings.display_name == "Test APDL"
+    assert settings.backend_version == "0.3.4"
+    assert settings.build_revision == "a" * 40
 
 
-def test_settings_reject_invalid_registration_controls(monkeypatch) -> None:
-    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_REGISTRATION_ENABLED", "yes")
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        (
+            "APDL_DEPLOYMENT_ID",
+            "87FAB7D6-DBA0-4F77-8FFD-00E815FC7303",
+            "canonical non-nil UUID",
+        ),
+        (
+            "APDL_DEPLOYMENT_ID",
+            "00000000-0000-0000-0000-000000000000",
+            "canonical non-nil UUID",
+        ),
+        (
+            "APDL_DISPLAY_NAME",
+            "Invalid\nname",
+            "normalized printable characters",
+        ),
+        ("APDL_BACKEND_VERSION", "v0.3.4", "canonical SemVer"),
+        ("APDL_BUILD_REVISION", "development", "40-character Git revision"),
+    ],
+)
+def test_settings_reject_invalid_console_manifest_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv(name, value)
 
-    with pytest.raises(ValueError, match="must be true or false"):
+    with pytest.raises(ValueError, match=message):
         Settings.from_env()
 
-    monkeypatch.setenv("APDL_ADMIN_REGISTRATION_ENABLED", "false")
-    for name in (
-        "APDL_ADMIN_MAX_ACCOUNTS",
-        "APDL_ADMIN_MAX_PROJECTS_PER_USER",
-    ):
-        monkeypatch.setenv(name, "0")
-        with pytest.raises(ValueError, match="must be positive"):
-            Settings.from_env()
-        monkeypatch.delenv(name)
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "APDL_DEPLOYMENT_ID",
+        "APDL_DISPLAY_NAME",
+        "APDL_BACKEND_VERSION",
+        "APDL_BUILD_REVISION",
+    ],
+)
+def test_settings_require_console_manifest_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    monkeypatch.delenv(name)
+
+    with pytest.raises(ValueError, match=rf"{name} is required"):
+        Settings.from_env()
+
+
+def test_settings_reject_invalid_project_limit(monkeypatch) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.setenv("APDL_ADMIN_MAX_PROJECTS_PER_USER", "0")
+
+    with pytest.raises(ValueError, match="must be positive"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("APDL_ADMIN_REGISTRATION_ENABLED", "yes", "true or false"),
+        ("APDL_ADMIN_MAX_ACCOUNTS", "0", "must be positive"),
+    ],
+)
+def test_settings_reject_invalid_registration_controls(
+    monkeypatch,
+    name: str,
+    value: str,
+    message: str,
+) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(ValueError, match=message):
+        Settings.from_env()
 
 
 def test_settings_cannot_exceed_outer_request_body_limit(monkeypatch) -> None:
     monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "false")
     monkeypatch.setenv(
         "APDL_ADMIN_MAX_REQUEST_BYTES",
         str(DEFAULT_MAX_REQUEST_BODY_BYTES + 1),
     )
 
     with pytest.raises(ValueError, match="cannot exceed the outer"):
-        Settings.from_env()
-
-
-def test_secure_deployment_rejects_the_local_login_risk_key(monkeypatch) -> None:
-    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
-    monkeypatch.setenv("APDL_ADMIN_COOKIE_SECURE", "true")
-    monkeypatch.delenv("APDL_ADMIN_LOGIN_RISK_HMAC_KEY", raising=False)
-
-    with pytest.raises(ValueError, match="deployment-unique"):
         Settings.from_env()
 
 
@@ -138,6 +205,15 @@ def test_settings_reject_short_login_risk_secret(monkeypatch) -> None:
     monkeypatch.setenv("APDL_ADMIN_LOGIN_RISK_HMAC_KEY", "too-short")
 
     with pytest.raises(ValueError, match="at least 32 bytes"):
+        Settings.from_env()
+
+
+def test_settings_reject_incoherent_invitation_rate_limits(monkeypatch) -> None:
+    monkeypatch.setenv("APDL_SERVICE_API_KEYS", "{}")
+    monkeypatch.setenv("APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT", "1")
+    monkeypatch.setenv("APDL_ADMIN_INVITATION_NETWORK_RATE_LIMIT", "2")
+
+    with pytest.raises(ValueError, match="network and token limits"):
         Settings.from_env()
 
 

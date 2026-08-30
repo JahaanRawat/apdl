@@ -34,6 +34,8 @@ POSTGRES_USER="${POSTGRES_USER:-apdl}"
 POSTGRES_DB="${POSTGRES_DB:-apdl}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_file_value POSTGRES_PASSWORD)}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-apdl_dev}"
+APDL_AGENTS_POSTGRES_PASSWORD="${APDL_AGENTS_POSTGRES_PASSWORD:-$(env_file_value APDL_AGENTS_POSTGRES_PASSWORD)}"
+APDL_AGENTS_POSTGRES_PASSWORD="${APDL_AGENTS_POSTGRES_PASSWORD:-apdl_agents_dev1}"
 MIGRATIONS_DIR="${POSTGRES_MIGRATIONS_DIR:-$ROOT_DIR/pipeline/postgres/migrations}"
 POSTGRES_MIGRATOR_BUILD="${POSTGRES_MIGRATOR_BUILD:-true}"
 POSTGRES_USE_PACKAGED_MIGRATIONS="${POSTGRES_USE_PACKAGED_MIGRATIONS:-false}"
@@ -95,7 +97,6 @@ quiescence_args=(
     --service codegen
     --service clickhouse-writer
     --service admin-api
-    --service admin
     --service gateway
 )
 PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT_DIR/scripts/migration_quiescence.py" \
@@ -120,6 +121,7 @@ docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps \
     -e PGUSER="$POSTGRES_USER" \
     -e PGPASSWORD="$POSTGRES_PASSWORD" \
     -e PGDATABASE="$POSTGRES_DB" \
+    -e APDL_AGENTS_POSTGRES_PASSWORD="$APDL_AGENTS_POSTGRES_PASSWORD" \
     -e POSTGRES_MIGRATIONS_DIR=/migrations \
     "${migration_mount_args[@]}" \
     "$POSTGRES_MIGRATOR_SERVICE"

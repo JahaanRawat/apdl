@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 from typing import Mapping
 from urllib.parse import urlparse
+from uuid import UUID
 
 from app.request_body_limit import DEFAULT_MAX_REQUEST_BODY_BYTES
 
@@ -21,6 +22,12 @@ SERVICE_NAMES = frozenset(
     {"ingestion", "config", "query", "agents", "codegen", "llm-vault"}
 )
 LOCAL_LOGIN_RISK_HMAC_KEY = "local-admin-login-risk-key-change-me"
+SEMVER_PATTERN = re.compile(
+    r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+    r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
+FULL_GIT_REVISION_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _json_object(name: str, raw: str) -> dict[str, str]:
@@ -35,37 +42,6 @@ def _json_object(name: str, raw: str) -> dict[str, str]:
     return value
 
 
-def _json_origins(raw: str) -> frozenset[str]:
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError("APDL_ADMIN_ALLOWED_ORIGINS must be a JSON array") from exc
-    if (
-        not isinstance(value, list)
-        or not value
-        or not all(isinstance(origin, str) for origin in value)
-    ):
-        raise ValueError("APDL_ADMIN_ALLOWED_ORIGINS must be a non-empty JSON array")
-    origins: set[str] = set()
-    for origin in value:
-        parsed = urlparse(origin)
-        if (
-            parsed.scheme not in {"http", "https"}
-            or not parsed.netloc
-            or parsed.path not in {"", "/"}
-        ):
-            raise ValueError(f"Invalid admin origin: {origin}")
-        origins.add(origin.rstrip("/"))
-    return frozenset(origins)
-
-
-def _bool(name: str, default: str) -> bool:
-    value = os.getenv(name, default).lower()
-    if value not in {"true", "false"}:
-        raise ValueError(f"{name} must be true or false")
-    return value == "true"
-
-
 def _positive_int(name: str, default: str) -> int:
     try:
         value = int(os.getenv(name, default))
@@ -74,6 +50,13 @@ def _positive_int(name: str, default: str) -> int:
     if value <= 0:
         raise ValueError(f"{name} must be positive")
     return value
+
+
+def _bool(name: str, default: str) -> bool:
+    value = os.getenv(name, default).lower()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false")
+    return value == "true"
 
 
 def _positive_float(name: str, default: str) -> float:
@@ -86,10 +69,59 @@ def _positive_float(name: str, default: str) -> float:
     return value
 
 
-def _secret(name: str, default: str) -> str:
-    value = os.getenv(name, default)
-    if len(value.encode("utf-8")) < 32:
-        raise ValueError(f"{name} must contain at least 32 bytes")
+def _secret(name: str, default: str | None = None) -> str:
+    value = os.getenv(name) if default is None else os.getenv(name, default)
+    if value is None:
+        raise ValueError(f"{name} is required")
+    if value != value.strip() or len(value.encode("utf-8")) < 32:
+        raise ValueError(f"{name} must contain at least 32 bytes and be normalized")
+    return value
+
+
+def _normalized_required(name: str) -> str:
+    value = os.getenv(name)
+    if value is None or not value:
+        raise ValueError(f"{name} is required")
+    if value != value.strip():
+        raise ValueError(f"{name} must be normalized")
+    return value
+
+
+def _deployment_id() -> str:
+    value = _normalized_required("APDL_DEPLOYMENT_ID")
+    try:
+        parsed = UUID(value)
+    except ValueError as exc:
+        raise ValueError("APDL_DEPLOYMENT_ID must be a canonical UUID") from exc
+    if parsed.int == 0 or str(parsed) != value:
+        raise ValueError("APDL_DEPLOYMENT_ID must be a canonical non-nil UUID")
+    return value
+
+
+def _display_name() -> str:
+    value = _normalized_required("APDL_DISPLAY_NAME")
+    if len(value) > 100 or any(
+        ord(character) < 32 or ord(character) == 127 for character in value
+    ):
+        raise ValueError(
+            "APDL_DISPLAY_NAME must contain 1-100 normalized printable characters"
+        )
+    return value
+
+
+def _backend_version() -> str:
+    value = _normalized_required("APDL_BACKEND_VERSION")
+    if SEMVER_PATTERN.fullmatch(value) is None:
+        raise ValueError("APDL_BACKEND_VERSION must be canonical SemVer")
+    return value
+
+
+def _build_revision() -> str:
+    value = _normalized_required("APDL_BUILD_REVISION")
+    if FULL_GIT_REVISION_PATTERN.fullmatch(value) is None:
+        raise ValueError(
+            "APDL_BUILD_REVISION must be a full lowercase 40-character Git revision"
+        )
     return value
 
 
@@ -135,17 +167,18 @@ def _service_keys() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class Settings:
+    deployment_id: str
+    display_name: str
+    backend_version: str
+    build_revision: str
     postgres_url: str
     service_urls: Mapping[str, str]
     service_api_keys: Mapping[str, str]
     llm_vault_admin_token: str
-    allowed_origins: frozenset[str]
     registration_enabled: bool
     max_accounts: int
     max_projects_per_user: int
-    cookie_secure: bool
     session_ttl_seconds: int
-    session_idle_seconds: int
     login_risk_hmac_key: str
     trusted_proxy_cidrs: tuple[
         ipaddress.IPv4Network | ipaddress.IPv6Network, ...
@@ -153,13 +186,14 @@ class Settings:
     login_rate_window_seconds: int
     login_global_rate_limit: int
     login_network_rate_limit: int
-    login_device_rate_limit: int
+    invitation_global_rate_limit: int
+    invitation_network_rate_limit: int
+    invitation_token_rate_limit: int
     login_progressive_failure_threshold: int
     login_progressive_base_delay_seconds: int
     login_progressive_max_delay_seconds: int
     login_account_notice_threshold: int
     login_account_risk_window_seconds: int
-    login_device_ttl_seconds: int
     max_request_bytes: int
     stream_authority_check_seconds: float
     upstream_read_timeout_seconds: float
@@ -180,35 +214,26 @@ class Settings:
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 raise ValueError(f"Invalid {name} service URL")
         settings = cls(
+            deployment_id=_deployment_id(),
+            display_name=_display_name(),
+            backend_version=_backend_version(),
+            build_revision=_build_revision(),
             postgres_url=os.getenv(
                 "POSTGRES_URL",
                 "postgresql://apdl_runtime:apdl_runtime_dev@localhost:5432/apdl",
             ),
             service_urls=service_urls,
             service_api_keys=_service_keys(),
-            llm_vault_admin_token=_secret(
-                "LLM_VAULT_ADMIN_TOKEN",
-                "local-llm-vault-admin-token-change-me",
-            ),
-            allowed_origins=_json_origins(
-                os.getenv(
-                    "APDL_ADMIN_ALLOWED_ORIGINS",
-                    '["http://localhost:5173","http://localhost:5174"]',
-                )
-            ),
+            llm_vault_admin_token=_secret("LLM_VAULT_ADMIN_TOKEN"),
             registration_enabled=_bool(
-                "APDL_ADMIN_REGISTRATION_ENABLED", "false"
+                "APDL_ADMIN_REGISTRATION_ENABLED", "true"
             ),
             max_accounts=_positive_int("APDL_ADMIN_MAX_ACCOUNTS", "100"),
             max_projects_per_user=_positive_int(
                 "APDL_ADMIN_MAX_PROJECTS_PER_USER", "5"
             ),
-            cookie_secure=_bool("APDL_ADMIN_COOKIE_SECURE", "true"),
             session_ttl_seconds=_positive_int(
                 "APDL_ADMIN_SESSION_TTL_SECONDS", "28800"
-            ),
-            session_idle_seconds=_positive_int(
-                "APDL_ADMIN_SESSION_IDLE_SECONDS", "1800"
             ),
             login_risk_hmac_key=_secret(
                 "APDL_ADMIN_LOGIN_RISK_HMAC_KEY",
@@ -229,8 +254,14 @@ class Settings:
             login_network_rate_limit=_positive_int(
                 "APDL_ADMIN_LOGIN_NETWORK_RATE_LIMIT", "30"
             ),
-            login_device_rate_limit=_positive_int(
-                "APDL_ADMIN_LOGIN_DEVICE_RATE_LIMIT", "20"
+            invitation_global_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT", "600"
+            ),
+            invitation_network_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_NETWORK_RATE_LIMIT", "30"
+            ),
+            invitation_token_rate_limit=_positive_int(
+                "APDL_ADMIN_INVITATION_TOKEN_RATE_LIMIT", "20"
             ),
             login_progressive_failure_threshold=_positive_int(
                 "APDL_ADMIN_LOGIN_PROGRESSIVE_FAILURE_THRESHOLD", "3"
@@ -246,9 +277,6 @@ class Settings:
             ),
             login_account_risk_window_seconds=_positive_int(
                 "APDL_ADMIN_LOGIN_ACCOUNT_RISK_WINDOW_SECONDS", "86400"
-            ),
-            login_device_ttl_seconds=_positive_int(
-                "APDL_ADMIN_LOGIN_DEVICE_TTL_SECONDS", "31536000"
             ),
             max_request_bytes=_positive_int("APDL_ADMIN_MAX_REQUEST_BYTES", "2097152"),
             stream_authority_check_seconds=_positive_float(
@@ -269,21 +297,18 @@ class Settings:
                 "APDL_ADMIN_LOGIN_PROGRESSIVE_MAX_DELAY_SECONDS "
                 "must be at least the base delay"
             )
-        if settings.login_global_rate_limit < max(
-            settings.login_network_rate_limit,
-            settings.login_device_rate_limit,
-        ):
+        if settings.login_global_rate_limit < settings.login_network_rate_limit:
             raise ValueError(
                 "APDL_ADMIN_LOGIN_GLOBAL_RATE_LIMIT must be at least "
-                "the network and device limits"
+                "the network limit"
             )
-        if (
-            settings.cookie_secure
-            and settings.login_risk_hmac_key == LOCAL_LOGIN_RISK_HMAC_KEY
+        if settings.invitation_global_rate_limit < max(
+            settings.invitation_network_rate_limit,
+            settings.invitation_token_rate_limit,
         ):
             raise ValueError(
-                "APDL_ADMIN_LOGIN_RISK_HMAC_KEY must be deployment-unique "
-                "when secure cookies are enabled"
+                "APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT must be at least "
+                "the network and token limits"
             )
         if settings.max_request_bytes > DEFAULT_MAX_REQUEST_BODY_BYTES:
             raise ValueError(

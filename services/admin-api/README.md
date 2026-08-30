@@ -1,27 +1,29 @@
 # APDL Admin API
 
-Backend-for-frontend for the APDL Admin Console. It is the browser security
-boundary: human credentials terminate here, service credentials remain
-server-side except during an explicit reveal-once creation or rotation, and
-every request is authorized against a user, project, and role.
+Backend-for-frontend for the separately distributed APDL Admin Console. It is
+the browser security boundary: human credentials terminate here, service
+credentials remain server-side except during an explicit reveal-once creation
+or rotation, and every request is authorized against a user, project, and role.
 
 ## Security model
 
 - Administrator passwords use Argon2id and are never returned by an API.
-- Login creates a random opaque session. PostgreSQL stores only its SHA-256
-  digest; the browser receives the raw value in an `HttpOnly`,
-  `SameSite=Strict` cookie.
-- Sessions have absolute and idle expiry. Logout and password reprovisioning
+- Login creates a random opaque bearer session. PostgreSQL stores only its
+  SHA-256 digest and binds it to the deployment; the response exposes the raw
+  value once for deployment-scoped `sessionStorage`.
+- Sessions have one fixed absolute expiry. Logout and password reprovisioning
   revoke server-side sessions.
 - Long-lived SSE connections independently re-check the session, current project
-  membership, and exact required role every five seconds. Session loss emits
-  `auth_expired`; project or role loss emits `project_access_revoked`. Registry
-  failures close the stream fail-closed.
+  membership, and exact required role every five seconds. Authority loss emits
+  one strict `console_stream_control@1` event and closes; the next bearer
+  reconnect receives `401` for session loss or `403` for project/role loss.
+  Registry failures also emit the strict control shape and close fail-closed.
 - Five consecutive failures lock an account for 15 minutes by default. Login
   failures use one generic response to avoid user enumeration.
-- Registration accepts only an email and password. New accounts start with no
-  rows in `admin_user_projects`, so registration cannot grant tenant access or
-  service roles.
+- Browser self-registration accepts exactly an email and a 12-1024 character
+  password. It is enabled by default, may be disabled per deployment, and is
+  bounded by the shared authentication rate limits and a hard account cap.
+  New accounts start with no project memberships or service authority.
 - Authenticated users can create a project through `POST /api/projects`. The
   project record and creator membership are committed together, and the
   updated project list is returned to the console. Creator membership includes
@@ -45,26 +47,35 @@ every request is authorized against a user, project, and role.
   records with the human actor and role snapshot. Persistent SDK credentials
   keep `actor_user_id` null so their traffic is not misattributed to the human
   who created them.
-- Unsafe requests require an exact allowed `Origin`, a CSRF cookie, a matching
-  header, and the session-bound CSRF digest.
+- Protected requests require the deployment-bound bearer session only; browser
+  authentication cookies and CSRF state do not exist.
 - `/api/projects/{project_id}/{service}/...` is deny-by-default. The proxy
   verifies project membership and the required canonical APDL role before
   injecting a server-side API key.
-- Caller-supplied API keys, authorization headers, cookies, internal tokens,
-  and project assertions for another tenant are discarded or rejected.
+- Caller-supplied API keys, internal tokens, cookies, and project fields,
+  headers, or query aliases are discarded or rejected. For an explicit route
+  registry only, the BFF injects the required internal-service project body or
+  query value from the canonical resource path. Browser contracts remain
+  path-scoped and never duplicate project identity.
+- Project LLM credential creation, replacement, refresh, and revocation route
+  only through the shared LLM Vault. Agents and Codegen expose read-only,
+  non-secret connection and model projections; their retired mutation paths
+  are not part of the Admin proxy surface.
+- GitHub App browser onboarding and callbacks are not exposed in console API
+  version 1 because the former flow required browser cookies and URL state.
 - Uvicorn preserves the socket peer instead of trusting forwarded headers.
-  The Admin nginx edge clears `Forwarded` and `X-Real-IP`, overwrites
-  `X-Forwarded-For` with its direct peer, and is the only network allowed to
-  supply that single-hop identity to the API.
+  Direct local deployments trust no proxy CIDRs by default. A separately
+  deployed edge must clear untrusted forwarding headers, supply exactly one
+  canonical `X-Forwarded-For` address, and be explicitly allowlisted through
+  `APDL_ADMIN_TRUSTED_PROXY_CIDRS`.
 - Login abuse controls never lock the shared account row. PostgreSQL applies
-  atomic short-window global, network, and opaque-device budgets plus
-  progressive network-and-device delays for each submitted email. A correct
+  atomic short-window global and network budgets plus progressive per-network
+  delays for each submitted email. A correct
   password from an unthrottled source remains valid regardless of the
   account-wide risk count.
-- Raw IP addresses, submitted emails, and device tokens are not persisted in
-  login-risk tables. They are keyed with a deployment-specific HMAC secret.
-  The opaque `apdl_admin_device` cookie is HttpOnly, SameSite Strict, and is
-  used only as a risk signal—not as authentication.
+- Raw IP addresses and submitted emails are not persisted in login-risk tables.
+  They are keyed with a deployment-specific HMAC secret, without a browser
+  risk cookie or other durable browser identifier.
 - Fifty failures for one active account within 24 hours create one durable,
   deduplicated `suspicious_login_activity` notification. The signed-in user
   sees it in the console and can acknowledge it; the alert does not deny
@@ -83,19 +94,41 @@ every request is authorized against a user, project, and role.
 make deps
 make migrate-postgres
 make run-admin-api
-make run-admin
 ```
 
-The normal bootstrap creates no users, projects, or credentials. The root
-`.env.example` enables registration for the loopback-bound local stack. Open
-`http://localhost:5173/register` and create an account; registration starts an
-authenticated session with an empty project list. The user may create a core
-analytics project from the workspace settings, then create a restricted browser
-or confidential SDK credential from the same page. Copy the revealed key before
-closing the dialog; it cannot be recovered. An operator may instead grant
-membership to an operator-provisioned project. Self-created projects expose
-Agents history read-only by default and cannot execute LLM or Codegen work until
-an operator records an explicit project execution authorization.
+The normal bootstrap creates no users, projects, or credentials. The separately
+deployed browser Console can create the first zero-project account through
+`POST /api/console/v1/registrations`; this repository exposes the direct backend
+gateway at `http://localhost:8000` but does not build or serve a frontend. Use
+`make create-admin-user` for recovery and non-browser provisioning, or the
+documented direct
+[credential workflow](../../docs/authentication.md#operator-provision-credentials)
+for SDK-only development. Self-created projects expose Agents history read-only
+by default and cannot execute LLM or Codegen work until an operator records an
+explicit project execution authorization.
+
+## Console compatibility manifest
+
+`GET /api/console/v1/manifest` is the public, unauthenticated compatibility
+check for a separately deployed Console. It returns only the strict
+`console_manifest@1` deployment identity and build metadata, always with
+`Cache-Control: no-store`. The exact route does not redirect, and the Admin API
+does not expose a trailing-slash alias.
+
+`make setup` generates one deployment UUID in the ignored root `.env` and
+preserves it across upgrades. It refreshes the backend version from
+`release-manifest.json` and the build revision from the checkout's committed
+`HEAD` before host or Compose development starts. Independent deployments must
+not copy `APDL_DEPLOYMENT_ID`. Published Admin API images bake the canonical
+release version and full Git revision; operators still provide a durable
+deployment ID and display name at runtime.
+
+`GET /api/console/v1/capabilities` returns the strict
+`console_capabilities@1` feature document. `registration_enabled` tells a
+Console whether to offer account creation without extending the immutable
+manifest shape. A successful `POST /api/console/v1/registrations` returns the
+same deployment-bound `console_session@1` bearer shape as login and creates no
+project membership implicitly.
 
 Managed credential routes are:
 
@@ -108,20 +141,21 @@ GET  /api/projects/{project_id}/credentials/{credential_id}/audit
 ```
 
 Create accepts only `credential_kind` and an explicit canonical `roles` list.
-Rotate and revoke accept only an empty JSON object. Unsafe operations require
-the normal exact-origin and CSRF checks.
+Rotate and revoke accept only an empty JSON object and the canonical bearer
+session.
 
 `make create-admin-user` remains available for bootstrap, recovery, and
 non-browser provisioning. It prompts for the password without placing it in
 shell history; `--password-stdin` supports secret-manager pipelines. Granting
-`agents:run`, `agents:manage`, or `agents:approve` on a self-created project
-requires a deliberate, durable override:
+`agents:approve` or any effect authority on a self-created project requires a
+deliberate, durable override; owner-controlled setup can grant analysis-only
+`agents:run` and `agents:manage` without one:
 
 ```bash
 make create-admin-user ARGS="\
   --email operator@example.com \
   --project-id acme \
-  --roles agents:manage \
+  --roles agents:approve \
   --allow-self-registered-execution \
   --override-actor operator@example.com \
   --override-reason 'Approved production automation boundary'"
@@ -168,29 +202,33 @@ Example degraded response:
 
 | Variable | Purpose |
 |---|---|
+| `APDL_DEPLOYMENT_ID` | Required canonical non-nil UUID that permanently identifies one backend installation; local setup generates and preserves it |
+| `APDL_DISPLAY_NAME` | Required 1-100 character human label shown by the Console connection gate |
+| `APDL_BACKEND_VERSION` | Canonical SemVer sourced from `release-manifest.json` for local runs and baked into release images |
+| `APDL_BUILD_REVISION` | Full lowercase 40-character Git revision sourced from committed `HEAD` for local runs and baked into release images |
 | `POSTGRES_URL` | Admin users, memberships, and sessions through the non-owner runtime role |
-| `APDL_SERVICE_API_KEYS` | Canonical JSON object of project-scoped service keys; server-only |
+| `APDL_SERVICE_API_KEYS` | Optional Admin API-only JSON object of persistent project-scoped proxy keys; server-only, and not consumed by Agents |
+| `APDL_ADMIN_REGISTRATION_ENABLED` | Whether public Console registration is available; default `true` for loopback-first local bootstrap. Disable it unless intentional when exposing the gateway beyond loopback. |
+| `APDL_ADMIN_MAX_ACCOUNTS` | Hard deployment account cap enforced under a PostgreSQL advisory transaction lock; default 100 |
 | `INGESTION_SERVICE_URL` | Private ingestion URL |
 | `CONFIG_SERVICE_URL` | Private config URL |
 | `QUERY_SERVICE_URL` | Private query URL |
 | `AGENTS_SERVICE_URL` | Private agents URL |
 | `CODEGEN_SERVICE_URL` | Private codegen URL |
-| `APDL_ADMIN_ALLOWED_ORIGINS` | JSON array of exact console origins; local defaults cover ports 5173 and 5174, and wildcards are rejected |
-| `APDL_ADMIN_COOKIE_SECURE` | Must be `true` in HTTPS deployments |
 | `APDL_ADMIN_TRUSTED_PROXY_CIDRS` | JSON array of exact proxy networks allowed to supply one canonical `X-Forwarded-For` address; default is empty |
 | `APDL_ADMIN_LOGIN_RISK_HMAC_KEY` | Deployment-unique secret, at least 32 bytes, used to pseudonymize login-risk identities |
-| `APDL_ADMIN_LOGIN_RATE_WINDOW_SECONDS` | Global/network/device request-budget window; default 60 seconds |
+| `APDL_ADMIN_LOGIN_RATE_WINDOW_SECONDS` | Login and invitation request-budget window; default 60 seconds |
 | `APDL_ADMIN_LOGIN_GLOBAL_RATE_LIMIT` | Global login attempts per window; default 600 |
 | `APDL_ADMIN_LOGIN_NETWORK_RATE_LIMIT` | Login attempts per canonical client network address per window; default 30 |
-| `APDL_ADMIN_LOGIN_DEVICE_RATE_LIMIT` | Login attempts per opaque device cookie per window; default 20 |
-| `APDL_ADMIN_LOGIN_PROGRESSIVE_FAILURE_THRESHOLD` | Per-email network/device failure count that starts progressive delay; default 3 |
+| `APDL_ADMIN_INVITATION_GLOBAL_RATE_LIMIT` | Global invitation requests per window, isolated from login; default 600 |
+| `APDL_ADMIN_INVITATION_NETWORK_RATE_LIMIT` | Invitation requests per canonical client network address per window; default 30 |
+| `APDL_ADMIN_INVITATION_TOKEN_RATE_LIMIT` | Requests per invitation token digest per window; default 20 |
+| `APDL_ADMIN_LOGIN_PROGRESSIVE_FAILURE_THRESHOLD` | Per-email network failure count that starts progressive delay; default 3 |
 | `APDL_ADMIN_LOGIN_PROGRESSIVE_BASE_DELAY_SECONDS` | Initial progressive delay; default 1 second |
 | `APDL_ADMIN_LOGIN_PROGRESSIVE_MAX_DELAY_SECONDS` | Progressive delay cap; default 60 seconds |
 | `APDL_ADMIN_LOGIN_ACCOUNT_NOTICE_THRESHOLD` | Account-wide failure count that creates a notification; default 50 |
 | `APDL_ADMIN_LOGIN_ACCOUNT_RISK_WINDOW_SECONDS` | Account notification window; default 24 hours |
-| `APDL_ADMIN_LOGIN_DEVICE_TTL_SECONDS` | Opaque risk-cookie lifetime; default one year |
 | `APDL_ADMIN_SESSION_TTL_SECONDS` | Absolute session lifetime; default 8 hours |
-| `APDL_ADMIN_SESSION_IDLE_SECONDS` | Idle expiry; default 30 minutes |
 | `APDL_ADMIN_STREAM_AUTH_CHECK_SECONDS` | Current session, membership, and role revalidation interval; default 5 seconds |
 | `APDL_ADMIN_UPSTREAM_READ_TIMEOUT_SECONDS` | Upstream per-read timeout; default 60 seconds, comfortably above Config heartbeats |
 | `APDL_ADMIN_READINESS_PROBE_TIMEOUT_SECONDS` | Per-dependency readiness probe timeout; default 2 seconds |
@@ -200,4 +238,5 @@ Example degraded response:
 ```bash
 make lint-admin-api
 make test-admin-api
+make test-script-contracts
 ```

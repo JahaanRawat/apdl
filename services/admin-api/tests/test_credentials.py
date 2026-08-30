@@ -9,7 +9,6 @@ from fastapi.testclient import TestClient
 
 from app import credentials
 from app.auth import AdminSession, require_session
-from app.security import token_hash
 from conftest import make_settings
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=timezone.utc)
@@ -116,11 +115,12 @@ class CredentialPool:
         yield self.connection
 
 
-def managed_session(csrf: str) -> AdminSession:
+def managed_session() -> AdminSession:
     return AdminSession(
         session_id="10000000-0000-4000-8000-000000000001",
         token_hash="a" * 64,
-        csrf_hash=token_hash(csrf),
+        deployment_id="30000000-0000-4000-8000-000000000003",
+        expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
         user_id="20000000-0000-4000-8000-000000000002",
         email="admin@example.com",
         projects={"demo": frozenset({"credentials:manage"})},
@@ -139,20 +139,14 @@ def make_client(
     return TestClient(app)
 
 
-def authorize(client: TestClient, csrf: str) -> None:
-    client.cookies.set("apdl_admin_csrf", csrf, path="/")
-
-
 def test_create_browser_credential_reveals_once_and_persists_only_hash() -> None:
-    csrf = "credential-csrf"
     connection = CredentialConnection(
         {"credentials:manage", "events:write", "config:read"}
     )
-    with make_client(connection, managed_session(csrf)) as client:
-        authorize(client, csrf)
+    with make_client(connection, managed_session()) as client:
         response = client.post(
             "/api/projects/demo/credentials",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "credential_kind": "browser",
                 "roles": ["events:write", "config:read"],
@@ -181,20 +175,18 @@ def test_create_browser_credential_reveals_once_and_persists_only_hash() -> None
 
 
 def test_create_enforces_strict_kind_scope_and_current_membership() -> None:
-    csrf = "credential-csrf"
     connection = CredentialConnection(
         {"credentials:manage", "events:write", "config:read"}
     )
-    with make_client(connection, managed_session(csrf)) as client:
-        authorize(client, csrf)
+    with make_client(connection, managed_session()) as client:
         invalid_browser = client.post(
             "/api/projects/demo/credentials",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"credential_kind": "browser", "roles": ["events:write"]},
         )
         overbroad = client.post(
             "/api/projects/demo/credentials",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "credential_kind": "confidential",
                 "roles": ["events:write", "query:read"],
@@ -209,13 +201,11 @@ def test_create_enforces_strict_kind_scope_and_current_membership() -> None:
 
 
 def test_stale_session_role_cannot_manage_credentials_after_database_revocation() -> None:
-    csrf = "credential-csrf"
     connection = CredentialConnection({"events:write", "config:read"})
-    with make_client(connection, managed_session(csrf)) as client:
-        authorize(client, csrf)
+    with make_client(connection, managed_session()) as client:
         response = client.post(
             "/api/projects/demo/credentials",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={
                 "credential_kind": "browser",
                 "roles": ["events:write", "config:read"],
@@ -229,7 +219,6 @@ def test_stale_session_role_cannot_manage_credentials_after_database_revocation(
 
 
 def test_rotation_creates_one_successor_and_leaves_predecessor_active() -> None:
-    csrf = "credential-csrf"
     connection = CredentialConnection(
         {
             "credentials:manage",
@@ -250,16 +239,15 @@ def test_rotation_creates_one_successor_and_leaves_predecessor_active() -> None:
         "revoked_at": None,
         "rotated_from_credential_id": None,
     }
-    with make_client(connection, managed_session(csrf)) as client:
-        authorize(client, csrf)
+    with make_client(connection, managed_session()) as client:
         unknown_field = client.post(
             f"/api/projects/demo/credentials/{predecessor_id}/rotate",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={"roles": ["events:write"]},
         )
         response = client.post(
             f"/api/projects/demo/credentials/{predecessor_id}/rotate",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={},
         )
 
@@ -277,7 +265,6 @@ def test_rotation_creates_one_successor_and_leaves_predecessor_active() -> None:
 
 
 def test_revoke_and_audit_are_project_scoped_and_do_not_reveal_secret() -> None:
-    csrf = "credential-csrf"
     connection = CredentialConnection({"credentials:manage"})
     credential_id = "managed-" + "2" * 32
     connection.credentials[credential_id] = {
@@ -291,11 +278,10 @@ def test_revoke_and_audit_are_project_scoped_and_do_not_reveal_secret() -> None:
         "revoked_at": None,
         "rotated_from_credential_id": None,
     }
-    with make_client(connection, managed_session(csrf)) as client:
-        authorize(client, csrf)
+    with make_client(connection, managed_session()) as client:
         revoked = client.post(
             f"/api/projects/demo/credentials/{credential_id}/revoke",
-            headers={"Origin": "http://admin.test", "X-CSRF-Token": csrf},
+            headers={"Origin": "http://admin.test"},
             json={},
         )
         audit = client.get(

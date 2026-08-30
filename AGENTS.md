@@ -75,7 +75,7 @@ make run-query      # Query Service on localhost:8082
 make run-agents     # Agents Service on localhost:8083
 make run-codegen    # Codegen Service on localhost:8084
 make run-pipeline   # ClickHouse Writer, Redis Streams consumer
-make run-admin      # Admin Console (Vite dev server) on localhost:5173
+make run-admin-api  # Admin API on localhost:8085
 ```
 
 ### Per-service test/lint
@@ -89,7 +89,7 @@ make run-admin      # Admin Console (Vite dev server) on localhost:5173
 | Query | `make test-query` | `make lint-query` |
 | Agents | `make test-agents` | `make lint-agents` |
 | Codegen | `make test-codegen` | `make lint-codegen` |
-| Admin Console | `make test-admin` | `make lint-admin` |
+| Admin API | `make test-admin-api` | `make lint-admin-api` |
 
 ### Running a single test
 

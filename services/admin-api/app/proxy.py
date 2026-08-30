@@ -16,10 +16,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from starlette.responses import Response, StreamingResponse
 
-from app.auth import AdminSession, require_csrf, require_session
+from app.auth import AdminSession, require_session
 from app.config import PROJECT_ID_PATTERN, SERVICE_NAMES, Settings
+from app.error_boundary import (
+    REQUEST_ID_HEADER,
+    error_definition,
+    request_id_for_request,
+)
 from app.request_body_limit import RequestBodyTooLarge
-from app.security import require_allowed_origin
 
 router = APIRouter(tags=["service proxy"])
 logger = logging.getLogger(__name__)
@@ -36,6 +40,51 @@ _FORWARDED_RESPONSE_HEADERS = frozenset(
         "retry-after",
         "x-cache",
     }
+)
+_MAX_RETRY_AFTER_LENGTH = 128
+_CONSOLE_CONFIG_STREAM = ("config", "GET", "/v1/stream")
+_NORMALIZED_PROJECT_SCOPE_ALIASES = frozenset(
+    {
+        "project",
+        "projectid",
+        "xapdlproject",
+        "xapdlprojectid",
+        "xproject",
+        "xprojectid",
+    }
+)
+_MAX_LAST_EVENT_ID_LENGTH = 256
+
+_UPSTREAM_PROJECT_BODY_ROUTES = frozenset(
+    {
+        ("config", "POST", "/v1/evaluate"),
+        ("query", "POST", "/v1/query/events/count"),
+        ("query", "POST", "/v1/query/events/timeseries"),
+        ("query", "POST", "/v1/query/events/breakdown"),
+        ("query", "POST", "/v1/query/events/names"),
+        ("query", "POST", "/v1/query/funnel"),
+        ("query", "POST", "/v1/query/retention"),
+        ("query", "POST", "/v1/query/cohort"),
+        ("query", "POST", "/v1/query/guardrails/evaluate"),
+        ("agents", "POST", "/v1/agents/trigger"),
+        ("agents", "POST", "/v1/agents/custom/test"),
+        ("agents", "PUT", "/v1/agents/setup"),
+        ("agents", "POST", "/v1/agents/setup/deactivate"),
+        ("codegen", "POST", "/v1/changesets"),
+        ("llm-vault", "POST", "/v1/llm-connections"),
+    }
+)
+_UPSTREAM_PROJECT_BODY_PATTERNS = (
+    (
+        "llm-vault",
+        "PUT",
+        re.compile(r"^/v1/llm-connections/[0-9a-fA-F-]{36}$"),
+    ),
+    (
+        "llm-vault",
+        "POST",
+        re.compile(r"^/v1/llm-connections/[0-9a-fA-F-]{36}/(?:refresh|revoke)$"),
+    ),
 )
 
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
@@ -59,6 +108,54 @@ StreamAuthorityState = Literal[
     "session_expired",
     "project_access_revoked",
 ]
+
+
+def _safe_retry_after(response: httpx.Response) -> dict[str, str] | None:
+    value = response.headers.get("retry-after")
+    if (
+        response.status_code not in {
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        }
+        or value is None
+        or not value
+        or len(value) > _MAX_RETRY_AFTER_LENGTH
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        return None
+    return {"Retry-After": value}
+
+
+def _upstream_response_exception(response: httpx.Response) -> HTTPException:
+    upstream_status = response.status_code
+    if upstream_status in {status.HTTP_408_REQUEST_TIMEOUT, status.HTTP_504_GATEWAY_TIMEOUT}:
+        public_status = status.HTTP_504_GATEWAY_TIMEOUT
+    elif upstream_status >= 500 or upstream_status in {
+        status.HTTP_401_UNAUTHORIZED,
+        status.HTTP_403_FORBIDDEN,
+    }:
+        public_status = status.HTTP_502_BAD_GATEWAY
+    elif 400 <= upstream_status < 500:
+        public_status = upstream_status
+    else:
+        public_status = status.HTTP_502_BAD_GATEWAY
+    return HTTPException(
+        status_code=public_status,
+        detail=error_definition(public_status).message,
+        headers=_safe_retry_after(response),
+    )
+
+
+def _upstream_transport_exception(exception: httpx.RequestError) -> HTTPException:
+    public_status = (
+        status.HTTP_504_GATEWAY_TIMEOUT
+        if isinstance(exception, httpx.TimeoutException)
+        else status.HTTP_502_BAD_GATEWAY
+    )
+    return HTTPException(
+        status_code=public_status,
+        detail=error_definition(public_status).message,
+    )
 
 
 async def _service_credential(
@@ -205,9 +302,9 @@ async def _stream_authority_state(
                     JOIN admin_users AS u ON u.user_id = s.user_id
                     WHERE s.session_id = $1
                       AND s.user_id = $2
+                      AND s.deployment_id = $3
                       AND s.revoked_at IS NULL
                       AND s.expires_at > NOW()
-                      AND s.last_seen_at > NOW() - ($3 * INTERVAL '1 second')
                       AND u.active
                 ) AS session_active,
                 EXISTS (
@@ -223,7 +320,7 @@ async def _stream_authority_state(
             """,
             uuid.UUID(session.session_id),
             uuid.UUID(session.user_id),
-            settings.session_idle_seconds,
+            uuid.UUID(str(settings.deployment_id)),
             project_id,
             required_role,
         )
@@ -237,21 +334,24 @@ async def _stream_authority_state(
 def _stream_terminal_event(
     state: StreamAuthorityState | Literal["authorization_unavailable"],
     project_id: str,
-    required_role: str | None,
+    required_role: str,
 ) -> bytes:
-    if state == "session_expired":
-        return b"event: auth_expired\ndata: {}\n\n"
-    if state == "project_access_revoked":
-        payload: dict[str, str] = {"project_id": project_id}
-        if required_role is not None:
-            payload["required_role"] = required_role
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        return b"event: project_access_revoked\ndata: " + data + b"\n\n"
+    messages = {
+        "session_expired": "The console session expired.",
+        "project_access_revoked": "Project access was revoked.",
+        "authorization_unavailable": "Stream authorization is temporarily unavailable.",
+    }
     data = json.dumps(
-        {"reason": "authorization_unavailable", "retryable": True},
+        {
+            "schema_version": "console_stream_control@1",
+            "code": state,
+            "message": messages[state],
+            "project_id": project_id,
+            "required_role": required_role,
+        },
         separators=(",", ":"),
     ).encode("utf-8")
-    return b"event: stream_error\ndata: " + data + b"\n\n"
+    return b"event: console_stream_control\ndata: " + data + b"\n\n"
 
 
 async def _authorized_sse(
@@ -265,6 +365,7 @@ async def _authorized_sse(
 ):
     chunk_task: asyncio.Task | None = None
     authority_timer: asyncio.Task | None = None
+    iterator = None
     try:
         try:
             authority = await _stream_authority_state(
@@ -280,12 +381,14 @@ async def _authorized_sse(
                 session.user_id,
                 project_id,
             )
-            yield _stream_terminal_event(
-                "authorization_unavailable", project_id, required_role
-            )
+            if required_role is not None:
+                yield _stream_terminal_event(
+                    "authorization_unavailable", project_id, required_role
+                )
             return
         if authority != "authorized":
-            yield _stream_terminal_event(authority, project_id, required_role)
+            if required_role is not None:
+                yield _stream_terminal_event(authority, project_id, required_role)
             return
 
         iterator = response.aiter_raw()
@@ -315,12 +418,16 @@ async def _authorized_sse(
                         session.user_id,
                         project_id,
                     )
-                    yield _stream_terminal_event(
-                        "authorization_unavailable", project_id, required_role
-                    )
+                    if required_role is not None:
+                        yield _stream_terminal_event(
+                            "authorization_unavailable", project_id, required_role
+                        )
                     return
                 if authority != "authorized":
-                    yield _stream_terminal_event(authority, project_id, required_role)
+                    if required_role is not None:
+                        yield _stream_terminal_event(
+                            authority, project_id, required_role
+                        )
                     return
                 authority_timer = asyncio.create_task(
                     asyncio.sleep(settings.stream_authority_check_seconds)
@@ -343,8 +450,12 @@ async def _authorized_sse(
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        await response.aclose()
-        await _remove_ephemeral_credential(request, credential_id)
+        try:
+            if iterator is not None and hasattr(iterator, "aclose"):
+                await iterator.aclose()
+        finally:
+            await response.aclose()
+            await _remove_ephemeral_credential(request, credential_id)
 
 
 def required_role(service: str, method: str, path: str) -> str | None:
@@ -405,17 +516,6 @@ def required_role(service: str, method: str, path: str) -> str | None:
                 or re.fullmatch(provider_path + r"/models", path) is not None
             ):
                 return _LLM_CONNECTION_READER
-            if method == "PUT" and re.fullmatch(provider_path, path) is not None:
-                return _LLM_CONNECTION_MANAGER
-            if (
-                method == "POST"
-                and re.fullmatch(
-                    provider_path + r"/(?:refresh-models|revoke)",
-                    path,
-                )
-                is not None
-            ):
-                return _LLM_CONNECTION_MANAGER
             return ""
         if method == "GET" and path == "/v1/agents/capabilities/execution":
             return "agents:run"
@@ -441,17 +541,6 @@ def required_role(service: str, method: str, path: str) -> str | None:
                 or re.fullmatch(provider_path + r"/models", path) is not None
             ):
                 return "agents:read"
-            if method == "PUT" and re.fullmatch(provider_path, path) is not None:
-                return _LLM_CONNECTION_MANAGER
-            if (
-                method == "POST"
-                and re.fullmatch(
-                    provider_path + r"/(?:refresh-models|revoke)",
-                    path,
-                )
-                is not None
-            ):
-                return _LLM_CONNECTION_MANAGER
             return ""
         if method == "GET" and (
             path.startswith("/v1/changesets") or path.startswith("/v1/connections/")
@@ -509,11 +598,133 @@ def _assert_tenant_value(value: object, project_id: str) -> None:
         )
 
 
+def _is_project_scope_alias(name: str) -> bool:
+    normalized = name.lower().replace("-", "").replace("_", "")
+    return normalized in _NORMALIZED_PROJECT_SCOPE_ALIASES
+
+
+def _requires_upstream_project_query(
+    service: str,
+    method: str,
+    path: str,
+) -> bool:
+    if service == "agents":
+        if path in {
+            "/v1/agents/capabilities/execution",
+            "/v1/agents/runs",
+            "/v1/agents/definitions",
+        }:
+            return method == "GET"
+        if path == "/v1/agents/setup":
+            return method == "GET"
+        if path == "/v1/agents/llm-connections":
+            return method == "GET"
+        if path.startswith("/v1/agents/llm-connections/") and path.endswith(
+            "/models"
+        ):
+            return method == "GET"
+        if path == "/v1/agents/custom" or path.startswith(
+            "/v1/agents/custom/"
+        ):
+            return method in {"GET", "POST", "PUT", "DELETE"}
+    if service == "codegen":
+        if path == "/v1/changesets":
+            return method == "GET"
+        if path == "/v1/llm-connections":
+            return method == "GET"
+        if path.startswith("/v1/llm-connections/") and path.endswith("/models"):
+            return method == "GET"
+    if service == "llm-vault":
+        return method == "GET" and (
+            path == "/v1/llm-connections"
+            or re.fullmatch(r"/v1/llm-connections/[0-9a-fA-F-]{36}", path)
+            is not None
+        )
+    return False
+
+
+def _requires_upstream_project_body(
+    service: str,
+    method: str,
+    path: str,
+) -> bool:
+    route = (service, method, path)
+    if route in _UPSTREAM_PROJECT_BODY_ROUTES:
+        return True
+    return any(
+        service == registered_service
+        and method == registered_method
+        and pattern.fullmatch(path) is not None
+        for registered_service, registered_method, pattern in (
+            _UPSTREAM_PROJECT_BODY_PATTERNS
+        )
+    )
+
+
+def _upstream_query_items(
+    request: Request,
+    service: str,
+    path: str,
+    project_id: str,
+) -> list[tuple[str, str]]:
+    for name, _value in request.query_params.multi_items():
+        if _is_project_scope_alias(name):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Project scope belongs only in the API path",
+            )
+    items = list(request.query_params.multi_items())
+    if _requires_upstream_project_query(service, request.method, path):
+        items.append(("project_id", project_id))
+    return items
+
+
+def _canonical_last_event_id(request: Request) -> str | None:
+    values = request.headers.getlist("last-event-id")
+    if not values:
+        return None
+    value = values[0]
+    if (
+        len(values) != 1
+        or not value
+        or len(value) > _MAX_LAST_EVENT_ID_LENGTH
+        or "\x00" in value
+        or "\r" in value
+        or "\n" in value
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Last-Event-ID",
+        )
+    return value
+
+
+def _require_path_only_stream_scope(request: Request) -> str | None:
+    for name, _value in request.query_params.multi_items():
+        if _is_project_scope_alias(name):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Stream project scope must come from the path",
+            )
+    if request.query_params:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The console stream does not accept query parameters",
+        )
+    if any(_is_project_scope_alias(name) for name in request.headers):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Stream project scope must come from the path",
+        )
+    return _canonical_last_event_id(request)
+
+
 async def _request_body(
     request: Request,
     settings: Settings,
     project_id: str,
     *,
+    inject_project: bool = False,
     require_json: bool = False,
 ) -> bytes:
     content_length = request.headers.get("content-length")
@@ -534,7 +745,7 @@ async def _request_body(
     media_type = (
         request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     )
-    if raw_body and require_json and media_type != _JSON_MEDIA_TYPE:
+    if (raw_body or inject_project) and require_json and media_type != _JSON_MEDIA_TYPE:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail="Upstream request bodies must use application/json",
@@ -542,10 +753,41 @@ async def _request_body(
     if raw_body and media_type == _JSON_MEDIA_TYPE:
         try:
             payload = json.loads(raw_body)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            if inject_project:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Upstream request body must be a JSON object",
+                ) from exc
             return raw_body
         if isinstance(payload, Mapping):
-            _assert_tenant_value(payload.get("project_id"), project_id)
+            if any(_is_project_scope_alias(str(name)) for name in payload):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Project scope belongs only in the API path",
+                )
+            if inject_project:
+                canonical_payload = {**payload, "project_id": project_id}
+                encoded = json.dumps(
+                    canonical_payload,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                if len(encoded) > settings.max_request_bytes:
+                    raise RequestBodyTooLarge
+                return encoded
+        elif inject_project:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Upstream request body must be a JSON object",
+            )
+    elif inject_project:
+        encoded = json.dumps(
+            {"project_id": project_id},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > settings.max_request_bytes:
+            raise RequestBodyTooLarge
+        return encoded
     return raw_body
 
 
@@ -565,10 +807,16 @@ async def _require_codegen_scope(
     match = _CODEGEN_CHANGESET_PATH.fullmatch(path)
     if match is None:
         return
-    response = await request.app.state.http_client.get(
-        f"{settings.service_urls['codegen'].rstrip('/')}/v1/changesets/{match.group(1)}",
-        headers={"X-API-Key": api_key},
-    )
+    try:
+        response = await request.app.state.http_client.get(
+            f"{settings.service_urls['codegen'].rstrip('/')}/v1/changesets/{match.group(1)}",
+            headers={
+                "X-API-Key": api_key,
+                REQUEST_ID_HEADER: request_id_for_request(request),
+            },
+        )
+    except httpx.RequestError as exc:
+        raise _upstream_transport_exception(exc) from exc
     if response.status_code in {status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND}:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Changeset not found"
@@ -604,13 +852,27 @@ async def proxy_service(
     settings: Settings = request.app.state.settings
     if PROJECT_ID_PATTERN.fullmatch(project_id) is None or service not in SERVICE_NAMES:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    upstream_path = f"/{path}"
+    is_console_config_stream = (
+        service,
+        request.method,
+        upstream_path,
+    ) == _CONSOLE_CONFIG_STREAM
     roles = session.projects.get(project_id)
     if roles is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Project not found"
+            status_code=(
+                status.HTTP_403_FORBIDDEN
+                if is_console_config_stream
+                else status.HTTP_404_NOT_FOUND
+            ),
+            detail=(
+                "Project access denied"
+                if is_console_config_stream
+                else "Project not found"
+            ),
         )
 
-    upstream_path = f"/{path}"
     role = required_role(service, request.method, upstream_path)
     if role == "":
         raise HTTPException(
@@ -646,22 +908,41 @@ async def proxy_service(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role"
         )
 
-    if request.method not in _SAFE_METHODS:
-        require_allowed_origin(request, settings)
-        require_csrf(request, session)
-
     if "api_key" in request.query_params:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Credentials are not accepted from the browser",
         )
-    for value in request.query_params.getlist("project_id"):
-        _assert_tenant_value(value, project_id)
+    last_event_id = (
+        _require_path_only_stream_scope(request)
+        if is_console_config_stream
+        else None
+    )
+    if is_console_config_stream:
+        upstream_query: list[tuple[str, str]] = []
+    else:
+        if any(_is_project_scope_alias(name) for name in request.headers):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Project scope belongs only in the API path",
+            )
+        upstream_query = _upstream_query_items(
+            request,
+            service,
+            upstream_path,
+            project_id,
+        )
+    inject_project = _requires_upstream_project_body(
+        service,
+        request.method,
+        upstream_path,
+    )
     body = await _request_body(
         request,
         settings,
         project_id,
-        require_json=service in {"codegen", "llm-vault"},
+        inject_project=inject_project,
+        require_json=inject_project or service in {"codegen", "llm-vault"},
     )
 
     ephemeral_credential_id: str | None = None
@@ -711,18 +992,21 @@ async def proxy_service(
         for name, value in request.headers.items()
         if name.lower() in _FORWARDED_REQUEST_HEADERS
     }
+    if last_event_id is not None:
+        headers["Last-Event-ID"] = last_event_id
     if service == "llm-vault":
         headers["Authorization"] = f"Bearer {api_key}"
         headers["X-APDL-Project-ID"] = project_id
         headers["X-APDL-Actor-User-ID"] = session.user_id
     else:
         headers["X-API-Key"] = api_key
+    headers[REQUEST_ID_HEADER] = request_id_for_request(request)
 
     upstream_url = f"{settings.service_urls[service].rstrip('/')}{upstream_path}"
     upstream_request = request.app.state.http_client.build_request(
         request.method,
         upstream_url,
-        params=request.query_params.multi_items(),
+        params=upstream_query,
         headers=headers,
         content=body,
     )
@@ -743,11 +1027,10 @@ async def proxy_service(
             upstream_request, stream=True
         )
     except httpx.RequestError as exc:
+        failure = _upstream_transport_exception(exc)
         await _remove_ephemeral_credential(request, ephemeral_credential_id)
-        await _finish_mutation_audit(request, audit_id, status.HTTP_502_BAD_GATEWAY)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY, detail="Upstream unavailable"
-        ) from exc
+        await _finish_mutation_audit(request, audit_id, failure.status_code)
+        raise failure from exc
 
     await _finish_mutation_audit(request, audit_id, response.status_code)
 
@@ -756,7 +1039,32 @@ async def proxy_service(
         for name, value in response.headers.items()
         if name.lower() in _FORWARDED_RESPONSE_HEADERS
     }
-    if response.headers.get("content-type", "").startswith("text/event-stream"):
+    is_event_stream = response.headers.get("content-type", "").startswith(
+        "text/event-stream"
+    )
+    if is_console_config_stream and (
+        response.status_code != status.HTTP_200_OK or not is_event_stream
+    ):
+        await response.aclose()
+        await _remove_ephemeral_credential(request, ephemeral_credential_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Invalid upstream stream response",
+        )
+    if is_event_stream:
+        if response.status_code >= 400:
+            failure = _upstream_response_exception(response)
+            await response.aclose()
+            await _remove_ephemeral_credential(request, ephemeral_credential_id)
+            raise failure
+        if is_console_config_stream:
+            response_headers.update(
+                {
+                    "cache-control": "no-cache, no-transform",
+                    "content-type": "text/event-stream",
+                    "x-accel-buffering": "no",
+                }
+            )
         return StreamingResponse(
             _authorized_sse(
                 response,
@@ -772,9 +1080,15 @@ async def proxy_service(
         )
     try:
         content = await response.aread()
+    except httpx.RequestError as exc:
+        failure = _upstream_transport_exception(exc)
+        await _finish_mutation_audit(request, audit_id, failure.status_code)
+        raise failure from exc
     finally:
         await response.aclose()
         await _remove_ephemeral_credential(request, ephemeral_credential_id)
+    if response.status_code >= 400:
+        raise _upstream_response_exception(response)
     return Response(
         content=content, status_code=response.status_code, headers=response_headers
     )

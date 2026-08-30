@@ -5,15 +5,14 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
-from fastapi import Request, Response
+from fastapi import Request
 
 from app.login_security import (
-    DEVICE_COOKIE,
     build_login_source,
+    preflight_invitation_rate_limit,
     preflight_login,
     progressive_delay_seconds,
     resolve_client_ip,
-    set_device_cookie,
 )
 
 
@@ -24,15 +23,15 @@ def _settings(**overrides):
             ipaddress.ip_network("172.16.0.0/12"),
         ),
         "login_risk_hmac_key": "test-login-risk-key-with-at-least-32-bytes",
-        "cookie_secure": True,
-        "login_device_ttl_seconds": 31_536_000,
         "login_progressive_failure_threshold": 3,
         "login_progressive_base_delay_seconds": 1,
         "login_progressive_max_delay_seconds": 60,
         "login_rate_window_seconds": 60,
         "login_global_rate_limit": 600,
         "login_network_rate_limit": 30,
-        "login_device_rate_limit": 20,
+        "invitation_global_rate_limit": 600,
+        "invitation_network_rate_limit": 30,
+        "invitation_token_rate_limit": 20,
         "login_account_risk_window_seconds": 86_400,
     }
     values.update(overrides)
@@ -43,18 +42,10 @@ def _request(
     *,
     peer: str,
     forwarded_for: str | None = None,
-    device_token: str | None = None,
 ) -> Request:
     headers: list[tuple[bytes, bytes]] = []
     if forwarded_for is not None:
         headers.append((b"x-forwarded-for", forwarded_for.encode("ascii")))
-    if device_token is not None:
-        headers.append(
-            (
-                b"cookie",
-                f"{DEVICE_COOKIE}={device_token}".encode("ascii"),
-            )
-        )
     return Request(
         {
             "type": "http",
@@ -95,31 +86,19 @@ def test_spoofed_or_ambiguous_forwarding_is_ignored(
     assert resolve_client_ip(request, _settings()) == expected
 
 
-def test_login_source_uses_a_persistent_httponly_device_cookie() -> None:
+def test_login_source_is_stable_without_creating_browser_state() -> None:
     source = build_login_source(
         _request(peer="198.51.100.5"),
         "admin@example.com",
         _settings(),
     )
-    response = Response()
-
-    set_device_cookie(response, source, _settings())
-
-    cookie = response.headers["set-cookie"]
-    assert cookie.startswith(f"{DEVICE_COOKIE}=")
-    assert "HttpOnly" in cookie
-    assert "SameSite=strict" in cookie
-    assert "Secure" in cookie
-    assert "Path=/api/auth" in cookie
-
     repeated = build_login_source(
-        _request(peer="198.51.100.5", device_token=source.device_token),
+        _request(peer="198.51.100.5"),
         "admin@example.com",
         _settings(),
     )
     assert repeated.network_hash == source.network_hash
-    assert repeated.device_hash == source.device_hash
-    assert not repeated.device_cookie_required
+    assert repeated.email_hash == source.email_hash
 
 
 @pytest.mark.parametrize(
@@ -162,11 +141,10 @@ class _PreflightConnection:
 
 
 @pytest.mark.asyncio
-async def test_preflight_combines_global_network_device_and_source_limits() -> None:
+async def test_preflight_combines_global_network_and_source_limits() -> None:
     settings = _settings(
         login_global_rate_limit=100,
-        login_network_rate_limit=100,
-        login_device_rate_limit=1,
+        login_network_rate_limit=1,
     )
     now = datetime.now(timezone.utc)
     source = build_login_source(
@@ -188,3 +166,30 @@ async def test_preflight_combines_global_network_device_and_source_limits() -> N
     assert rate_cleanup_args == (now - timedelta(seconds=120),)
     assert "INTERVAL" not in source_cleanup_query
     assert source_cleanup_args == (now - timedelta(seconds=172_800),)
+
+
+@pytest.mark.asyncio
+async def test_invitation_preflight_uses_isolated_rate_buckets() -> None:
+    settings = _settings(
+        invitation_global_rate_limit=100,
+        invitation_network_rate_limit=100,
+        invitation_token_rate_limit=1,
+    )
+    now = datetime.now(timezone.utc)
+    source = build_login_source(
+        _request(peer="198.51.100.5"),
+        "invitation:" + "a" * 64,
+        settings,
+    )
+    conn = _PreflightConnection()
+
+    assert await preflight_invitation_rate_limit(conn, source, settings, now) == 0
+    assert await preflight_invitation_rate_limit(conn, source, settings, now) == 60
+
+    scopes = {scope for scope, _ in conn.bucket_attempts}
+    assert scopes == {
+        "invitation_global",
+        "invitation_network",
+        "invitation_token",
+    }
+    assert scopes.isdisjoint({"global", "network"})

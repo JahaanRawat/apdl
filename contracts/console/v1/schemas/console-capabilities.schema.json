@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apdl.dev/contracts/console/v1/schemas/console-capabilities.schema.json",
+  "title": "APDL Console deployment capabilities",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "registration_enabled"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "console_capabilities@1"
+    },
+    "registration_enabled": {
+      "type": "boolean"
+    }
+  }
+}

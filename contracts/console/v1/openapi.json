@@ -1,0 +1,383 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "APDL Console API",
+    "version": "1.0.0",
+    "description": "The strict browser-facing compatibility, capability, registration, session, identity, and stream-control contract exposed by an APDL OSS backend."
+  },
+  "paths": {
+    "/api/console/v1/capabilities": {
+      "get": {
+        "operationId": "getConsoleCapabilities",
+        "summary": "Inspect deployment features before authentication",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The public feature availability for this deployment",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/console-capabilities.schema.json"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      }
+    },
+    "/api/console/v1/manifest": {
+      "get": {
+        "operationId": "getConsoleManifest",
+        "summary": "Inspect backend compatibility before sending credentials",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The deployment identity and complete console API version",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/console-manifest.schema.json"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      }
+    },
+    "/api/console/v1/registrations": {
+      "post": {
+        "operationId": "createConsoleRegistration",
+        "summary": "Create a zero-project human account and bearer session",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "schemas/console-registration-request.schema.json"
+              }
+            }
+          }
+        },
+        "responses": {
+          "400": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "201": {
+            "description": "A fixed-expiration bearer session for the new account",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/console-session.schema.json"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "409": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "422": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "429": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      }
+    },
+    "/api/console/v1/sessions": {
+      "post": {
+        "operationId": "createConsoleSession",
+        "summary": "Exchange human credentials for one opaque bearer session",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "schemas/console-login-request.schema.json"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A fixed-expiration bearer session",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/console-session.schema.json"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "422": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "429": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      }
+    },
+    "/api/console/v1/session": {
+      "get": {
+        "operationId": "getConsoleSession",
+        "summary": "Return the identity bound to the active bearer session",
+        "security": [
+          {
+            "consoleBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The authenticated human identity and project memberships",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/console-identity.schema.json"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteConsoleSession",
+        "summary": "Revoke the active bearer session",
+        "security": [
+          {
+            "consoleBearer": []
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The session was revoked",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      }
+    },
+    "/api/projects/{project_id}/config/v1/stream": {
+      "get": {
+        "operationId": "streamProjectConfig",
+        "summary": "Stream project configuration through the authenticated Admin BFF",
+        "security": [
+          {
+            "consoleBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/common.schema.json#/$defs/projectId"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A UTF-8 Server-Sent Events stream. BFF terminal control events use the declared strict data schema.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-cache, no-transform"
+                }
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "x-apdl-control-data-schema": {
+                  "$ref": "schemas/console-stream-control.schema.json"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "403": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "500": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "502": {
+            "$ref": "#/components/responses/ConsoleError"
+          },
+          "504": {
+            "$ref": "#/components/responses/ConsoleError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ConsoleCapabilities": {
+        "$ref": "schemas/console-capabilities.schema.json"
+      },
+      "ConsoleManifest": {
+        "$ref": "schemas/console-manifest.schema.json"
+      },
+      "ConsoleLoginRequest": {
+        "$ref": "schemas/console-login-request.schema.json"
+      },
+      "ConsoleRegistrationRequest": {
+        "$ref": "schemas/console-registration-request.schema.json"
+      },
+      "ConsoleSession": {
+        "$ref": "schemas/console-session.schema.json"
+      },
+      "ConsoleIdentity": {
+        "$ref": "schemas/console-identity.schema.json"
+      },
+      "ConsoleError": {
+        "$ref": "schemas/error.schema.json"
+      },
+      "ConsoleStreamControl": {
+        "$ref": "schemas/console-stream-control.schema.json"
+      }
+    },
+    "securitySchemes": {
+      "consoleBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque"
+      }
+    },
+    "headers": {
+      "RequestId": {
+        "description": "Canonical request correlation UUID selected by the Admin API boundary",
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "responses": {
+      "ConsoleError": {
+        "description": "A safe console-facing error",
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "Cache-Control": {
+            "schema": {
+              "type": "string",
+              "const": "no-store"
+            }
+          },
+          "Retry-After": {
+            "description": "Optional bounded retry guidance for rate-limited or unavailable requests",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "schemas/error.schema.json"
+            }
+          }
+        }
+      }
+    }
+  }
+}

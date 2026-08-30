@@ -32,8 +32,8 @@ info() { echo -e "${BLUE}==>${NC} $*"; }
 PACKAGES=(
   "script-contracts|.||python3 -m unittest discover -s scripts/tests -p 'test_*.py'"
   "js-sdk|sdk/javascript|npm run lint|npm run test:coverage"
-  "admin|services/admin|npm run lint|npm test"
   "admin-api|services/admin-api|.venv/bin/ruff check app/ scripts/ tests/|.venv/bin/python -m pytest -q"
+  "gateway|services/gateway|.venv/bin/ruff check app/ tests/|.venv/bin/python -m pytest -q"
   "python-sdk|sdk/python|.venv/bin/ruff check apdl/ tests/|.venv/bin/python -m pytest -q --cov=apdl --cov-report=term-missing --cov-fail-under=88"
   "ingestion|services/ingestion|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"
   "config|services/config|.venv/bin/ruff check app/|.venv/bin/python -m pytest -q"

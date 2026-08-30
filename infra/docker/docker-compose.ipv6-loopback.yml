@@ -1,0 +1,7 @@
+services:
+  gateway:
+    ports:
+      - target: 8000
+        published: "${APDL_GATEWAY_HOST_PORT:-8000}"
+        host_ip: "::1"
+        protocol: tcp

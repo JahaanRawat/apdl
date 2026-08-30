@@ -14,10 +14,10 @@ SDK bootstrap config from a Redis cache, and pushes live updates over SSE.
   carry an `X-Cache: HIT|MISS` header)
 - Delivers cache invalidation and `flag_update` / `experiment_update` SSE events
   in monotonic project order from a durable PostgreSQL outbox. Streams send a
-  `heartbeat` every 15s, use bounded admission/queues, and reconnect to a full
-  snapshot after overflow, send timeout, or their hard lifetime. Established
-  streams revalidate credential activity, project ownership, expiry, and
-  `config:read` every five seconds; revoked credentials close fail-closed.
+  comment-only heartbeat every 15s, use bounded admission/queues, and reconnect
+  to a full snapshot after overflow, send timeout, or their hard lifetime.
+  Established streams revalidate credential activity, project ownership,
+  expiry, and `config:read` every five seconds; revoked credentials close fail-closed.
   Malformed rows are quarantined immediately; dependency failures retry at
   most eight times before quarantine. Terminal rows retain their payload,
   failure class/code, attempt count, bounded error evidence, and timestamps in
@@ -38,14 +38,18 @@ SDK bootstrap config from a Redis cache, and pushes live updates over SSE.
 
 ## API
 
-**Auth:** send a registered credential as `x-api-key`. PostgreSQL supplies the
-verified project and roles; a `project_id` query/body field can only assert that
-same tenant. Admin routes require `config:write`, SDK reads require
-`config:read`, and `/v1/evaluate` requires `config:evaluate`. Browser keys use
-`client_{project_id}_{token}` and are restricted to exactly `events:write` plus
-`config:read`; confidential service keys use `proj_{project_id}_{secret}`. All
-credentials, including SSE credentials, are accepted only from `x-api-key` and
-never from query parameters. See
+**Auth:** callers send exactly one authority header: a registered `x-api-key`,
+or a private `x-apdl-internal-capability` minted just in time for one live
+Agents execution. PostgreSQL supplies the verified project and roles; a
+`project_id` query/body field can only assert that same tenant. Internal
+capabilities are audience-scoped, short-lived, hash-only at rest, and every use
+revalidates the owning execution lease. Mutation capabilities are also bound to
+one exact request and consumed atomically. Admin routes require `config:write`,
+SDK reads require `config:read`, and `/v1/evaluate` requires
+`config:evaluate`. Browser keys use `client_{project_id}_{token}` and are
+restricted to exactly `events:write` plus `config:read`; confidential service
+keys use `proj_{project_id}_{secret}`. SSE accepts only `x-api-key`, and no
+credential is accepted from query parameters. See
 [authentication](../../docs/authentication.md).
 
 ### SDK-facing
@@ -53,7 +57,7 @@ never from query parameters. See
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v1/flags` | Bootstrap flag config (only `client`/`both` evaluation modes), Redis-cached |
-| `GET /v1/stream` | SSE: versioned `config` synchronization barrier, then ordered `flag_update`/`experiment_update`/`heartbeat` events; quota exhaustion returns 429 |
+| `GET /v1/stream` | SSE: versioned `config` synchronization barrier, then ordered `flag_update`/`experiment_update` events with comment heartbeats; quota exhaustion returns 429 |
 | `GET /v1/auth/me` | Return the verified credential ID, project, and sorted roles |
 | `POST /v1/evaluate` | Trusted server-side gate evaluation with optional exposure logging |
 | `GET /v1/experiments/{key}/analysis` | Tenant-scoped authoritative experiment metadata delegated by Query (`query:read`) |
@@ -103,7 +107,10 @@ when retrying that exact exposure.
 | `DELETE /experiments/{key}?version=N` | Hard-delete a draft, or preserve a launched experiment as an immutable archive; always archive its backing flag |
 | `GET /experiments/{key}/audit` | This experiment key's retained lifecycle history with keyset pagination (`?limit`, `?before_id`); response declares `history_scope: experiment_key` |
 
-Create a flag:
+Set `APDL_API_KEY` to an operator-provisioned confidential credential
+with `config:write` as described in
+[Operator provision credentials](../../docs/authentication.md#operator-provision-credentials),
+then:
 
 ```bash
 curl -X POST http://localhost:8081/v1/admin/flags \
@@ -212,7 +219,7 @@ database upgrades are unsupported.
 | `SSE_MAX_CONNECTIONS_PER_PROJECT` | `100` | Per-project SSE connection ceiling |
 | `SSE_MAX_CONNECTIONS_PER_CREDENTIAL` | `10` | Per-credential SSE connection ceiling |
 | `SSE_MAX_CONNECTIONS_PER_IP` | `20` | Per-client-IP SSE connection ceiling |
-| `SSE_PING_INTERVAL_SECONDS` | `15` | Typed heartbeat interval; must be finite and positive |
+| `SSE_PING_INTERVAL_SECONDS` | `15` | Comment heartbeat interval; must be finite and positive |
 | `SSE_CREDENTIAL_CHECK_INTERVAL_SECONDS` | `5` | Established-stream credential and `config:read` revalidation interval |
 | `SSE_SEND_TIMEOUT_SECONDS` | `10` | Maximum blocked ASGI send duration before transport closure |
 | `SSE_MAX_LIFETIME_SECONDS` | `300` | Hard connection lifetime before a snapshot-required reconnect |

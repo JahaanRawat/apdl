@@ -15,11 +15,11 @@ from app.llm.provider_catalog import (
     catalog_model,
     provider_runtime_endpoint,
 )
-from app.store.llm_credentials import REMOTE_PROVIDERS, RemoteProvider
-
-
-DEFAULT_PROJECT_DAILY_COST_LIMIT_USD_MICROS = 20_000_000
-DEFAULT_RUN_COST_LIMIT_USD_MICROS = 2_000_000
+from app.store.llm_credentials import (
+    REMOTE_PROVIDERS,
+    ProjectCredentialStore,
+    RemoteProvider,
+)
 
 SetupState = Literal["inactive", "active"]
 SetupTier = Literal["fast", "reasoning"]
@@ -190,14 +190,19 @@ class AgentsSetupStore:
     ) -> ManagementAuthority:
         if actor_user_id is None:
             return "none"
-        suffix = "FOR UPDATE OF project, account" if lock else ""
+        if lock:
+            authority = await conn.fetchval(
+                "SELECT apdl_project_management_authority($1, $2)",
+                project_id,
+                actor_user_id,
+            )
+            return cast(ManagementAuthority, str(authority))
         row = await conn.fetchrow(
-            f"""
+            """
             SELECT project.owner_user_id, account.active
             FROM admin_projects AS project
             JOIN admin_users AS account ON account.user_id = $2
             WHERE project.project_id = $1
-            {suffix}
             """,
             project_id,
             actor_user_id,
@@ -206,13 +211,11 @@ class AgentsSetupStore:
             return "none"
         if row["owner_user_id"] == actor_user_id:
             return "owner"
-        role_lock = "FOR SHARE" if lock else ""
         roles = await conn.fetchval(
-            f"""
+            """
             SELECT roles
             FROM admin_user_projects
             WHERE project_id = $1 AND user_id = $2
-            {role_lock}
             """,
             project_id,
             actor_user_id,
@@ -584,7 +587,6 @@ class AgentsSetupStore:
               AND connection.inventory_version = $4
               AND connection.state = 'active'
               AND model.model_id = $5
-            FOR SHARE OF connection, model, credential, consumer
             """,
             project_id,
             selection.provider,
@@ -660,6 +662,19 @@ class AgentsSetupStore:
                     raise AgentsSetupConflictError(
                         "The Agents setup version changed"
                     )
+                # The runtime role may inspect vault authority but must never
+                # mutate it. PostgreSQL row-locking clauses require UPDATE
+                # privilege, so serialize with the same advisory pair locks
+                # used by the vault and lock only runtime-owned projections
+                # in the selection query below.
+                for provider in sorted(
+                    {selection.provider for _, selection in selections}
+                ):
+                    await ProjectCredentialStore.lock_pair(
+                        conn,
+                        project_id,
+                        provider,
+                    )
                 previous_assignments = await self._assignment_rows(
                     conn, project_id
                 )
@@ -679,13 +694,15 @@ class AgentsSetupStore:
                     raise AgentsSetupValidationError(
                         "Selected models must share one reviewed data residency"
                     )
+                project_budget = int(
+                    policy["project_daily_cost_limit_usd_micros"]
+                )
+                run_budget = int(policy["run_cost_limit_usd_micros"])
                 previous_snapshot = _snapshot(
                     state=str(policy["state"]),
                     version=int(policy["version"]),
-                    project_budget=int(
-                        policy["project_daily_cost_limit_usd_micros"]
-                    ),
-                    run_budget=int(policy["run_cost_limit_usd_micros"]),
+                    project_budget=project_budget,
+                    run_budget=run_budget,
                     assignments=previous_assignments,
                 )
                 await conn.execute(
@@ -751,9 +768,7 @@ class AgentsSetupStore:
                         version = $2,
                         required_data_residency = $3,
                         allow_cross_vendor_retry = FALSE,
-                        project_daily_cost_limit_usd_micros = $4,
-                        run_cost_limit_usd_micros = $5,
-                        activated_by_actor_user_id = $6,
+                        activated_by_actor_user_id = $4,
                         activated_at = NOW(),
                         deactivated_by_actor_user_id = NULL,
                         deactivation_reason = NULL,
@@ -764,8 +779,6 @@ class AgentsSetupStore:
                     project_id,
                     next_version,
                     next(iter(residencies)),
-                    DEFAULT_PROJECT_DAILY_COST_LIMIT_USD_MICROS,
-                    DEFAULT_RUN_COST_LIMIT_USD_MICROS,
                     actor_user_id,
                 )
                 if (
@@ -773,67 +786,16 @@ class AgentsSetupStore:
                     and int(policy["version"]) == 0
                     and str(policy["state"]) == "inactive"
                 ):
-                    owner_membership = await conn.fetchrow(
-                        """
-                        SELECT membership.roles AS previous_roles,
-                               account.email,
-                               apdl_canonical_admin_roles(
-                                   membership.roles || ARRAY[
-                                       'agents:run', 'agents:manage'
-                                   ]::TEXT[]
-                               ) AS next_roles
-                        FROM admin_user_projects AS membership
-                        JOIN admin_users AS account
-                          ON account.user_id = membership.user_id
-                        WHERE membership.project_id = $1
-                          AND membership.user_id = $2
-                        FOR UPDATE OF membership
-                        """,
+                    await conn.fetchval(
+                        "SELECT apdl_agents_grant_owner_execution_roles($1, $2)",
                         project_id,
                         actor_user_id,
                     )
-                    if owner_membership is None:
-                        raise AgentsSetupAuthorizationError(
-                            "The current project owner membership is unavailable"
-                        )
-                    previous_roles = list(
-                        owner_membership["previous_roles"]
-                    )
-                    next_roles = list(owner_membership["next_roles"])
-                    if previous_roles != next_roles:
-                        await conn.execute(
-                            """
-                            UPDATE admin_user_projects
-                            SET roles = $3
-                            WHERE project_id = $1 AND user_id = $2
-                            """,
-                            project_id,
-                            actor_user_id,
-                            next_roles,
-                        )
-                        await conn.execute(
-                            """
-                            INSERT INTO admin_project_membership_audit (
-                                project_id, action, actor_user_id,
-                                subject_user_id, subject_email,
-                                previous_roles, new_roles
-                            ) VALUES (
-                                $1, 'roles_replace', $2, $2, $3, $4, $5
-                            )
-                            """,
-                            project_id,
-                            actor_user_id,
-                            str(owner_membership["email"]),
-                            previous_roles,
-                            next_roles,
-                        )
                 next_snapshot = _snapshot(
                     state="active",
                     version=next_version,
-                    project_budget=(
-                        DEFAULT_PROJECT_DAILY_COST_LIMIT_USD_MICROS
-                    ),
-                    run_budget=DEFAULT_RUN_COST_LIMIT_USD_MICROS,
+                    project_budget=project_budget,
+                    run_budget=run_budget,
                     assignments=selections,
                 )
                 action = (
