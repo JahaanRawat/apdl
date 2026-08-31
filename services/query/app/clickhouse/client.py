@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -15,7 +14,6 @@ from asynch.errors import ErrorCode, ServerException
 
 logger = logging.getLogger(__name__)
 
-_PYFORMAT_PARAM_RE = re.compile(r"%\(([A-Za-z_][A-Za-z0-9_]*)\)s")
 _BUDGET_ERROR_CODES = frozenset(
     {
         ErrorCode.CANNOT_ALLOCATE_MEMORY,
@@ -49,15 +47,6 @@ def _bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     if value < minimum or value > maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
-
-
-def normalize_query_params(query: str) -> str:
-    """Convert pyformat placeholders to the format expected by asynch.
-
-    The sync clickhouse-driver supports ``%(name)s`` placeholders, but asynch
-    substitutes parameters via ``str.format`` and expects ``{name}``.
-    """
-    return _PYFORMAT_PARAM_RE.sub(r"{\1}", query)
 
 
 class ClickHouseClient:
@@ -200,7 +189,7 @@ class ClickHouseClient:
         cursor.set_settings(dict(self._settings))
         try:
             await asyncio.wait_for(
-                cursor.execute(normalize_query_params(query), params),
+                cursor.execute(query, params),
                 timeout=self._timeout_seconds,
             )
         except TimeoutError as exc:
@@ -217,8 +206,7 @@ class ClickHouseClient:
     async def execute(self, query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Execute a query and return all rows as a list of dicts.
 
-        Query templates may use clickhouse-driver's ``%(name)s`` placeholder
-        style; this wrapper normalizes them for asynch before execution.
+        Query templates must use asynch's ``%(name)s`` pyformat placeholders.
         """
         query_params = params or {}
         async with self._project_slot(query_params):

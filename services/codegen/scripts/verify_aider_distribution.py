@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that the pinned Aider wheel is not either affected development build."""
+"""Verify the exact Aider wheel whose security paths were reviewed."""
 
 from __future__ import annotations
 
@@ -9,7 +9,13 @@ from typing import Iterable
 
 AIDER_DISTRIBUTION = "aider-chat"
 AIDER_VERSION = "0.86.2"
-FORBIDDEN_DEVELOPMENT_FILES = frozenset({"auth.py", "api_docs.py"})
+REVIEWED_SECURITY_PATHS = frozenset(
+    {
+        PurePosixPath("aider/coders/architect_coder.py"),
+        PurePosixPath("aider/repomap.py"),
+        PurePosixPath("aider/scrape.py"),
+    }
+)
 
 
 class AiderDistributionError(RuntimeError):
@@ -17,25 +23,21 @@ class AiderDistributionError(RuntimeError):
 
 
 def verify_file_manifest(version: str, files: Iterable[str]) -> None:
-    """Validate the exact version and absence of advisory-only development files."""
+    """Validate the exact version and presence of every reviewed security path."""
     if version != AIDER_VERSION:
         raise AiderDistributionError(
             f"expected {AIDER_DISTRIBUTION} {AIDER_VERSION}, found {version}"
         )
 
     paths = tuple(PurePosixPath(value) for value in files)
-    if PurePosixPath("aider/__init__.py") not in paths:
-        raise AiderDistributionError("installed Aider package manifest is incomplete")
-
-    forbidden = sorted(
-        path.as_posix()
-        for path in paths
-        if path.name in FORBIDDEN_DEVELOPMENT_FILES
-    )
-    if forbidden:
+    required = REVIEWED_SECURITY_PATHS | {
+        PurePosixPath("aider/__init__.py")
+    }
+    missing = sorted(path.as_posix() for path in required.difference(paths))
+    if missing:
         raise AiderDistributionError(
-            "installed Aider contains advisory development files: "
-            + ", ".join(forbidden)
+            "installed Aider package manifest is missing reviewed paths: "
+            + ", ".join(missing)
         )
 
 

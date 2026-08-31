@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
+from asynch import paramstyle
 from asynch.errors import ErrorCode, ServerException
 from asynch.proto.connection import Connection
 
@@ -11,7 +12,6 @@ from app.clickhouse.client import (
     ClickHouseClient,
     QueryBudgetExceeded,
     QueryConcurrencyExceeded,
-    normalize_query_params,
 )
 
 
@@ -53,24 +53,8 @@ class FakeConnection:
         self.closed = True
 
 
-def test_normalize_query_params_uses_asynch_placeholder_style():
-    query = """
-SELECT *
-FROM events
-WHERE project_id = %(project_id)s
-  AND event_date BETWEEN %(start_date)s AND %(end_date)s
-  AND event_name IN (%(ev_0)s, %(ev_1)s)
-"""
-
-    normalized = normalize_query_params(query)
-
-    assert "%(project_id)s" not in normalized
-    assert "project_id = {project_id}" in normalized
-    assert "event_name IN ({ev_0}, {ev_1})" in normalized
-
-
-def test_normalized_query_can_be_substituted_by_asynch():
-    query = normalize_query_params(
+def test_asynch_substitutes_canonical_pyformat_placeholders():
+    query = (
         "SELECT * FROM events WHERE project_id = %(project_id)s "
         "AND event_name = %(event_name)s"
     )
@@ -83,8 +67,17 @@ def test_normalized_query_can_be_substituted_by_asynch():
         },
     )
 
+    assert paramstyle == "pyformat"
     assert "project_id = 'demo'" in compiled
     assert "event_name = '$click'" in compiled
+
+
+def test_asynch_does_not_substitute_noncanonical_brace_placeholders():
+    query = "SELECT * FROM events WHERE project_id = {project_id}"
+
+    compiled = Connection.substitute_params(query, {"project_id": "demo"})
+
+    assert compiled == query
 
 
 @pytest.mark.asyncio
@@ -109,6 +102,10 @@ async def test_execute_applies_clickhouse_resource_settings():
     assert cursor.settings["max_threads"] <= 8
     assert cursor.settings["read_overflow_mode"] == "throw"
     assert cursor.settings["result_overflow_mode"] == "throw"
+    assert cursor.query == (
+        "SELECT %(value)s AS value WHERE project_id = %(project_id)s"
+    )
+    assert cursor.params == {"value": 1, "project_id": "demo"}
 
 
 @pytest.mark.asyncio
