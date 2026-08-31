@@ -33,7 +33,7 @@ aider_distribution = _load_script(
 )
 
 POLICY_PATH = CODEGEN_DIR / "dependency-audit-suppressions.json"
-POLICY_DATE = date(2026, 7, 23)
+POLICY_DATE = date(2026, 8, 30)
 EXPECTED_LOCKED_VERSIONS = {
     "aider-chat": "0.86.2",
     "aiohttp": "3.14.3",
@@ -212,12 +212,12 @@ def test_suppressions_fail_at_expiry_and_after_review(tmp_path: Path) -> None:
     with pytest.raises(audit_gate.AuditGateError, match="expired"):
         audit_gate.load_suppressions(
             POLICY_PATH,
-            today=date(2026, 10, 21),
+            today=date(2026, 11, 28),
         )
     with pytest.raises(audit_gate.AuditGateError, match="review is overdue"):
         audit_gate.load_suppressions(
             POLICY_PATH,
-            today=date(2026, 8, 23),
+            today=date(2026, 9, 30),
         )
 
 
@@ -264,19 +264,20 @@ def test_audit_report_rejects_unknown_external_schema_fields() -> None:
         audit_gate.validate_audit_report(report, _suppressions())
 
 
-def test_aider_suppressions_are_bound_to_absent_dev_build_files() -> None:
-    files = ("aider/__init__.py", "aider/main.py")
+def test_aider_suppressions_are_bound_to_reviewed_worker_paths() -> None:
+    files = (
+        "aider/__init__.py",
+        "aider/coders/architect_coder.py",
+        "aider/repomap.py",
+        "aider/scrape.py",
+    )
     aider_distribution.verify_file_manifest("0.86.2", files)
 
-    for vulnerable_file in ("aider/auth.py", "aider/api_docs.py"):
-        with pytest.raises(
-            aider_distribution.AiderDistributionError,
-            match="development files",
-        ):
-            aider_distribution.verify_file_manifest(
-                "0.86.2",
-                (*files, vulnerable_file),
-            )
+    with pytest.raises(
+        aider_distribution.AiderDistributionError,
+        match="missing reviewed paths",
+    ):
+        aider_distribution.verify_file_manifest("0.86.2", files[:-1])
     with pytest.raises(
         aider_distribution.AiderDistributionError,
         match="expected aider-chat",
@@ -294,6 +295,30 @@ def test_aider_suppressions_are_bound_to_absent_dev_build_files() -> None:
         "PYSEC-2026-2336",
     }
     assert all(entry["version"] == "0.86.2" for entry in aider_entries)
+
+    launcher = (
+        CODEGEN_DIR / "app" / "editor" / "aider_launcher.py"
+    ).read_text(encoding="utf-8")
+    editor = (
+        CODEGEN_DIR / "app" / "editor" / "aider_editor.py"
+    ).read_text(encoding="utf-8")
+    catalog = (
+        CODEGEN_DIR / "app" / "llm" / "provider_catalog.py"
+    ).read_text(encoding="utf-8")
+    for flag in ("--disable-playwright", "--no-detect-urls"):
+        assert f'"{flag}"' in launcher
+        assert f'"{flag}"' in editor
+    for flag in (
+        "--architect",
+        "--auto-accept-architect",
+        "--edit-format",
+        "--editor-edit-format",
+        "--editor-model",
+    ):
+        assert f'"{flag}"' not in editor
+    # Aider 0.86.2 assigns architect mode by default only to o1-preview.
+    # Tenant execution accepts models only from APDL's reviewed catalog.
+    assert '"o1-preview"' not in catalog
 
 
 def test_diskcache_suppression_requires_hardened_h12_evidence() -> None:

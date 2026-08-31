@@ -531,10 +531,10 @@ make lint-codegen        # ruff
 
 The release builds the Codegen worker from `Dockerfile.worker` and gates its
 universal Python 3.12 hash lock in CI. Aider remains pinned at 0.86.2; its two
-development-build-only advisories and diskcache's unreachable pickle-cache
-advisory have exact, expiring, machine-validated suppressions. Every advisory
-with an available fix is blocked, as is any new, stale, mismatched, or expired
-suppression.
+no-fix architect-mode and URL-scraper advisories and diskcache's unreachable
+pickle-cache advisory have exact, expiring, machine-validated suppressions.
+Every advisory with an available fix is blocked, as is any new, stale,
+mismatched, or expired suppression.
 
 ### Dependency suppression ownership and renewal
 
@@ -542,10 +542,28 @@ The three approved worker suppressions have one accountable owner and two hard
 UTC boundaries:
 
 - **Owner:** `@Sukhikhk`
-- **Review-fail boundary:** `review_by = 2026-08-22`; no unreviewed run is
+- **Review-fail boundary:** `review_by = 2026-09-29`; no unreviewed run is
   accepted after that date.
-- **Expiry:** `expires_on = 2026-10-21`; the gate rejects the suppressions on
+- **Expiry:** `expires_on = 2026-11-28`; the gate rejects the suppressions on
   that date.
+
+The 2026-08-30 UTC review confirmed that GitHub still lists no patched release
+for [Aider architect mode](https://github.com/advisories/GHSA-7w7m-v5vp-w699),
+[Aider URL scraping](https://github.com/advisories/GHSA-hchg-qm84-cj9p), or
+[DiskCache pickle deserialization](https://github.com/advisories/GHSA-w8v5-vhqr-4h9v),
+and PyPI still publishes [Aider 0.86.2](https://pypi.org/project/aider-chat/)
+and [DiskCache 5.6.3](https://pypi.org/project/diskcache/) as the latest releases.
+The associated upstream Aider issues
+[#5058](https://github.com/Aider-AI/aider/issues/5058) and
+[#5075](https://github.com/Aider-AI/aider/issues/5075), its scraper fix
+[#5137](https://github.com/Aider-AI/aider/pull/5137), and DiskCache issue
+[#357](https://github.com/grantjenks/python-diskcache/issues/357) plus fix
+[#364](https://github.com/grantjenks/python-diskcache/pull/364) remained open.
+APDL's reviewed model catalog excludes Aider's `o1-preview` architect default
+and the worker supplies no architect or editor-model flags. It also disables URL
+detection and Playwright, blocks private and metadata egress, and forces
+repository-map tokens to zero so DiskCache never reads repository-controlled
+cache state.
 
 There is no JSON-only renewal path. Prefer upgrading or removing the dependency
 and deleting the suppression. If a no-fix suppression must be renewed, make one

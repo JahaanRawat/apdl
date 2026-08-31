@@ -89,7 +89,7 @@ class Finding:
     fix_versions: tuple[str, ...]
 
 
-_AIDER_EVIDENCE = frozenset(
+_AIDER_ARCHITECT_EVIDENCE = frozenset(
     {
         (
             "services/codegen/scripts/verify_aider_distribution.py"
@@ -97,7 +97,11 @@ _AIDER_EVIDENCE = frozenset(
         ),
         (
             "services/codegen/tests/test_worker_dependency_audit.py"
-            "::test_aider_suppressions_are_bound_to_absent_dev_build_files"
+            "::test_aider_suppressions_are_bound_to_reviewed_worker_paths"
+        ),
+        (
+            "services/codegen/app/llm/provider_catalog.py"
+            "::runtime_model"
         ),
         (
             "services/codegen/tests/test_container_reproducibility.py"
@@ -105,14 +109,34 @@ _AIDER_EVIDENCE = frozenset(
         ),
     }
 )
+_AIDER_SCRAPER_EVIDENCE = frozenset(
+    {
+        (
+            "services/codegen/scripts/verify_aider_distribution.py"
+            "::verify_installed_distribution"
+        ),
+        (
+            "services/codegen/tests/test_worker_dependency_audit.py"
+            "::test_aider_suppressions_are_bound_to_reviewed_worker_paths"
+        ),
+        (
+            "services/codegen/app/editor/aider_launcher.py"
+            "::validate_invocation"
+        ),
+        (
+            "services/codegen/tests/test_egress.py"
+            "::test_worker_probe_accepts_only_unreachable_or_timeout"
+        ),
+    }
+)
 _SUPPRESSION_OWNER = "@Sukhikhk"
-_SUPPRESSION_REVIEW_BY = date(2026, 8, 22)
-_SUPPRESSION_EXPIRES_ON = date(2026, 10, 21)
+_SUPPRESSION_REVIEW_BY = date(2026, 9, 29)
+_SUPPRESSION_EXPIRES_ON = date(2026, 11, 28)
 APPROVED_SUPPRESSIONS: Mapping[str, ApprovedSuppression] = {
     "PYSEC-2026-2335": ApprovedSuppression(
         package="aider-chat",
         version="0.86.2",
-        evidence=_AIDER_EVIDENCE,
+        evidence=_AIDER_ARCHITECT_EVIDENCE,
         owner=_SUPPRESSION_OWNER,
         review_by=_SUPPRESSION_REVIEW_BY,
         expires_on=_SUPPRESSION_EXPIRES_ON,
@@ -120,7 +144,7 @@ APPROVED_SUPPRESSIONS: Mapping[str, ApprovedSuppression] = {
     "PYSEC-2026-2336": ApprovedSuppression(
         package="aider-chat",
         version="0.86.2",
-        evidence=_AIDER_EVIDENCE,
+        evidence=_AIDER_SCRAPER_EVIDENCE,
         owner=_SUPPRESSION_OWNER,
         review_by=_SUPPRESSION_REVIEW_BY,
         expires_on=_SUPPRESSION_EXPIRES_ON,
