@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import copy
 import json
+from typing import Any
 
 import pytest
 
+from app.framework import tool_loop
+from app.framework.context import AgentContext
+from app.graphs import experiment_design
 from app.graphs.experiment_design import ExperimentDesignAgent
+from app.llm.router import ToolCompletion
 from app.llm.prompts.experiment import EXPERIMENT_DESIGN_SYSTEM
 
 
@@ -65,6 +70,166 @@ def test_parse_preserves_descriptions_and_strict_flag_projection() -> None:
         {"key": "treatment", "weight": 1},
     ]
     assert parsed[0]["flag_config"]["fallthrough"]["rollout"]["bucket_by"] == "user_id"
+
+
+@pytest.mark.parametrize("duration", [1, 90])
+def test_duration_contract_accepts_inclusive_boundaries(duration: int) -> None:
+    design = _design()
+    design["estimated_duration_days"] = duration
+
+    parsed = ExperimentDesignAgent().parse(json.dumps([design]))
+
+    assert parsed[0]["estimated_duration_days"] == duration
+
+
+@pytest.mark.parametrize("duration", [0, 91, 14.5, 14.0, True, "14"])
+def test_duration_contract_rejects_out_of_range_or_non_integer_values(
+    duration: object,
+) -> None:
+    design = _design()
+    design["estimated_duration_days"] = duration
+
+    with pytest.raises(ValueError, match="estimated_duration_days"):
+        ExperimentDesignAgent().parse(json.dumps([design]))
+
+
+def test_duration_validation_preserves_rejected_scalar_for_correction() -> None:
+    design = _design()
+    design["estimated_duration_days"] = 607
+
+    with pytest.raises(ValueError, match=r"received 607"):
+        ExperimentDesignAgent().parse(json.dumps([design]))
+
+
+def test_prompt_exposes_duration_feasibility_and_statistical_policy() -> None:
+    assert "integer from 1 through 90 inclusive" in EXPERIMENT_DESIGN_SYSTEM
+    assert "required sample cannot enroll within 90" in EXPERIMENT_DESIGN_SYSTEM
+    assert "Never clamp a longer estimate to 90 days" in EXPERIMENT_DESIGN_SYSTEM
+    assert "significance_level 0.05" in EXPERIMENT_DESIGN_SYSTEM
+    assert "nominal_power 0.80" in EXPERIMENT_DESIGN_SYSTEM
+    assert "treatment_count exactly len(variants) - 1" in EXPERIMENT_DESIGN_SYSTEM
+    assert "inflate minimum_detectable_effect" in EXPERIMENT_DESIGN_SYSTEM
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("significance_level", 0.000001),
+        ("nominal_power", 0.51),
+    ],
+)
+def test_builtin_design_rejects_noncanonical_statistical_settings(
+    field: str,
+    value: float,
+) -> None:
+    design = _design()
+    design["statistical_plan"][field] = value
+
+    with pytest.raises(ValueError, match=field):
+        ExperimentDesignAgent().parse(json.dumps([design]))
+
+
+class _NoMemory:
+    async def search(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+
+class _RecordingAudit:
+    def __init__(self) -> None:
+        self.entries: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def log(
+        self,
+        run_id: str,
+        action_type: str,
+        config: dict[str, Any],
+        **kwargs: Any,
+    ) -> int:
+        self.entries.append((run_id, action_type, config))
+        return len(self.entries)
+
+
+@pytest.mark.parametrize("replacement_kind", ["omit", "clamp", "rename"])
+@pytest.mark.asyncio
+async def test_agent_retries_final_duration_error_with_full_contract(
+    monkeypatch,
+    replacement_kind: str,
+) -> None:
+    rejected = _design()
+    rejected["estimated_duration_days"] = 607
+    rejected_text = json.dumps([rejected])
+    clamped = copy.deepcopy(rejected)
+    clamped["estimated_duration_days"] = 90
+    if replacement_kind == "rename":
+        clamped["experiment_id"] = "exp_renamed"
+        clamped["flag_config"]["key"] = "exp_renamed"
+        clamped["source_insight"] = "Renamed infeasible insight"
+    replacement_text = (
+        "[]" if replacement_kind == "omit" else json.dumps([clamped])
+    )
+    calls = {"n": 0}
+
+    async def fake_active_experiments(**kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            assert "Analytics observation window: 7 days" in messages[1]["content"]
+            return ToolCompletion(text=rejected_text)
+
+        assert kwargs["force_text"] is True
+        assert kwargs["context"].purpose == (
+            "agent.experiment_design.output_correction"
+        )
+        assert messages[-2] == {"role": "assistant", "content": rejected_text}
+        assert "estimated_duration_days" in messages[-1]["content"]
+        assert "received 607" in messages[-1]["content"]
+        assert "omit/empty-output" in messages[-1]["content"]
+        return ToolCompletion(text=replacement_text)
+
+    monkeypatch.setattr(
+        experiment_design,
+        "get_active_experiments",
+        fake_active_experiments,
+    )
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+    audit = _RecordingAudit()
+    ctx = AgentContext(
+        pool=None,
+        llm_runtime=object(),
+        vector_store=_NoMemory(),
+        project_id="demo",
+        run_id="run-1",
+        lease_owner_id="worker-1",
+        time_range_days=7,
+        audit=audit,
+    )
+
+    state = {
+        "insights": [
+            {
+                "title": "Blog visitors do not reach upload",
+                "action_type": "experiment",
+                "recommended_action": "Experiment with an upload CTA.",
+            }
+        ]
+    }
+    if replacement_kind != "omit":
+        with pytest.raises(ValueError, match="must be omitted, not clamped"):
+            await ExperimentDesignAgent().run(ctx, state)
+    else:
+        result = await ExperimentDesignAgent().run(ctx, state)
+        assert result.output == []
+        assert result.metadata["needs_approval"] is False
+
+    assert calls["n"] == 2
+    validation_events = [
+        entry
+        for entry in audit.entries
+        if entry[1] == "experiment_design_output_validation_failed"
+    ]
+    assert len(validation_events) == (2 if replacement_kind != "omit" else 1)
 
 
 def test_experiment_bucket_identity_is_exact_and_prompt_prefers_browser_identity() -> None:

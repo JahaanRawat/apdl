@@ -117,6 +117,75 @@ async def test_tool_failure_becomes_result_content_not_crash(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_tool_parameter_validation_error_is_visible_before_retry(monkeypatch):
+    async def fake_plan(**kwargs):
+        return {
+            "protocol": "fixed_horizon_fisher_newcombe_cc_plan_v1",
+            "nominal_power": kwargs["nominal_power"],
+        }
+
+    monkeypatch.setattr(tool_catalog, "calculate_sample_size", fake_plan)
+    schemas = tool_catalog.llm_tool_schemas(["calculate_statistical_plan"])
+    base_params = {
+        "baseline_conversion_rate": 0.01,
+        "minimum_detectable_effect": 0.02,
+        "significance_level": 0.05,
+        "treatment_count": 1,
+        "direction": "increase",
+        "data_settlement_seconds": 300,
+    }
+    calls = {"n": 0}
+
+    async def correcting_chat(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ToolCompletion(
+                tool_calls=[
+                    ToolCall(
+                        id="bad-plan",
+                        name="calculate_statistical_plan",
+                        arguments={**base_params, "nominal_power": 0.5},
+                    )
+                ]
+            )
+        if calls["n"] == 2:
+            failed = next(
+                message
+                for message in messages
+                if message.get("tool_call_id") == "bad-plan"
+            )
+            envelope = json.loads(failed["content"])
+            assert envelope["params"]["nominal_power"] == 0.5
+            assert "nominal_power" in envelope["error"]
+            assert "0.8" in envelope["error"]
+            return ToolCompletion(
+                tool_calls=[
+                    ToolCall(
+                        id="good-plan",
+                        name="calculate_statistical_plan",
+                        arguments={**base_params, "nominal_power": 0.8},
+                    )
+                ]
+            )
+        return ToolCompletion(text="[]")
+
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", correcting_chat)
+
+    result = await tool_loop.run_tool_loop(
+        _ctx(),
+        agent_name="experiment_design",
+        system_prompt="s",
+        user_prompt="u",
+        tool_schemas=schemas,
+    )
+
+    assert result.text == "[]"
+    assert len(result.trace) == 2
+    assert result.trace[0].error and "nominal_power" in result.trace[0].error
+    assert result.trace[1].error is None
+
+
+@pytest.mark.asyncio
 async def test_budget_exhaustion_forces_text_with_tool_contract_preserved(monkeypatch):
     async def fake_run_tool(ctx, name, params):
         return {"ok": True}
@@ -145,6 +214,206 @@ async def test_budget_exhaustion_forces_text_with_tool_contract_preserved(monkey
     assert result.rounds == 2 and len(result.trace) == 2
     assert "tool budget" in final_call["messages"][-1]["content"].lower()
     assert final_call["tools"] == _SCHEMAS
+
+
+@pytest.mark.asyncio
+async def test_final_validation_error_is_shown_to_one_text_only_correction(monkeypatch):
+    rejected = '[{"estimated_duration_days":91}]'
+    validation_error = (
+        "invalid experiment design at index 0: estimated_duration_days: "
+        "Input should be less than or equal to 90 (received 91)"
+    )
+    calls = {"n": 0}
+
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ToolCompletion(text=rejected)
+        assert kwargs["force_text"] is True
+        assert kwargs["context"].purpose == "agent.experiment_design.output_correction"
+        assert tools == _SCHEMAS
+        assert messages[-2] == {"role": "assistant", "content": rejected}
+        assert validation_error in messages[-1]["content"]
+        assert "omit/empty-output" in messages[-1]["content"]
+        return ToolCompletion(text="[]")
+
+    def validate(result: tool_loop.ToolLoopResult) -> str | None:
+        return None if result.text == "[]" else validation_error
+
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+    ctx = _ctx()
+    result = await tool_loop.run_tool_loop(
+        ctx,
+        agent_name="experiment_design",
+        system_prompt="s",
+        user_prompt="u",
+        tool_schemas=_SCHEMAS,
+        final_result_validator=validate,
+        max_final_text_corrections=1,
+    )
+
+    assert result.text == "[]"
+    assert calls["n"] == 2
+    validation_audits = [
+        entry for entry in ctx.audit.entries
+        if entry[1] == "experiment_design_output_validation_failed"
+    ]
+    assert len(validation_audits) == 1
+    assert validation_audits[0][2]["will_retry"] is True
+    assert validation_audits[0][2]["error"] == validation_error
+
+
+@pytest.mark.asyncio
+async def test_final_text_correction_is_bounded_and_fails_closed(monkeypatch):
+    calls = {"n": 0}
+
+    async def always_invalid(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        return ToolCompletion(text=f"invalid-{calls['n']}")
+
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", always_invalid)
+    ctx = _ctx()
+    with pytest.raises(ValueError, match="remained invalid after 1 correction"):
+        await tool_loop.run_tool_loop(
+            ctx,
+            agent_name="experiment_design",
+            system_prompt="s",
+            user_prompt="u",
+            tool_schemas=_SCHEMAS,
+            final_result_validator=lambda result: f"bad output: {result.text}",
+            max_final_text_corrections=1,
+        )
+
+    assert calls["n"] == 2
+    validation_audits = [
+        entry for entry in ctx.audit.entries
+        if entry[1] == "experiment_design_output_validation_failed"
+    ]
+    assert [entry[2]["will_retry"] for entry in validation_audits] == [True, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_count",
+    [-1, tool_loop.MAX_FINAL_TEXT_CORRECTIONS + 1, True],
+)
+async def test_final_text_correction_count_is_validated_before_egress(
+    invalid_count,
+) -> None:
+    with pytest.raises(ValueError, match="max_final_text_corrections"):
+        await tool_loop.run_tool_loop(
+            _ctx(),
+            agent_name="a",
+            system_prompt="s",
+            user_prompt="u",
+            tool_schemas=_SCHEMAS,
+            max_final_text_corrections=invalid_count,
+        )
+
+
+@pytest.mark.asyncio
+async def test_final_text_correction_requires_a_validator() -> None:
+    with pytest.raises(ValueError, match="final_result_validator is required"):
+        await tool_loop.run_tool_loop(
+            _ctx(),
+            agent_name="a",
+            system_prompt="s",
+            user_prompt="u",
+            tool_schemas=_SCHEMAS,
+            max_final_text_corrections=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_forced_final_validation_retry_keeps_tool_history(monkeypatch):
+    async def fake_run_tool(ctx, name, params):
+        return {"eligible_users": 57}
+
+    purposes: list[str] = []
+
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        purpose = kwargs["context"].purpose
+        purposes.append(purpose)
+        if purpose.endswith("tool_round"):
+            return ToolCompletion(
+                tool_calls=[ToolCall(id="traffic", name="discover_events", arguments={})]
+            )
+        if purpose.endswith("tool_finalize"):
+            assert kwargs["force_text"] is True
+            return ToolCompletion(text='[{"estimated_duration_days":607}]')
+        assert purpose.endswith("output_correction")
+        assert kwargs["force_text"] is True
+        assert tools == _SCHEMAS
+        assert any(
+            message.get("tool_call_id") == "traffic" for message in messages
+        )
+        assert "received 607" in messages[-1]["content"]
+        return ToolCompletion(text="[]")
+
+    def validate(result: tool_loop.ToolLoopResult) -> str | None:
+        if result.text == "[]":
+            return None
+        return "estimated_duration_days must be <= 90 (received 607)"
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+
+    result = await tool_loop.run_tool_loop(
+        _ctx(),
+        agent_name="experiment_design",
+        system_prompt="s",
+        user_prompt="u",
+        tool_schemas=_SCHEMAS,
+        max_steps=1,
+        final_result_validator=validate,
+        max_final_text_corrections=1,
+    )
+
+    assert result.text == "[]"
+    assert result.rounds == 1
+    assert purposes == [
+        "agent.experiment_design.tool_round",
+        "agent.experiment_design.tool_finalize",
+        "agent.experiment_design.output_correction",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deterministic_terminal_result_never_continues_partial_parallel_turn(
+    monkeypatch,
+) -> None:
+    chat_calls = {"n": 0}
+    tool_calls: list[str] = []
+
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        chat_calls["n"] += 1
+        return ToolCompletion(
+            tool_calls=[
+                ToolCall(id="first", name="discover_events", arguments={}),
+                ToolCall(id="second", name="discover_events", arguments={}),
+            ]
+        )
+
+    async def fake_run_tool(ctx, name, params):
+        tool_calls.append(name)
+        return {"events": []}
+
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+    result = await tool_loop.run_tool_loop(
+        _ctx(),
+        agent_name="behavior_analysis",
+        system_prompt="s",
+        user_prompt="u",
+        tool_schemas=_SCHEMAS,
+        terminal_result_for_tool=lambda entry: "[]",
+        final_result_validator=lambda result: "must not run",
+        max_final_text_corrections=1,
+    )
+
+    assert result.text == "[]"
+    assert chat_calls["n"] == 1
+    assert tool_calls == ["discover_events"]
 
 
 @pytest.mark.asyncio

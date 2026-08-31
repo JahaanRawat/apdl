@@ -107,11 +107,18 @@ class StatisticalPlanParams(BaseModel):
     minimum_detectable_effect: float = Field(
         ge=1e-6, le=1.0, strict=True, allow_inf_nan=False
     )
-    significance_level: float = Field(
-        default=0.05, ge=1e-6, le=0.5, strict=True, allow_inf_nan=False
+    significance_level: Literal[0.05] = Field(
+        default=0.05,
+        description=(
+            "Canonical family-wise significance level before treatment-count "
+            "correction. This planning tool requires 0.05."
+        ),
     )
-    nominal_power: float = Field(
-        default=0.8, gt=0.5, le=0.9999, strict=True, allow_inf_nan=False
+    nominal_power: Literal[0.8] = Field(
+        default=0.8,
+        description=(
+            "Canonical nominal planning power. This planning tool requires 0.80."
+        ),
     )
     treatment_count: int = Field(ge=1, le=9, strict=True)
     direction: Literal["increase", "decrease"]
@@ -294,7 +301,9 @@ TOOL_CATALOG: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             "calculate_statistical_plan",
-            "Return Config's canonical continuity-corrected nominal experiment plan.",
+            "Return Config's canonical continuity-corrected nominal experiment plan. "
+            "It requires significance_level=0.05 and nominal_power=0.80; do not "
+            "alter them to force duration feasibility.",
             StatisticalPlanParams,
             _run_statistical_plan,
         ),

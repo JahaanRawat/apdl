@@ -20,6 +20,9 @@ Safety properties, in order of importance:
   the wizard's dry-run preview.
 * Tool results are truncated before re-entering the prompt so one fat
   retention grid cannot blow the context window.
+* Strict agents may opt into a bounded final-text correction. The rejected
+  answer and validator diagnostic stay in the original transcript, tools are
+  disabled for the correction, and a still-invalid replacement fails closed.
 """
 
 from __future__ import annotations
@@ -45,6 +48,12 @@ RESULT_DATA_CHAR_CAP = RESULT_CHAR_CAP - 1_000
 #: Hard ceiling on tool calls within one round — a model that requests dozens
 #: of parallel calls in a single turn is misbehaving, not thorough.
 MAX_CALLS_PER_ROUND = 8
+#: Validation diagnostics re-enter the model context and audit log. Keep them
+#: useful for correction without allowing an unexpectedly verbose exception to
+#: consume the prompt budget or observability payload.
+VALIDATION_ERROR_CHAR_CAP = 2_000
+#: Hard ceiling independent of per-agent configuration.
+MAX_FINAL_TEXT_CORRECTIONS = 2
 
 
 @dataclass
@@ -65,6 +74,12 @@ class ToolLoopResult:
     text: str
     trace: list[ToolTraceEntry] = field(default_factory=list)
     rounds: int = 0
+
+
+FinalResultValidator = Callable[[ToolLoopResult], str | None]
+FinalCorrectionValidator = Callable[
+    [ToolLoopResult, ToolLoopResult, str], str | None
+]
 
 
 def tool_result_source_id(entry: ToolTraceEntry) -> str:
@@ -115,6 +130,114 @@ def _truncate(blob: str, cap: int = RESULT_CHAR_CAP) -> str:
     if len(blob) <= cap:
         return blob
     return blob[:cap] + f'... [truncated {len(blob) - cap} of {len(blob)} chars]'
+
+
+async def _validate_or_correct_final(
+    ctx: AgentContext,
+    *,
+    agent_name: str,
+    model_tier: str,
+    messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
+    purpose_scope: str,
+    result: ToolLoopResult,
+    validator: FinalResultValidator | None,
+    correction_validator: FinalCorrectionValidator | None,
+    max_corrections: int,
+    log_validation_failures: bool,
+) -> ToolLoopResult:
+    """Validate final text and allow a bounded, transcript-aware correction.
+
+    Strict output validation has to happen while ``messages`` still contains
+    the complete tool transcript. A retry made later by ``BaseAgent`` would
+    lose the warehouse results and, critically, would not show the model the
+    rejected answer or the validator error that explains how to correct it.
+
+    Corrections are text-only. Tool declarations remain attached because
+    providers validate historical tool messages against them, while
+    ``force_text`` prevents a schema correction from consuming more tool
+    budget or widening the investigation.
+    """
+    if validator is None:
+        return result
+    validation_attempt = 0
+    corrections_used = 0
+    first_rejected_result: ToolLoopResult | None = None
+    first_validation_error: str | None = None
+    while True:
+        validation_attempt += 1
+        error = validator(result)
+        if (
+            error is None
+            and first_rejected_result is not None
+            and first_validation_error is not None
+            and correction_validator is not None
+        ):
+            error = correction_validator(
+                first_rejected_result,
+                result,
+                first_validation_error,
+            )
+        if error is None:
+            return result
+
+        bounded_error = _truncate(str(error), VALIDATION_ERROR_CHAR_CAP)
+        if first_rejected_result is None:
+            first_rejected_result = result
+            first_validation_error = bounded_error
+        will_retry = corrections_used < max_corrections
+        if log_validation_failures:
+            await ctx.audit.log(
+                ctx.run_id,
+                f"{agent_name}_output_validation_failed",
+                {
+                    "validation_attempt": validation_attempt,
+                    "corrections_used": corrections_used,
+                    "max_corrections": max_corrections,
+                    "will_retry": will_retry,
+                    "error": bounded_error,
+                },
+            )
+        if not will_retry:
+            raise ValueError(
+                f"final output remained invalid after {corrections_used} "
+                f"correction attempt(s): {bounded_error}"
+            )
+
+        messages.extend(
+            [
+                {"role": "assistant", "content": result.text},
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous final answer was rejected by the strict "
+                        "output contract.\n\nValidation error(s):\n"
+                        f"{bounded_error}\n\nReturn one complete replacement in "
+                        "the originally required format. Preserve valid evidence "
+                        "and do not invent data. If an item cannot satisfy the "
+                        "original constraints, follow the original omit/empty-output "
+                        "rule. Return only the replacement, with no commentary and "
+                        "no tool calls."
+                    ),
+                },
+            ]
+        )
+        corrections_used += 1
+        completion = await chat_completion_with_tools(
+            model_tier=model_tier,
+            messages=messages,
+            tools=tool_schemas,
+            context=ctx.llm_request(
+                purpose=f"{purpose_scope}.{agent_name}.output_correction",
+                data_classification="confidential",
+            ),
+            force_text=True,
+        )
+        result = ToolLoopResult(
+            text=completion.text,
+            trace=result.trace,
+            rounds=result.rounds,
+        )
 
 
 async def _execute_call(
@@ -219,6 +342,9 @@ async def run_tool_loop(
     max_steps: int = 8,
     log_tool_calls: bool = True,
     terminal_result_for_tool: Callable[[ToolTraceEntry], str | None] | None = None,
+    final_result_validator: FinalResultValidator | None = None,
+    final_correction_validator: FinalCorrectionValidator | None = None,
+    max_final_text_corrections: int = 0,
 ) -> ToolLoopResult:
     """Run the model with tools until it answers in text or the budget ends.
 
@@ -233,10 +359,32 @@ async def run_tool_loop(
             which must stay side-effect free).
         terminal_result_for_tool: Optional deterministic stop hook. Returning
             text after a tool result ends the loop without another LLM call.
+        final_result_validator: Optional strict validator. It receives the
+            final text together with the tool trace and returns ``None`` when
+            valid or a safe diagnostic string when rejected.
+        final_correction_validator: Optional semantic guard applied after a
+            replacement passes the strict validator. It receives the original
+            rejected result, replacement, and original validation error.
+        max_final_text_corrections: Number of text-only corrections permitted
+            after strict final-output validation fails.
 
     Returns:
         The final assistant text plus the executed tool-call trace.
     """
+    if (
+        isinstance(max_final_text_corrections, bool)
+        or not isinstance(max_final_text_corrections, int)
+        or not 0 <= max_final_text_corrections <= MAX_FINAL_TEXT_CORRECTIONS
+    ):
+        raise ValueError(
+            "max_final_text_corrections must be an integer between 0 and "
+            f"{MAX_FINAL_TEXT_CORRECTIONS}"
+        )
+    if max_final_text_corrections > 0 and final_result_validator is None:
+        raise ValueError(
+            "final_result_validator is required when final corrections are enabled"
+        )
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -258,7 +406,23 @@ async def run_tool_loop(
             ),
         )
         if not completion.tool_calls:
-            return ToolLoopResult(text=completion.text, trace=trace, rounds=round_index)
+            return await _validate_or_correct_final(
+                ctx,
+                agent_name=agent_name,
+                model_tier=model_tier,
+                messages=messages,
+                tool_schemas=tool_schemas,
+                purpose_scope=purpose_scope,
+                result=ToolLoopResult(
+                    text=completion.text,
+                    trace=trace,
+                    rounds=round_index,
+                ),
+                validator=final_result_validator,
+                correction_validator=final_correction_validator,
+                max_corrections=max_final_text_corrections,
+                log_validation_failures=log_tool_calls,
+            )
 
         requested = completion.tool_calls[:MAX_CALLS_PER_ROUND]
         dropped = len(completion.tool_calls) - len(requested)
@@ -324,6 +488,10 @@ async def run_tool_loop(
                         agent_name,
                         entry.tool,
                     )
+                    # A deterministic terminal hook owns its canonical output.
+                    # Returning immediately also avoids asking a provider to
+                    # continue a turn before every parallel tool_call has a
+                    # corresponding tool result.
                     return ToolLoopResult(
                         text=terminal_text,
                         trace=trace,
@@ -356,4 +524,20 @@ async def run_tool_loop(
         "[%s] Tool loop hit max_steps=%d (%d calls executed)",
         agent_name, max_steps, len(trace),
     )
-    return ToolLoopResult(text=completion.text, trace=trace, rounds=max_steps)
+    return await _validate_or_correct_final(
+        ctx,
+        agent_name=agent_name,
+        model_tier=model_tier,
+        messages=messages,
+        tool_schemas=tool_schemas,
+        purpose_scope=purpose_scope,
+        result=ToolLoopResult(
+            text=completion.text,
+            trace=trace,
+            rounds=max_steps,
+        ),
+        validator=final_result_validator,
+        correction_validator=final_correction_validator,
+        max_corrections=max_final_text_corrections,
+        log_validation_failures=log_tool_calls,
+    )
