@@ -5,10 +5,9 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from asynch.proto.utils.escape import escape_params
+from asynch.proto.connection import Connection
 from pydantic import ValidationError
 
-from app.clickhouse.client import normalize_query_params
 from app.clickhouse.queries import (
     EXPERIMENT_ANALYSIS_QUERY,
     EXPERIMENT_PROVENANCE_QUERY,
@@ -525,10 +524,11 @@ class TestQueryBuilders:
             "start_ms": 1_735_689_600_123,
             "end_ms": 1_735_689_600_124,
         }
-        rendered = normalize_query_params(
+        rendered = Connection.substitute_params(
             "SELECT fromUnixTimestamp64Milli(%(start_ms)s, 'UTC'), "
-            "fromUnixTimestamp64Milli(%(end_ms)s, 'UTC')"
-        ).format(**escape_params(params))
+            "fromUnixTimestamp64Milli(%(end_ms)s, 'UTC')",
+            params,
+        )
         assert rendered == (
             "SELECT fromUnixTimestamp64Milli(1735689600123, 'UTC'), "
             "fromUnixTimestamp64Milli(1735689600124, 'UTC')"
