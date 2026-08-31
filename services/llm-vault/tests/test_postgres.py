@@ -208,10 +208,38 @@ async def test_create_revalidates_authority_after_preflight() -> None:
         )
         owner = await asyncpg.connect(OWNER_URL)
         try:
-            await owner.execute(
-                "UPDATE admin_users SET active = FALSE WHERE user_id = $1",
-                actor_user_id,
-            )
+            # A current owner cannot be deactivated. Transfer ownership first so
+            # the actor loses authority through a database-valid state change.
+            replacement_owner_user_id = uuid.uuid4()
+            async with owner.transaction():
+                await owner.execute(
+                    """
+                    INSERT INTO admin_users (user_id, email, password_hash, active)
+                    VALUES ($1, $2, '$argon2id$vault-live-fixture', TRUE)
+                    """,
+                    replacement_owner_user_id,
+                    f"{replacement_owner_user_id.hex}@vault.test",
+                )
+                await owner.execute(
+                    """
+                    INSERT INTO admin_user_projects (user_id, project_id, roles)
+                    VALUES ($1, $2, ARRAY['members:manage']::TEXT[])
+                    """,
+                    replacement_owner_user_id,
+                    project_id,
+                )
+                await owner.execute(
+                    """
+                    UPDATE admin_projects SET owner_user_id = $2
+                    WHERE project_id = $1
+                    """,
+                    project_id,
+                    replacement_owner_user_id,
+                )
+                await owner.execute(
+                    "UPDATE admin_users SET active = FALSE WHERE user_id = $1",
+                    actor_user_id,
+                )
         finally:
             await owner.close()
 
