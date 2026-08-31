@@ -78,6 +78,10 @@ class BaseAgent(ABC):
     agentic_tools: ClassVar[tuple[str, ...]] = ()
     #: Max tool rounds before the loop forces a final answer.
     max_tool_steps: ClassVar[int] = 8
+    #: Opt-in corrections after an agentic final answer fails strict parsing.
+    #: Corrections happen inside the tool loop so the model sees the rejected
+    #: answer, the exact validation error, and the complete tool transcript.
+    max_final_text_corrections: ClassVar[int] = 0
 
     # --- lifecycle hooks (override as needed) -------------------------------
 
@@ -133,6 +137,33 @@ class BaseAgent(ABC):
     def parse_agentic(self, result: ToolLoopResult) -> Any:
         """Parse a tool-loop result, with the trace available for grounding."""
         return self.parse(result.text)
+
+    def final_result_validation_error(self, result: ToolLoopResult) -> str | None:
+        """Return a strict parse diagnostic suitable for an LLM correction.
+
+        Only ``ValueError`` represents a model-authored contract violation.
+        Programming errors and dependency failures still propagate immediately
+        instead of being disguised as output problems.
+        """
+        try:
+            self.parse_agentic(result)
+        except ValueError as exc:
+            return str(exc)
+        return None
+
+    def final_correction_validation_error(
+        self,
+        rejected: ToolLoopResult,
+        replacement: ToolLoopResult,
+        original_error: str,
+    ) -> str | None:
+        """Reject semantically unsafe repairs after strict parsing succeeds.
+
+        Most agents need only the strict validator. Agents with fail-closed
+        correction rules may compare the original rejection and replacement
+        here; returning a message consumes the same bounded correction budget.
+        """
+        return None
 
     async def act(
         self,
@@ -190,6 +221,17 @@ class BaseAgent(ABC):
                 model_tier=self.model_tier,
                 max_steps=self.max_tool_steps,
                 terminal_result_for_tool=self.agentic_terminal_result,
+                final_result_validator=(
+                    self.final_result_validation_error
+                    if self.max_final_text_corrections > 0
+                    else None
+                ),
+                final_correction_validator=(
+                    self.final_correction_validation_error
+                    if self.max_final_text_corrections > 0
+                    else None
+                ),
+                max_final_text_corrections=self.max_final_text_corrections,
             )
             working["tool_trace"] = loop_result.trace
             output = self.parse_agentic(loop_result)

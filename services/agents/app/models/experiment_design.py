@@ -39,8 +39,8 @@ class StatisticalPlan(_StrictModel):
     protocol: Literal["fixed_horizon_fisher_newcombe_cc_plan_v1"]
     baseline_conversion_rate: int | float = Field(ge=0, le=1)
     minimum_detectable_effect: int | float = Field(gt=0, le=1)
-    significance_level: int | float = Field(gt=0, le=0.5)
-    nominal_power: int | float = Field(gt=0.5, le=0.9999)
+    significance_level: Literal[0.05]
+    nominal_power: Literal[0.8]
     required_sample_size_per_arm: int = Field(ge=2, le=10_000_000)
     data_settlement_seconds: int = Field(ge=1, le=86_400)
 

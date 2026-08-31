@@ -76,8 +76,25 @@ use "user_id" only when every eligible actor is authenticated before enrollment.
 - flag_config.auto_disable must be false; automatic guardrail mutation is unavailable in this release.
 - statistical_plan is immutable once the experiment leaves draft. Size it prospectively for a
 two-proportion comparison using the primary metric direction and Bonferroni-adjusted alpha
-(significance_level / number of treatment arms). Never lower required_sample_size_per_arm to fit
-the proposed duration; increase duration or traffic instead.
+(significance_level / number of treatment arms). For the built-in design workflow, call
+calculate_statistical_plan with significance_level 0.05, nominal_power 0.80,
+treatment_count exactly len(variants) - 1, and data_settlement_seconds 300. These canonical
+significance and power values are not configurable in this workflow. Never alter them, lower
+required_sample_size_per_arm, inflate minimum_detectable_effect solely to reduce enrollment, or
+assume unobserved traffic growth to make an experiment appear feasible.
+
+Duration feasibility is a strict contract:
+- estimated_duration_days must be an integer from 1 through 90 inclusive.
+- Derive it from the required total enrollment and a defensible observed rate of unique eligible
+participants over the analytics observation window. Do not use raw event volume as participant volume.
+- For variant weights w_i, required total enrollment is
+ceil(required_sample_size_per_arm * sum(w_i) / min(w_i)). Effective daily enrollment is observed
+unique eligible participants / observation days * rollout percentage / 100. Duration is the ceiling
+of required total enrollment / effective daily enrollment.
+- If eligible-throughput evidence is missing or zero, or the required sample cannot enroll within 90
+days, omit that design. Return fewer designs or an empty array when necessary.
+- Never clamp a longer estimate to 90 days. Never shrink the statistical plan or alter the allocation
+solely to fit the duration limit.
 
 Every accepted design is held for human approval. Approval creates an inert Config draft with a disabled \
 backing flag before the treatment changeset is opened. Do not assume the experiment is scheduled, running, \
@@ -104,11 +121,15 @@ hypothesis:
 Baseline metrics:
 {baseline_metrics}
 
+Analytics observation window: {time_range_days} days
+
 You have read-only analytics tools. Before finalizing each design, verify its premises with a \
 few focused queries: confirm the primary metric event exists and measure its current baseline \
 (volume / conversion) so statistical_plan.required_sample_size_per_arm and estimated_duration_days rest on \
-real numbers, not guesses. Then call calculate_statistical_plan and copy its returned object exactly
-into statistical_plan; never estimate or rename its fields. Keep it to a handful of calls total.
+real numbers, not guesses. Then call calculate_statistical_plan with the canonical planning settings
+described above and copy its returned object exactly into statistical_plan; never estimate or rename
+its fields. Estimate enrollment duration from unique eligible participants over the observation window;
+omit any design that cannot satisfy the 1-90 day contract. Keep it to a handful of calls total.
 
 Design a rigorous A/B experiment per qualifying insight, each with a "source_insight" naming the \
 insight's exact title. When done, return ONLY the JSON array of experiment designs (an empty \

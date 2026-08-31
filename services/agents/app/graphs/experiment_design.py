@@ -22,6 +22,7 @@ from app.framework import (
     gate_action,
     register_agent,
 )
+from app.framework.tool_loop import ToolLoopResult
 from app.llm.prompts.experiment import (
     EXPERIMENT_DESIGN_PROMPT,
     EXPERIMENT_DESIGN_SYSTEM,
@@ -444,6 +445,11 @@ class ExperimentDesignAgent(BaseAgent):
         "calculate_statistical_plan",
     )
     max_tool_steps = 6
+    # Final JSON is strict and may fail on cross-field or feasibility bounds
+    # that are not represented by a tool schema. One transcript-aware,
+    # text-only correction lets the model see the exact validator error while
+    # preserving fail-closed behavior if the replacement is still invalid.
+    max_final_text_corrections = 1
     #: Upper bound on designs per run — at most one per qualifying insight;
     #: insights that don't warrant an experiment get none.
     max_designs = 3
@@ -459,12 +465,22 @@ class ExperimentDesignAgent(BaseAgent):
             try:
                 designs.append(ExperimentDesign.model_validate(item))
             except ValidationError as exc:
-                details = "; ".join(
-                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-                    for error in exc.errors(include_url=False)[:5]
-                )
+                details: list[str] = []
+                for error in exc.errors(include_url=False)[:5]:
+                    location = ".".join(str(part) for part in error["loc"])
+                    detail = f"{location}: {error['msg']}"
+                    # Retain the rejected scalar for this non-sensitive design
+                    # field. The audit/correction flow must expose whether the
+                    # model proposed 91 or 900 days without persisting the full
+                    # confidential completion body.
+                    if error["loc"] == ("estimated_duration_days",):
+                        received = error.get("input")
+                        if type(received) in {int, float}:
+                            detail += f" (received {received!r})"
+                    details.append(detail)
                 raise ValueError(
-                    f"invalid experiment design at index {index}: {details}"
+                    f"invalid experiment design at index {index}: "
+                    + "; ".join(details)
                 ) from exc
 
         experiment_ids = [design.experiment_id for design in designs]
@@ -477,6 +493,71 @@ class ExperimentDesignAgent(BaseAgent):
             design.model_dump(mode="json", exclude_none=True)
             for design in designs
         ]
+
+    def final_correction_validation_error(
+        self,
+        rejected: ToolLoopResult,
+        replacement: ToolLoopResult,
+        original_error: str,
+    ) -> str | None:
+        """Forbid turning an infeasible duration into a schema-valid clamp."""
+        if "estimated_duration_days" not in original_error:
+            return None
+        rejected_raw = parse_llm_json(rejected.text, fallback=None)
+        replacement_raw = parse_llm_json(replacement.text, fallback=None)
+        if not isinstance(rejected_raw, list) or not isinstance(replacement_raw, list):
+            return None
+
+        infeasible_ids: set[str] = set()
+        infeasible_sources: set[str] = set()
+        feasible_ids: set[str] = set()
+        feasible_sources: set[str] = set()
+        for item in rejected_raw:
+            if not isinstance(item, dict):
+                continue
+            duration = item.get("estimated_duration_days")
+            experiment_id = item.get("experiment_id")
+            source_insight = item.get("source_insight")
+            is_infeasible = type(duration) in {int, float} and duration > 90
+            id_bucket = infeasible_ids if is_infeasible else feasible_ids
+            source_bucket = (
+                infeasible_sources if is_infeasible else feasible_sources
+            )
+            if isinstance(experiment_id, str) and experiment_id:
+                id_bucket.add(experiment_id)
+            if isinstance(source_insight, str) and source_insight:
+                source_bucket.add(source_insight)
+
+        retained: list[str] = []
+        for item in replacement_raw:
+            if not isinstance(item, dict):
+                continue
+            experiment_id = item.get("experiment_id")
+            source_insight = item.get("source_insight")
+            matches_infeasible = (
+                isinstance(experiment_id, str)
+                and experiment_id in infeasible_ids
+            ) or (
+                isinstance(source_insight, str)
+                and source_insight in infeasible_sources
+            )
+            matches_prior_feasible = (
+                isinstance(experiment_id, str)
+                and experiment_id in feasible_ids
+            ) or (
+                isinstance(source_insight, str)
+                and source_insight in feasible_sources
+            )
+            if matches_infeasible or not matches_prior_feasible:
+                retained.append(
+                    str(experiment_id or source_insight or "unknown design")
+                )
+        if retained:
+            return (
+                "duration-infeasible designs must be omitted, not clamped or "
+                "renamed during correction: " + ", ".join(sorted(set(retained)))
+            )
+        return None
 
     async def gather(
         self, ctx: AgentContext, state: dict[str, Any], working: dict[str, Any]
@@ -533,6 +614,7 @@ class ExperimentDesignAgent(BaseAgent):
                 "(unknown — use your analytics tools to measure the current "
                 "rate/volume of each primary metric event before sizing the experiments)"
             ),
+            time_range_days=ctx.time_range_days,
         )
 
     async def act(

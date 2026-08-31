@@ -237,6 +237,30 @@ async def test_experiment_planner_tool_rejects_numeric_coercion(field, value):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("significance_level", 0.000001),
+        ("nominal_power", 0.51),
+    ],
+)
+async def test_experiment_planner_tool_requires_canonical_error_rates(field, value):
+    params = {
+        "baseline_conversion_rate": 0.01,
+        "minimum_detectable_effect": 0.02,
+        "significance_level": 0.05,
+        "nominal_power": 0.8,
+        "treatment_count": 1,
+        "direction": "increase",
+        "data_settlement_seconds": 300,
+    }
+    params[field] = value
+
+    with pytest.raises(ValidationError, match=field):
+        await tool_catalog.run_tool(_ctx(), "calculate_statistical_plan", params)
+
+
+@pytest.mark.asyncio
 async def test_run_tool_rejects_unknown_name():
     with pytest.raises(ValueError, match="Unknown tool"):
         await tool_catalog.run_tool(_ctx(), "drop_tables", {})
