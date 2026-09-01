@@ -229,6 +229,9 @@ async def _remove_ephemeral_credential(
 # Match every route rooted at one changeset, including future child resources.
 # Tenant authorization must not depend on maintaining an action allowlist here.
 _CODEGEN_CHANGESET_PATH = re.compile(r"^/v1/changesets/([^/]+)(?:/[^/]+)*$")
+_AGENT_TOOL_RESULT_ARTIFACT_PATH = re.compile(
+    r"^/v1/agents/[^/]+/tool-result-artifacts/[^/]+$"
+)
 
 
 async def _start_mutation_audit(
@@ -878,6 +881,19 @@ async def proxy_service(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Route not available"
         )
+    is_tool_result_artifact_read = (
+        service == "agents"
+        and request.method == "GET"
+        and _AGENT_TOOL_RESULT_ARTIFACT_PATH.fullmatch(upstream_path) is not None
+    )
+    if is_tool_result_artifact_read and not {
+        "agents:read",
+        "query:read",
+    }.issubset(roles):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tool result previews require agents:read and query:read",
+        )
     elevated_llm_connection_read = False
     if role in {_LLM_CONNECTION_READER, _LLM_CONNECTION_MANAGER}:
         if role == _LLM_CONNECTION_READER and "agents:read" in roles:
@@ -952,13 +968,15 @@ async def proxy_service(
             request.method not in _SAFE_METHODS
             or upstream_path == "/v1/agents/setup"
         )
-    ) or role == _LLM_CONNECTION_MANAGER
+    ) or role == _LLM_CONNECTION_MANAGER or is_tool_result_artifact_read
     credential_roles = roles
     if role == _LLM_CONNECTION_MANAGER or elevated_llm_connection_read:
         # Grant only the upstream read capability needed by this management
         # surface. The receiving service rechecks live authority inside
         # mutation transactions.
         credential_roles = frozenset({"agents:read"})
+    elif is_tool_result_artifact_read:
+        credential_roles = frozenset({"agents:read", "query:read"})
     if service == "llm-vault":
         api_key = settings.llm_vault_admin_token
     else:

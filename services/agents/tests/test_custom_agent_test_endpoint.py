@@ -148,6 +148,7 @@ async def test_dry_run_runs_loop_and_audits_real_tool_spend(
     # Dry-runs avoid product run/result state, but real query calls are audited.
     writes = [q for q, _ in pool.conn.executed if "INSERT" in q or "UPDATE" in q]
     assert len([q for q in writes if "INSERT INTO agent_audit_log" in q]) == 1
+    assert not any("agent_tool_result_artifacts" in q for q in writes)
     assert not any("agent_runs" in q or "agent_run_results" in q for q in writes)
     assert _stub_dry_run_admission["begun"][0]["project_id"] == "demo"
     _, finish = _stub_dry_run_admission["finished"][0]
@@ -194,6 +195,7 @@ async def test_dry_run_executes_presets_before_the_loop(
     # The real preset query is individually audited.
     writes = [q for q, _ in pool.conn.executed if "INSERT" in q or "UPDATE" in q]
     assert len([q for q in writes if "INSERT INTO agent_audit_log" in q]) == 1
+    assert not any("agent_tool_result_artifacts" in q for q in writes)
     _, finish = _stub_dry_run_admission["finished"][0]
     assert finish["preset_tool_calls"] == 1
     assert finish["agentic_tool_calls"] == 0

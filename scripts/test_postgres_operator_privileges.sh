@@ -630,6 +630,7 @@ BEGIN
                 ('llm_project_provider_policies', 'INSERT'),
                 ('llm_project_provider_policies', 'DELETE'),
                 ('agent_service_capabilities', 'DELETE'),
+                ('agent_tool_result_artifacts', 'DELETE'),
                 ('agent_approval_decisions', 'INSERT'),
                 ('agent_audit_log', 'INSERT'),
                 ('agent_mutation_quota_reservations', 'INSERT'),
@@ -683,6 +684,85 @@ BEGIN
         'apdl_agents', 'public.agent_service_capabilities', 'UPDATE'
     ) THEN
         RAISE EXCEPTION 'apdl_agents capability INSERT grant is not column-only';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_attribute AS attribute
+        WHERE attribute.attrelid =
+                'public.agent_tool_result_artifacts'::pg_catalog.regclass
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+          AND pg_catalog.has_column_privilege(
+              'apdl_agents', attribute.attrelid, attribute.attnum, 'INSERT'
+          ) <> (attribute.attname = ANY (ARRAY[
+              'audit_entry_id',
+              'run_id',
+              'project_id',
+              'source_id',
+              'tool_name',
+              'content_sha256',
+              'preview_text',
+              'source_byte_count',
+              'truncated',
+              'redacted'
+          ]::NAME[]))
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_agents', 'public.agent_tool_result_artifacts', 'INSERT'
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_agents', 'public.agent_tool_result_artifacts', 'UPDATE'
+    ) OR pg_catalog.has_table_privilege(
+        'apdl_agents', 'public.agent_tool_result_artifacts', 'TRUNCATE'
+    ) OR NOT pg_catalog.has_table_privilege(
+        'apdl_agents', 'public.agent_tool_result_artifacts', 'SELECT'
+    ) THEN
+        RAISE EXCEPTION 'apdl_agents artifact INSERT grant is not column-only';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM unnest(
+            ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']::TEXT[]
+        ) AS privilege(privilege_type)
+        WHERE pg_catalog.has_table_privilege(
+            'apdl_runtime',
+            'public.agent_tool_result_artifacts',
+            privilege.privilege_type
+        )
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_attribute AS attribute
+        CROSS JOIN unnest(
+            ARRAY['SELECT', 'INSERT', 'UPDATE']::TEXT[]
+        ) AS privilege(privilege_type)
+        WHERE attribute.attrelid =
+                'public.agent_tool_result_artifacts'::pg_catalog.regclass
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+          AND pg_catalog.has_column_privilege(
+              'apdl_runtime',
+              attribute.attrelid,
+              attribute.attnum,
+              privilege.privilege_type
+          )
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_class AS relation
+        CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) AS acl
+        WHERE relation.oid =
+                'public.agent_tool_result_artifacts'::pg_catalog.regclass
+          AND acl.grantee = 0
+    ) OR EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_attribute AS attribute
+        CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) AS acl
+        WHERE attribute.attrelid =
+                'public.agent_tool_result_artifacts'::pg_catalog.regclass
+          AND attribute.attnum > 0
+          AND NOT attribute.attisdropped
+          AND acl.grantee = 0
+    ) THEN
+        RAISE EXCEPTION 'apdl_runtime can access confidential tool result artifacts';
     END IF;
 
     IF EXISTS (

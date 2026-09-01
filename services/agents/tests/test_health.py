@@ -49,6 +49,7 @@ def runtime_state():
     app.state.run_reaper_task = _RunningTask()
     app.state.approval_effect_task = _RunningTask()
     app.state.llm_reconciliation_task = _RunningTask()
+    app.state.tool_result_retention_task = _RunningTask()
     yield
     app.state._state.clear()
     app.state._state.update(original)

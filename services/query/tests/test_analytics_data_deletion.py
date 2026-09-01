@@ -124,12 +124,57 @@ def test_completed_request_is_idempotent_without_repeating_mutations(monkeypatch
 
     monkeypatch.setattr(deletion, "_linked_anonymous_ids", unexpected)
     monkeypatch.setattr(deletion, "_delete_target_rows", unexpected)
+    purges: list[str] = []
+    monkeypatch.setattr(
+        deletion,
+        "_purge_tool_result_artifacts",
+        lambda request, _fence: purges.append(request.project_id),
+    )
 
     result = deletion.execute_request(request, object(), object())
 
     assert result["status"] == "already_completed"
     assert result["details"] == completion["details"]
     assert "user_id" not in result
+    assert purges == [request.project_id]
+
+
+def test_tool_result_preview_purge_is_project_wide_and_identifier_safe(monkeypatch):
+    request = deletion._request_from_args(_request_args(scope="user"))
+    statements: list[str] = []
+
+    def fake_psql(sql: str, _fence) -> str:
+        statements.append(sql)
+        if "to_regclass" in sql:
+            return "t\n"
+        return "0\n" if sql.startswith("SELECT count(*)") else ""
+
+    monkeypatch.setattr(deletion, "_run_psql", fake_psql)
+
+    deletion._purge_tool_result_artifacts(request, object())
+
+    assert len(statements) == 3
+    assert "DELETE FROM public.agent_tool_result_artifacts" in statements[1]
+    assert "WHERE project_id =" in statements[1]
+    assert "user_id" not in statements[1]
+    assert request.project_id not in "".join(statements)
+    assert request.user_id not in "".join(statements)
+
+
+def test_tool_result_preview_purge_is_noop_before_artifact_migration(monkeypatch):
+    request = deletion._request_from_args(_request_args(scope="project", user_id=None))
+    statements: list[str] = []
+
+    def fake_psql(sql: str, _fence) -> str:
+        statements.append(sql)
+        return "f\n"
+
+    monkeypatch.setattr(deletion, "_run_psql", fake_psql)
+
+    deletion._purge_tool_result_artifacts(request, object())
+
+    assert len(statements) == 1
+    assert "to_regclass" in statements[0]
 
 
 def test_audit_ledger_is_append_only_and_never_stores_raw_user_ids():

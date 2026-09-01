@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 import asyncpg
-from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.auth import require_project, require_role
 from app.routers.status import RUN_STATUS_COLUMNS, RunStatus, row_to_status
@@ -24,6 +26,7 @@ from app.store.run_leases import (
     RunCancellationNotFoundError,
     cancel_run,
 )
+from app.store.tool_result_artifacts import get_tool_result_artifact
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -54,10 +57,54 @@ class RunResults(BaseModel):
     custom_outputs: dict[str, list[Any]] = {}
 
 
-class RunAuditResponse(BaseModel):
+class RunAuditEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
     run_id: str
-    audit: list[dict[str, Any]]
+    action_type: str
+    config: dict[str, Any]
+    safety_result: dict[str, Any]
+    approval_status: str | None
+    created_at: str
+    tool_result_artifact_id: uuid.UUID | None
+
+
+class RunAuditResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    audit: list[RunAuditEntry]
     count: int
+
+
+class ToolResultArtifactResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal["tool_result_artifact@1"]
+    artifact_id: uuid.UUID
+    run_id: str = Field(min_length=1, max_length=128)
+    audit_entry_id: int = Field(gt=0)
+    source_id: str = Field(pattern=r"^warehouse:[0-9a-f]{24}$")
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    preview_text: str = Field(min_length=1, max_length=4096)
+    source_byte_count: int = Field(ge=0)
+    preview_byte_count: int = Field(ge=1, le=4096)
+    truncated: bool
+    redacted: bool
+    data_classification: Literal["confidential"]
+    created_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_preview_contract(self) -> "ToolResultArtifactResponse":
+        if len(self.preview_text.encode("utf-8")) != self.preview_byte_count:
+            raise ValueError("preview_byte_count must match preview_text UTF-8 bytes")
+        if self.expires_at <= self.created_at:
+            raise ValueError("expires_at must be after created_at")
+        if self.expires_at > self.created_at + timedelta(days=7):
+            raise ValueError("expires_at must be at most seven days after created_at")
+        return self
 
 
 class RunCancellationResponse(BaseModel):
@@ -189,3 +236,31 @@ async def get_run_audit(
 
     entries = await AuditLogger(pool).get_run_audit_trail(run_id, limit=limit)
     return RunAuditResponse(run_id=run_id, audit=entries, count=len(entries))
+
+
+@router.get(
+    "/{run_id}/tool-result-artifacts/{artifact_id}",
+    response_model=ToolResultArtifactResponse,
+)
+async def get_run_tool_result_artifact(
+    run_id: str,
+    artifact_id: uuid.UUID,
+    request: Request,
+    response: Response,
+) -> ToolResultArtifactResponse:
+    """Return one live confidential preview to dual-authorized readers."""
+    agents_principal = require_role(request, "agents:read")
+    query_principal = require_role(request, "query:read")
+    if query_principal.project_id != agents_principal.project_id:
+        raise HTTPException(status_code=404, detail="Tool result artifact not found")
+    pool: asyncpg.Pool = request.app.state.pg_pool
+    artifact = await get_tool_result_artifact(
+        pool,
+        artifact_id=artifact_id,
+        run_id=run_id,
+        project_id=agents_principal.project_id,
+    )
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Tool result artifact not found")
+    response.headers["Cache-Control"] = "private, no-store"
+    return ToolResultArtifactResponse.model_validate(artifact)

@@ -318,6 +318,39 @@ def _assert_clickhouse_schema(
         )
 
 
+def _purge_tool_result_artifacts(
+    request: DeletionRequest,
+    fence: maintenance.MaintenanceFence,
+) -> None:
+    """Purge every project preview for project- or user-scoped erasure.
+
+    Tool previews are aggregate observations and cannot be attributed back to
+    one user safely. User erasure therefore purges the project's complete
+    seven-day preview window rather than retaining ambiguous derived data.
+    """
+    artifact_table_exists = _run_psql(
+        "SELECT to_regclass('public.agent_tool_result_artifacts') IS NOT NULL;",
+        fence,
+    ).strip()
+    if artifact_table_exists == "f":
+        return
+    if artifact_table_exists != "t":
+        raise DeletionError("could not verify tool result artifact storage")
+    project = _postgres_text(request.project_id)
+    _run_psql(
+        "DELETE FROM public.agent_tool_result_artifacts "
+        f"WHERE project_id = {project};",
+        fence,
+    )
+    remaining = _run_psql(
+        "SELECT count(*) FROM public.agent_tool_result_artifacts "
+        f"WHERE project_id = {project};",
+        fence,
+    ).strip()
+    if remaining != "0":
+        raise DeletionError("tool result artifact deletion did not converge")
+
+
 def _linked_anonymous_ids(
     request: DeletionRequest,
     client: maintenance.ClickHouseClient,
@@ -384,6 +417,7 @@ def execute_request(
     events = _read_audit_events(request.request_id, fence)
     _validate_audit_identity(request, events)
     if "completed" in events:
+        _purge_tool_result_artifacts(request, fence)
         return {
             "request_id": request.request_id,
             "scope": request.scope,
@@ -399,6 +433,7 @@ def execute_request(
         if "requested" not in events:
             raise DeletionError("deletion request was not durably recorded")
 
+    _purge_tool_result_artifacts(request, fence)
     aliases = _linked_anonymous_ids(request, client, fence)
     matched_rows = _delete_target_rows(request, aliases, client, fence)
     details = {

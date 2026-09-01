@@ -43,6 +43,9 @@ AGENT_SERVICE_CAPABILITIES_SQL = (
 GITHUB_AUTHORIZATION_SQL = (
     POSTGRES_MIGRATIONS / "059_github_repository_user_authorization.sql"
 ).read_text()
+TOOL_RESULT_ARTIFACTS_SQL = (
+    POSTGRES_MIGRATIONS / "061_agent_tool_result_artifacts.sql"
+).read_text()
 CONFIG_LEGACY_FIXTURE = (
     ROOT
     / "pipeline"
@@ -212,6 +215,24 @@ def test_agent_service_capabilities_continue_the_immutable_history():
     assert "CREATE FUNCTION public.apdl_agents_grant_owner_execution_roles" in sql
     assert "FROM apdl_runtime;" in sql
     assert ") ON public.agent_service_capabilities TO apdl_agents;" in sql
+
+
+def test_tool_result_artifacts_are_bounded_expiring_and_least_privileged():
+    sql = TOOL_RESULT_ARTIFACTS_SQL
+
+    assert "CREATE TABLE public.agent_tool_result_artifacts" in sql
+    assert "schema_version = 'tool_result_artifact@1'" in sql
+    assert "octet_length(preview_text) BETWEEN 1 AND 4096" in sql
+    assert "data_classification = 'confidential'" in sql
+    assert "expires_at <= created_at + INTERVAL '7 days'" in sql
+    assert "agent_tool_result_artifacts_expiry_idx" in sql
+    assert "agent_tool_result_artifacts_project_created_idx" in sql
+    assert "REVOKE ALL ON public.agent_tool_result_artifacts FROM PUBLIC, apdl_runtime" in sql
+    assert "GRANT SELECT, DELETE" in sql
+    assert "GRANT INSERT (" in sql
+    assert "data_classification," not in sql.split("GRANT INSERT (", 1)[1].split(
+        ") ON public.agent_tool_result_artifacts", 1
+    )[0]
 
 
 def test_github_authorization_quarantines_unprovable_oauth_rows():

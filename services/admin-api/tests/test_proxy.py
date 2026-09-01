@@ -224,6 +224,65 @@ async def test_agents_mutation_uses_human_bound_ephemeral_credential(
 
 
 @pytest.mark.asyncio
+async def test_tool_result_preview_requires_dual_role_and_exact_ephemeral_credential(
+    admin_session: AdminSession,
+) -> None:
+    artifact_id = "11111111-1111-4111-8111-111111111111"
+    path = (
+        "/api/projects/demo/agents/v1/agents/run-1/"
+        f"tool-result-artifacts/{artifact_id}"
+    )
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(200, json={"artifact_id": artifact_id})
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.get(path)
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert seen_key != TEST_API_KEY
+    assert re.fullmatch(r"proj_demo_[0-9a-f]{48}", seen_key)
+    insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert insert[1][4] == ["agents:read", "query:read"]
+    assert str(insert[1][5]) == admin_session.user_id
+
+    restricted = AdminSession(
+        **{
+            **admin_session.__dict__,
+            "projects": {"demo": frozenset({"agents:read"})},
+        }
+    )
+    called = False
+
+    def forbidden(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200)
+
+    async with proxy_client(httpx.MockTransport(forbidden), restricted) as client:
+        denied = client.get(path)
+        compact_uuid_denied = client.get(
+            "/api/projects/demo/agents/v1/agents/run-1/"
+            "tool-result-artifacts/11111111111141118111111111111111"
+        )
+
+    assert denied.status_code == 403
+    assert denied.json() == {
+        "detail": "Tool result previews require agents:read and query:read"
+    }
+    assert called is False
+    assert compact_uuid_denied.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_llm_connection_read_uses_live_management_authority_without_agents_read(
     admin_session: AdminSession,
 ) -> None:
