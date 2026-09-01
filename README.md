@@ -472,13 +472,14 @@ Filtered cohort comparison:
 
 ## Agents operator preview
 
-Agents starts read-only for projects created through public registration. An
-owner can activate governed setup to add `agents:run` and `agents:manage` for
-L1/L2 analysis, but this grants no Config mutation, Codegen, repository access,
-or external effect. `agents:approve` and effectful execution require either
+Project owners hold every canonical project role. Agents nevertheless starts
+with execution disabled for projects created through public registration until
+the owner activates governed setup for L1/L2 analysis. The `agents:approve`
+role and effectful execution additionally require either
 operator-provisioned project provenance or an explicit immutable
 self-registration override with operator actor and reason evidence. Agents,
-Codegen, role storage, and effect-bearing database tables enforce that ceiling.
+Codegen, service-credential storage, and effect-bearing database tables enforce
+that ceiling.
 
 The agents service runs operator-triggered analysis and proposal workflows
 powered by policy-governed LLM reasoning. The safe default permits only the

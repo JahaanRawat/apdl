@@ -62,10 +62,11 @@ server-side, never trusted from the client.
   Where the body carries a `project_id`, only *equality-check* it against the principal
   (`require_project(...)`), then use the principal's value.
 - Filter **every** DB/warehouse/cache query by `project_id`.
-- Gate each endpoint with `require_project` + `require_role`. Self-created projects begin
-  with read-only Agents access; owner-controlled setup activation may grant the analysis-only
-  `agents:run` and `agents:manage` roles. Keep effect-authorizing `agents:approve`, Codegen,
-  and external effects behind operator-provisioned or explicit execution authorization.
+- Gate each endpoint with `require_project` + `require_role`. Project owners hold every
+  canonical membership role, while owner-controlled setup separately enables governed
+  analysis. Keep effect-authorizing `agents:approve`, Codegen, and external effects behind
+  operator-provisioned or explicit execution authorization; owner membership is never a
+  substitute for that project capability.
 - Build Redis/stream keys only from principal-derived, charset-constrained values
   (`events:raw:{project_id}`, `project_id` matches `^[A-Za-z0-9]{1,64}$`).
 - When a resource is looked up by id, re-check `row["project_id"] == principal.project_id`
@@ -79,10 +80,9 @@ Agents setup mutations use a deliberately narrower proxy credential contract. Th
 supplies a short-lived, human-bound credential with `agents:read`; the Agents router verifies
 the human actor and project identity, and the setup transaction reloads the actor's current
 owner or delegated (`agents:manage` plus `credentials:manage`) authority before changing
-state. Do not add an `agents:manage` role gate to the setup router: first activation is the
-operation that grants that role, and the proxy credential is not the final authorization
-decision. Keep this exception limited to the setup endpoints and preserve both downstream
-checks.
+state. The proxy credential is not the final authorization decision: the setup transaction
+reloads live owner or delegated management authority. Keep this exception limited to the
+setup endpoints and preserve both downstream checks.
 
 **Red flags:** a query without a `project_id` filter; using `body.project_id` directly in a
 query; a path/query id fetched without an ownership re-check; a stream/cache key built from

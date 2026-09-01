@@ -49,6 +49,7 @@ class OwnershipConnection:
         )
         self.statements: list[tuple[str, tuple[object, ...]]] = []
         self.audits: list[tuple[object, ...]] = []
+        self.membership_audits: list[tuple[object, ...]] = []
 
     @asynccontextmanager
     async def transaction(self):
@@ -67,7 +68,7 @@ class OwnershipConnection:
                     if self.owner_id == TARGET_ID
                     else "owner@example.com"
                 ),
-                "execution_authorization_source": "operator_provisioned",
+                "execution_authorization_source": "self_registered_override",
             }
         if "SELECT project.owner_user_id" in query:
             return {"owner_user_id": self.owner_id}
@@ -96,6 +97,7 @@ class OwnershipConnection:
             {
                 "user_id": TARGET_ID,
                 "roles": self.target_roles,
+                "email": "target@example.com",
                 "active": True,
             },
         ]
@@ -114,6 +116,8 @@ class OwnershipConnection:
             return "UPDATE 1"
         if "INSERT INTO admin_project_ownership_audit" in query:
             self.audits.append(args)
+        if "INSERT INTO admin_project_membership_audit" in query:
+            self.membership_audits.append(args)
         return "OK"
 
 
@@ -166,12 +170,12 @@ def test_project_member_can_read_ownership_and_execution_authorization() -> None
         },
         "execution_authorization": {
             "authorized": True,
-            "source": "operator_provisioned",
+            "source": "self_registered_override",
         },
     }
 
 
-def test_owner_transfers_only_owner_column_and_writes_immutable_audit() -> None:
+def test_owner_transfer_grants_every_role_and_writes_immutable_audits() -> None:
     connection = OwnershipConnection()
     with _client(connection, _session()) as client:
         response = client.post(
@@ -196,9 +200,18 @@ def test_owner_transfers_only_owner_column_and_writes_immutable_audit() -> None:
         "owner@example.com",
         "Planned team handoff",
     )
+    assert len(connection.membership_audits) == 1
+    assert connection.membership_audits[0][2:] == (
+        OWNER_ID,
+        TARGET_ID,
+        "target@example.com",
+        ["config:read", "members:manage"],
+        list(projects.PROJECT_OWNER_ROLES),
+    )
     sql = [" ".join(query.split()) for query, _ in connection.statements]
     assert any("FOR UPDATE OF project" in query for query in sql)
     assert any("FOR UPDATE OF membership, account" in query for query in sql)
+    assert any("UPDATE admin_user_projects SET roles" in query for query in sql)
     assert not any(
         "UPDATE admin_project_execution_authorizations" in query for query in sql
     )

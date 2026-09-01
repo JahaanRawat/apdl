@@ -21,12 +21,12 @@ The `personalization` graph is disabled in 0.3.0. Config has no canonical
 UI-config storage/delivery API, so the trigger API rejects that graph, it is
 hidden from definitions, and custom agents cannot select UI-config tools.
 
-Projects created through the public workspace flow start with read-only
-definitions, run history, results, and audit access. Owner-controlled setup may
-enable governed L1/L2 analysis with `agents:run` and `agents:manage`.
-Approval, Config mutation, Codegen, repository access, and external effects are
-enabled only for operator-provisioned projects or self-created projects with an
-explicit, audited operator override, even if a credential is overprovisioned.
+Project owners hold every canonical project role. Projects created through the
+public workspace flow still require owner-controlled setup before governed
+L1/L2 analysis can run. Approval, Codegen, repository access, and external
+effects are enabled only for operator-provisioned projects or self-created
+projects with an explicit, audited operator override, even if a credential is
+overprovisioned.
 
 A run is orchestrated by the **supervisor** (`app/graphs/supervisor.py`): a
 PostgreSQL-backed dispatcher leases queued runs on any replica, the supervisor
@@ -38,9 +38,10 @@ requeued at the persisted phase rather than terminalized as a failed run.
 
 All agent routes require a registered `X-API-Key`. Read, trigger, custom-agent
 management, and approval operations use distinct project-scoped roles. Active
-owner-controlled setup may grant analysis-only `agents:run` and
-`agents:manage`; `agents:approve` and every external effect additionally require
-a canonical `admin_project_execution_authorizations` row.
+owner-controlled setup is required for analysis; `agents:approve` and every
+external effect additionally require a canonical
+`admin_project_execution_authorizations` row, even when the caller is the
+project owner.
 
 | Method | Path | Description |
 |--------|------|-------------|

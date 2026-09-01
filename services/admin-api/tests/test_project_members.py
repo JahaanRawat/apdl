@@ -11,7 +11,7 @@ import pytest
 
 from app import members
 from app.auth import AdminSession, require_session
-from app.models import PendingProjectInvitation
+from app.models import HUMAN_ROLE_ORDER, PendingProjectInvitation
 from app.security import token_hash
 from conftest import make_settings
 
@@ -38,11 +38,11 @@ class MemberConnection:
         membership_audit_rows: list[dict[str, object]] | None = None,
     ) -> None:
         self.actor_is_owner = actor_is_owner
-        self.actor_roles = actor_roles or [
-            "config:read",
-            "config:write",
-            "members:manage",
-        ]
+        self.actor_roles = actor_roles or (
+            list(HUMAN_ROLE_ORDER)
+            if actor_is_owner
+            else ["config:read", "config:write", "members:manage"]
+        )
         self.invitation_available = invitation_available
         self.account_email = account_email
         self.target_roles = target_roles or ["config:read"]

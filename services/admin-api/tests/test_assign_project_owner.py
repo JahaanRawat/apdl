@@ -6,6 +6,7 @@ from uuid import UUID
 
 import pytest
 
+from app.models import HUMAN_ROLE_ORDER
 from scripts import assign_project_owner
 
 OWNER_ID = UUID("20000000-0000-4000-8000-000000000002")
@@ -87,7 +88,12 @@ async def test_operator_assignment_locks_validates_and_audits(monkeypatch) -> No
     sql = [" ".join(query.split()) for query, _, _ in connection.calls]
     assert "FOR UPDATE" in sql[2]
     assert "FOR UPDATE OF account, membership" in sql[3]
-    update_index = next(
+    membership_update_index = next(
+        index
+        for index, query in enumerate(sql)
+        if "UPDATE admin_user_projects" in query
+    )
+    owner_update_index = next(
         index for index, query in enumerate(sql) if "UPDATE admin_projects" in query
     )
     audit_index = next(
@@ -95,7 +101,12 @@ async def test_operator_assignment_locks_validates_and_audits(monkeypatch) -> No
         for index, query in enumerate(sql)
         if "INSERT INTO admin_project_ownership_audit" in query
     )
-    assert update_index < audit_index
+    assert membership_update_index < owner_update_index < audit_index
+    assert connection.calls[membership_update_index][1] == (
+        "demo",
+        OWNER_ID,
+        list(HUMAN_ROLE_ORDER),
+    )
     assert connection.calls[audit_index][1][4:] == (
         "operator@example.com",
         "Initial operator-managed project handoff",

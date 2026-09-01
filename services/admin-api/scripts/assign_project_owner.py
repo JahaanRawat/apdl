@@ -10,6 +10,8 @@ import uuid
 
 import asyncpg
 
+from app.models import HUMAN_ROLE_ORDER
+
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 PROJECT_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
@@ -109,6 +111,17 @@ async def assign_owner(args: argparse.Namespace) -> None:
             if previous_owner_user_id == target_user_id:
                 raise SystemExit("Target user already owns the project")
 
+            await conn.execute(
+                """
+                UPDATE admin_user_projects
+                SET roles = $3
+                WHERE project_id = $1
+                  AND user_id = $2
+                """,
+                project_id,
+                target_user_id,
+                list(HUMAN_ROLE_ORDER),
+            )
             await conn.execute(
                 """
                 UPDATE admin_projects

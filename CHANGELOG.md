@@ -17,6 +17,10 @@ for its published SDKs. APDL remains a pre-1.0 developer preview.
 
 ### Changed
 
+- Project owners now retain the complete canonical human role set across
+  creation, transfer, operator assignment, and existing-project migration.
+  Effectful approvals still require independent operator project authorization;
+  ownership never bypasses that boundary.
 - PostgreSQL migration 056 is a fresh-install-only credential-custody cutover.
   Any legacy Agents or Codegen credential row, including revoked or replaced
   history, blocks the migration. Initialize a fresh database, apply the

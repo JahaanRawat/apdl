@@ -167,9 +167,7 @@ async def test_proxy_mints_and_removes_ephemeral_key_for_dynamic_project(
     assert insert[1][1] == "demo"
     assert insert[1][2] == "proj_demo_"
     assert insert[1][3] == hashlib.sha256(seen_key.encode()).hexdigest()
-    assert insert[1][4] == sorted(
-        admin_session.projects["demo"] - {"credentials:manage"}
-    )
+    assert insert[1][4] == ["config:read"]
     assert "credentials:manage" not in insert[1][4]
     assert insert[1][5] is None
     assert insert[1][6] == 300
@@ -214,6 +212,7 @@ async def test_agents_mutation_uses_human_bound_ephemeral_credential(
         for statement in statements
         if "INSERT INTO auth_credentials" in statement[0]
     )
+    assert insert[1][4] == ["agents:approve"]
     assert str(insert[1][5]) == admin_session.user_id
     removal = next(
         statement
@@ -221,6 +220,189 @@ async def test_agents_mutation_uses_human_bound_ephemeral_credential(
         if "DELETE FROM auth_credentials WHERE credential_id = $1" in statement[0]
     )
     assert removal[1] == (insert[1][0],)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/api/projects/demo/agents/v1/agents/run-1/approve",
+            {"decisions": [{"item_id": "p1", "approved": True}]},
+        ),
+        (
+            "/api/projects/demo/codegen/v1/changesets/cs-demo/merge",
+            {},
+        ),
+    ],
+)
+async def test_effect_routes_require_live_project_execution_authority_before_proxying(
+    admin_session: AdminSession,
+    path: str,
+    body: dict[str, object],
+) -> None:
+    called = False
+
+    def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(202)
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        client.app.state.pg_pool.connection.project_execution_authorized = False
+        response = client.post(
+            path,
+            headers={"Origin": "http://admin.test"},
+            json=body,
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Agents approval and effects require operator project authorization"
+    }
+    assert not called
+    authority = next(
+        statement
+        for statement in statements
+        if "AS project_execution_authorized" in statement[0]
+    )
+    assert authority[1] == ("demo",)
+    assert not any(
+        "INSERT INTO auth_credentials" in query for query, _ in statements
+    )
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_full_role_owner_mints_route_minimal_analysis_credential(
+    admin_session: AdminSession,
+) -> None:
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(202, json={"status": "queued"})
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        client.app.state.pg_pool.connection.project_execution_authorized = False
+        response = client.post(
+            "/api/projects/demo/agents/v1/agents/trigger",
+            headers={"Origin": "http://admin.test"},
+            json={"analysis_types": ["behavior_analysis"]},
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 202
+    assert re.fullmatch(r"proj_demo_[0-9a-f]{48}", seen_key)
+    insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert insert[1][4] == ["agents:run"]
+    assert str(insert[1][5]) == admin_session.user_id
+    assert not any(
+        "AS project_execution_authorized" in query for query, _ in statements
+    )
+
+
+@pytest.mark.asyncio
+async def test_authorized_codegen_approval_preserves_configured_project_key(
+    admin_session: AdminSession,
+) -> None:
+    seen: list[tuple[str, str | None]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.headers.get("x-api-key")))
+        if request.method == "GET":
+            return httpx.Response(200, json={"project_id": "demo"})
+        return httpx.Response(202, json={"status": "merged"})
+
+    async with proxy_client(httpx.MockTransport(upstream), admin_session) as client:
+        response = client.post(
+            "/api/projects/demo/codegen/v1/changesets/cs-demo/merge",
+            headers={"Origin": "http://admin.test"},
+            json={},
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 202
+    assert seen == [("GET", TEST_API_KEY), ("POST", TEST_API_KEY)]
+    assert not any(
+        "INSERT INTO auth_credentials" in query for query, _ in statements
+    )
+
+
+@pytest.mark.asyncio
+async def test_dynamic_codegen_child_credential_can_verify_parent_scope(
+    admin_session: AdminSession,
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.headers["x-api-key"]))
+        if request.method == "GET":
+            return httpx.Response(200, json={"project_id": "demo"})
+        return httpx.Response(202, json={"status": "merged"})
+
+    async with proxy_client(
+        httpx.MockTransport(upstream),
+        admin_session,
+        make_settings(service_api_keys={}),
+    ) as client:
+        response = client.post(
+            "/api/projects/demo/codegen/v1/changesets/cs-demo/merge",
+            headers={"Origin": "http://admin.test"},
+            json={},
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 202
+    assert len(seen) == 2
+    assert seen[0][0] == "GET"
+    assert seen[1][0] == "POST"
+    assert seen[0][1] == seen[1][1]
+    insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert insert[1][4] == ["agents:approve", "agents:read"]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_approval_status_uses_effect_authorized_credential(
+    admin_session: AdminSession,
+) -> None:
+    seen_key = ""
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal seen_key
+        seen_key = request.headers["x-api-key"]
+        return httpx.Response(200, json={"status": "queued"})
+
+    async with proxy_client(
+        httpx.MockTransport(upstream),
+        admin_session,
+        make_settings(service_api_keys={}),
+    ) as client:
+        response = client.get(
+            "/api/projects/demo/agents/v1/agents/run-1/approvals/command-1"
+        )
+        statements = client.app.state.audit_statements
+
+    assert response.status_code == 200
+    assert re.fullmatch(r"proj_demo_[0-9a-f]{48}", seen_key)
+    insert = next(
+        statement
+        for statement in statements
+        if "INSERT INTO auth_credentials" in statement[0]
+    )
+    assert insert[1][4] == ["agents:approve"]
+    assert any(
+        "AS project_execution_authorized" in query for query, _ in statements
+    )
 
 
 @pytest.mark.asyncio
@@ -758,6 +940,14 @@ def test_upstream_project_body_injection_registry_rejects_unregistered_routes(
 
 
 def test_agents_setup_proxy_routes_are_strictly_mapped() -> None:
+    assert (
+        proxy.required_role(
+            "agents",
+            "GET",
+            "/v1/agents/run-1/approvals/command-1",
+        )
+        == "agents:approve"
+    )
     assert (
         proxy.required_role("agents", "GET", "/v1/agents/setup")
         == "agents:read"

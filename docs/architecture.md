@@ -119,9 +119,9 @@ implementation + review + explicit operator activation ──→ SDKs ──→ 
   local `gemma4` at `http://localhost:11434/v1`, zero paid spend, and no
   cross-vendor retry. Agent memory is embedded into a pgvector table for
   retrieval across runs.
-- Self-created projects start with read-only Agents history and definitions.
-  Owner activation may enable governed L1/L2 analysis, while approval, Config
-  mutation, Codegen, and external effects remain available only to
+- Project owners hold every canonical membership role. Self-created projects
+  still require owner activation before governed L1/L2 analysis can run, while
+  approval, Codegen, and external effects remain available only to
   operator-provisioned or explicitly operator-authorized projects. Experiment
   proposals receive static shape/blast-radius validation and are audit-logged,
   but every experiment design requires human approval regardless of its stored

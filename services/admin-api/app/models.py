@@ -345,6 +345,8 @@ class ProjectMember(BaseModel):
     def validate_roles(self) -> "ProjectMember":
         if not _roles_are_canonical(self.roles):
             raise ValueError("roles must be unique and use canonical order")
+        if self.is_owner and tuple(self.roles) != HUMAN_ROLE_ORDER:
+            raise ValueError("project owners must have every canonical human role")
         return self
 
 
