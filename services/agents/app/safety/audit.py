@@ -14,6 +14,11 @@ from typing import Any
 
 import asyncpg
 
+from app.store.tool_result_artifacts import (
+    ToolResultArtifactDraft,
+    insert_tool_result_artifact,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +29,10 @@ def _row_to_audit_entry(row) -> dict:
         config = json.loads(config)
     if isinstance(safety, str):
         safety = json.loads(safety)
+    try:
+        artifact_id = row["tool_result_artifact_id"]
+    except (KeyError, TypeError):
+        artifact_id = None
     return {
         "id": row["id"],
         "run_id": row["run_id"],
@@ -32,6 +41,9 @@ def _row_to_audit_entry(row) -> dict:
         "safety_result": safety,
         "approval_status": row["approval_status"],
         "created_at": row["created_at"].isoformat(),
+        "tool_result_artifact_id": (
+            str(artifact_id) if artifact_id is not None else None
+        ),
     }
 
 
@@ -56,6 +68,8 @@ class AuditLogger:
         config: dict[str, Any] | None = None,
         safety_result: dict[str, Any] | None = None,
         approval_status: str | None = None,
+        *,
+        tool_result_artifact: ToolResultArtifactDraft | None = None,
     ) -> int:
         """Write best-effort, non-authoritative telemetry.
 
@@ -81,6 +95,7 @@ class AuditLogger:
                 config,
                 safety_result,
                 approval_status,
+                tool_result_artifact=tool_result_artifact,
             )
             logger.debug(
                 "Audit log entry %d: run=%s action=%s",
@@ -88,8 +103,24 @@ class AuditLogger:
             )
             return entry_id
         except Exception as exc:
-            # Audit logging should never break the main flow
-            logger.error("Failed to write audit log: %s", exc)
+            # Artifact persistence is additional best-effort observability. If
+            # it fails, retain the metadata-only audit row before giving up.
+            logger.error(
+                "Failed to write %saudit log: %s",
+                "tool-artifact " if tool_result_artifact is not None else "",
+                exc,
+            )
+            if tool_result_artifact is not None:
+                try:
+                    return await self.log_required(
+                        run_id,
+                        action_type,
+                        config,
+                        safety_result,
+                        approval_status,
+                    )
+                except Exception as fallback_exc:
+                    logger.error("Failed to write metadata-only audit log: %s", fallback_exc)
             return -1
 
     async def log_required(
@@ -102,28 +133,56 @@ class AuditLogger:
         *,
         idempotency_key: str | None = None,
         correlation_id: uuid.UUID | None = None,
+        tool_result_artifact: ToolResultArtifactDraft | None = None,
     ) -> int:
         """Persist an authoritative audit row or raise without authorizing work."""
         config_json = json.dumps(config or {}, default=str)
         safety_json = json.dumps(safety_result or {}, default=str)
         async with self._pool.acquire() as conn:
-            entry_id = await conn.fetchval(
-                """
-                INSERT INTO agent_audit_log (
-                    run_id, action_type, config, safety_result, approval_status,
-                    idempotency_key, correlation_id
+            if tool_result_artifact is None:
+                entry_id = await conn.fetchval(
+                    """
+                    INSERT INTO agent_audit_log (
+                        run_id, action_type, config, safety_result, approval_status,
+                        idempotency_key, correlation_id
+                    )
+                    VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
+                    RETURNING id
+                    """,
+                    run_id,
+                    action_type,
+                    config_json,
+                    safety_json,
+                    approval_status,
+                    idempotency_key,
+                    correlation_id,
                 )
-                VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
-                RETURNING id
-                """,
-                run_id,
-                action_type,
-                config_json,
-                safety_json,
-                approval_status,
-                idempotency_key,
-                correlation_id,
-            )
+            else:
+                if tool_result_artifact.run_id != run_id:
+                    raise ValueError("tool artifact run must match its audit row")
+                async with conn.transaction():
+                    entry_id = await conn.fetchval(
+                        """
+                        INSERT INTO agent_audit_log (
+                            run_id, action_type, config, safety_result,
+                            approval_status, idempotency_key, correlation_id
+                        )
+                        VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
+                        RETURNING id
+                        """,
+                        run_id,
+                        action_type,
+                        config_json,
+                        safety_json,
+                        approval_status,
+                        idempotency_key,
+                        correlation_id,
+                    )
+                    await insert_tool_result_artifact(
+                        conn,
+                        audit_entry_id=entry_id,
+                        draft=tool_result_artifact,
+                    )
         logger.debug(
             "Required audit log entry %d: run=%s action=%s",
             entry_id,
@@ -149,11 +208,16 @@ class AuditLogger:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, run_id, action_type, config, safety_result,
-                       approval_status, created_at
-                FROM agent_audit_log
-                WHERE run_id = $1
-                ORDER BY created_at DESC
+                SELECT audit.id, audit.run_id, audit.action_type, audit.config,
+                       audit.safety_result, audit.approval_status,
+                       audit.created_at,
+                       artifact.artifact_id AS tool_result_artifact_id
+                FROM agent_audit_log AS audit
+                LEFT JOIN agent_tool_result_artifacts AS artifact
+                  ON artifact.audit_entry_id = audit.id
+                 AND artifact.expires_at > statement_timestamp()
+                WHERE audit.run_id = $1
+                ORDER BY audit.created_at DESC, audit.id DESC
                 LIMIT $2
                 """,
                 run_id,
@@ -196,11 +260,15 @@ class AuditLogger:
 
         sql = f"""
             SELECT al.id, al.run_id, al.action_type, al.config,
-                   al.safety_result, al.approval_status, al.created_at
+                   al.safety_result, al.approval_status, al.created_at,
+                   artifact.artifact_id AS tool_result_artifact_id
             FROM agent_audit_log al
+            LEFT JOIN agent_tool_result_artifacts AS artifact
+              ON artifact.audit_entry_id = al.id
+             AND artifact.expires_at > statement_timestamp()
             LEFT JOIN agent_runs ar ON al.run_id = ar.run_id
             WHERE {where_clause}
-            ORDER BY al.created_at DESC
+            ORDER BY al.created_at DESC, al.id DESC
             LIMIT {limit_param}
         """
 

@@ -41,6 +41,9 @@ from app.store.run_leases import (
     requeue_expired_runs_forever,
 )
 from app.store.run_dispatcher import dispatch_runs_forever
+from app.store.tool_result_artifacts import (
+    purge_expired_tool_result_artifacts_forever,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -233,10 +236,16 @@ async def lifespan(application: FastAPI):
             name="agent-llm-attempt-reconciliation",
         )
         worker_tasks.append(llm_reconciliation_task)
+        tool_result_retention_task = asyncio.create_task(
+            purge_expired_tool_result_artifacts_forever(pool, worker_stop),
+            name="agent-tool-result-retention",
+        )
+        worker_tasks.append(tool_result_retention_task)
         application.state.run_reaper_task = reaper_task
         application.state.run_dispatcher_task = dispatcher_task
         application.state.approval_effect_task = approval_effect_task
         application.state.llm_reconciliation_task = llm_reconciliation_task
+        application.state.tool_result_retention_task = tool_result_retention_task
 
         logger.info(
             "Agents service started: PostgreSQL pool and vector store initialized"
@@ -320,6 +329,7 @@ async def readiness_check(request: Request):
         getattr(state, "run_reaper_task", None),
         getattr(state, "approval_effect_task", None),
         getattr(state, "llm_reconciliation_task", None),
+        getattr(state, "tool_result_retention_task", None),
     )
     if runtime_objects_ready and all(
         task is not None and not task.done() for task in runtime_tasks

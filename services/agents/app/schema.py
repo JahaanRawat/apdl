@@ -8,8 +8,8 @@ from typing import Any
 from app.memory.embeddings import EMBEDDING_DIMENSIONS
 
 
-MIGRATION_VERSION = 58
-MIGRATION_NAME = "058_agent_service_capabilities.sql"
+MIGRATION_VERSION = 61
+MIGRATION_NAME = "061_agent_tool_result_artifacts.sql"
 REQUIRED_COLUMNS = frozenset(
     {
         ("admin_projects", "created_by"),
@@ -46,6 +46,22 @@ REQUIRED_COLUMNS = frozenset(
         ("agent_audit_log", "run_id"),
         ("agent_audit_log", "schema_version"),
         ("agent_audit_log", "occurred_at"),
+        ("agent_tool_result_artifacts", "artifact_id"),
+        ("agent_tool_result_artifacts", "schema_version"),
+        ("agent_tool_result_artifacts", "audit_entry_id"),
+        ("agent_tool_result_artifacts", "run_id"),
+        ("agent_tool_result_artifacts", "project_id"),
+        ("agent_tool_result_artifacts", "source_id"),
+        ("agent_tool_result_artifacts", "tool_name"),
+        ("agent_tool_result_artifacts", "content_sha256"),
+        ("agent_tool_result_artifacts", "preview_text"),
+        ("agent_tool_result_artifacts", "source_byte_count"),
+        ("agent_tool_result_artifacts", "preview_byte_count"),
+        ("agent_tool_result_artifacts", "truncated"),
+        ("agent_tool_result_artifacts", "redacted"),
+        ("agent_tool_result_artifacts", "data_classification"),
+        ("agent_tool_result_artifacts", "created_at"),
+        ("agent_tool_result_artifacts", "expires_at"),
         ("agent_run_results", "run_id"),
         ("agent_run_results", "agent_name"),
         ("agent_run_results", "produces"),
@@ -348,11 +364,109 @@ async def assert_schema_ready(conn: Any) -> None:
                  'consumed_at',
                  'INSERT'
                )
+           AND has_table_privilege(
+                 current_user,
+                 'public.agent_tool_result_artifacts',
+                 'SELECT'
+               )
+           AND has_table_privilege(
+                 current_user,
+                 'public.agent_tool_result_artifacts',
+                 'DELETE'
+               )
+           AND NOT has_table_privilege(
+                 current_user,
+                 'public.agent_tool_result_artifacts',
+                 'INSERT'
+               )
+           AND NOT has_table_privilege(
+                 current_user,
+                 'public.agent_tool_result_artifacts',
+                 'UPDATE'
+               )
+           AND NOT has_table_privilege(
+                 current_user,
+                 'public.agent_tool_result_artifacts',
+                 'TRUNCATE'
+               )
+           AND (
+                 SELECT bool_and(
+                     has_column_privilege(
+                         current_user,
+                         'public.agent_tool_result_artifacts',
+                         attribute.attnum,
+                         'INSERT'
+                     ) = (attribute.attname = ANY (ARRAY[
+                         'audit_entry_id',
+                         'run_id',
+                         'project_id',
+                         'source_id',
+                         'tool_name',
+                         'content_sha256',
+                         'preview_text',
+                         'source_byte_count',
+                         'truncated',
+                         'redacted'
+                     ]::name[]))
+                 )
+                 FROM pg_catalog.pg_attribute AS attribute
+                 WHERE attribute.attrelid =
+                         'public.agent_tool_result_artifacts'::regclass
+                   AND attribute.attnum > 0
+                   AND NOT attribute.attisdropped
+               )
+           AND NOT EXISTS (
+                 SELECT 1
+                 FROM unnest(ARRAY[
+                     'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'
+                 ]::text[]) AS privilege(name)
+                 WHERE has_table_privilege(
+                     'apdl_runtime',
+                     'public.agent_tool_result_artifacts',
+                     privilege.name
+                 )
+               )
+           AND NOT EXISTS (
+                 SELECT 1
+                 FROM pg_catalog.pg_attribute AS attribute
+                 CROSS JOIN unnest(ARRAY[
+                     'SELECT', 'INSERT', 'UPDATE'
+                 ]::text[]) AS privilege(name)
+                 WHERE attribute.attrelid =
+                         'public.agent_tool_result_artifacts'::regclass
+                   AND attribute.attnum > 0
+                   AND NOT attribute.attisdropped
+                   AND has_column_privilege(
+                       'apdl_runtime',
+                       attribute.attrelid,
+                       attribute.attnum,
+                       privilege.name
+                   )
+               )
+           AND NOT EXISTS (
+                 SELECT 1
+                 FROM pg_catalog.pg_class AS relation
+                 CROSS JOIN LATERAL aclexplode(relation.relacl) AS acl
+                 WHERE relation.oid =
+                         'public.agent_tool_result_artifacts'::regclass
+                   AND acl.grantee = 0
+               )
+           AND NOT EXISTS (
+                 SELECT 1
+                 FROM pg_catalog.pg_attribute AS attribute
+                 CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
+                 WHERE attribute.attrelid =
+                         'public.agent_tool_result_artifacts'::regclass
+                   AND attribute.attnum > 0
+                   AND NOT attribute.attisdropped
+                   AND acl.grantee = 0
+               )
         """
     )
     if issuer_ready is not True:
         raise RuntimeError(
-            "Agents must use the dedicated apdl_agents capability issuer identity"
+            "Agents must use the dedicated apdl_agents identity with canonical "
+            "capability and tool-artifact privileges"
         )
 
     current_dimension = await conn.fetchval(

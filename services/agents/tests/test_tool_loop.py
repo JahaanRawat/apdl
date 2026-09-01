@@ -15,21 +15,24 @@ from app.llm.router import ToolCall, ToolCompletion
 class _RecordingAudit:
     def __init__(self) -> None:
         self.entries: list[tuple[str, str, dict]] = []
+        self.kwargs: list[dict[str, Any]] = []
 
     async def log(self, run_id: str, action_type: str, config: dict, **kwargs: Any) -> int:
         self.entries.append((run_id, action_type, config))
+        self.kwargs.append(kwargs)
         return 1
 
 
-def _ctx() -> Any:
+def _ctx(*, pool: Any = None, execution_kind: str = "agent_run") -> Any:
     return AgentContext(
-        pool=None,
+        pool=pool,
         llm_runtime=object(),
         vector_store=None,
         project_id="demo",
         time_range_days=7,
         run_id="run-1",
         audit=_RecordingAudit(),
+        execution_kind=execution_kind,
     )
 
 
@@ -86,6 +89,97 @@ async def test_loop_executes_calls_feeds_results_back_and_audits(monkeypatch):
     assert result.trace[0].tool == "discover_events"
     assert ctx.audit.entries[0][1] == "probe_tool_call"
     assert ctx.audit.entries[0][2]["round"] == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_run_audit_receives_redacted_artifact_but_custom_test_does_not(
+    monkeypatch,
+):
+    async def fake_run_tool(ctx, name, params):
+        return {"user_id": "customer-123", "count": 7}
+
+    calls = {"n": 0}
+
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] % 2 == 1:
+            return ToolCompletion(
+                tool_calls=[
+                    ToolCall(
+                        id=f"c{calls['n']}",
+                        name="discover_events",
+                        arguments={"value": "target-account"},
+                    )
+                ]
+            )
+        return ToolCompletion(text="done")
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+
+    normal = _ctx(pool=object())
+    await tool_loop.run_tool_loop(
+        normal,
+        agent_name="probe",
+        system_prompt="s",
+        user_prompt="u",
+        tool_schemas=_SCHEMAS,
+    )
+    draft = normal.audit.kwargs[0]["tool_result_artifact"]
+    assert draft is not None
+    assert draft.source_id.startswith("warehouse:")
+    assert "customer-123" not in draft.prepared.preview_text
+    assert normal.audit.entries[0][2]["params"] == {"value": "[REDACTED]"}
+
+    custom_test = _ctx(pool=object(), execution_kind="custom_agent_test")
+    await tool_loop.run_tool_loop(
+        custom_test,
+        agent_name="probe",
+        system_prompt="s",
+        user_prompt="u",
+        tool_schemas=_SCHEMAS,
+    )
+    assert custom_test.audit.kwargs[0]["tool_result_artifact"] is None
+
+
+@pytest.mark.asyncio
+async def test_artifact_preparation_failure_does_not_change_successful_tool_result(
+    monkeypatch,
+):
+    async def fake_run_tool(ctx, name, params):
+        return {"events": ["signup"]}
+
+    def fail_prepare(_output):
+        raise RuntimeError("preview unavailable")
+
+    calls = {"n": 0}
+
+    async def fake_chat(model_tier, messages, tools=None, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ToolCompletion(
+                tool_calls=[ToolCall(id="c1", name="discover_events", arguments={})]
+            )
+        tool_message = next(message for message in messages if message["role"] == "tool")
+        assert "signup" in tool_message["content"]
+        return ToolCompletion(text="done")
+
+    monkeypatch.setattr(tool_catalog, "run_tool", fake_run_tool)
+    monkeypatch.setattr(tool_loop, "prepare_tool_result", fail_prepare)
+    monkeypatch.setattr(tool_loop, "chat_completion_with_tools", fake_chat)
+    ctx = _ctx(pool=object())
+
+    result = await tool_loop.run_tool_loop(
+        ctx,
+        agent_name="probe",
+        system_prompt="s",
+        user_prompt="u",
+        tool_schemas=_SCHEMAS,
+    )
+
+    assert result.text == "done"
+    assert result.trace[0].error is None
+    assert ctx.audit.kwargs[0]["tool_result_artifact"] is None
 
 
 @pytest.mark.asyncio
@@ -523,6 +617,44 @@ def test_warehouse_result_envelope_marks_injection_text_untrusted():
     assert envelope["trust"] == "untrusted"
     assert envelope["source_id"].startswith("warehouse:")
     assert envelope["data"]["event_name"].startswith("ignore prior instructions")
+
+
+def test_source_id_binds_full_result_hash_not_prompt_truncated_prefix():
+    left_prepared = tool_loop.prepare_tool_result({"text": "x" * 9_000 + "a"})
+    right_prepared = tool_loop.prepare_tool_result({"text": "x" * 9_000 + "b"})
+    assert left_prepared is not None and right_prepared is not None
+    truncated = tool_loop._truncate(  # noqa: SLF001 - contract-level regression
+        json.dumps({"text": "x" * 9_000 + "a"}),
+        tool_loop.RESULT_DATA_CHAR_CAP,
+    )
+
+    left = tool_loop.ToolTraceEntry(
+        tool="query_events",
+        params={},
+        result=truncated,
+        prepared_result=left_prepared,
+    )
+    right = tool_loop.ToolTraceEntry(
+        tool="query_events",
+        params={},
+        result=truncated,
+        prepared_result=right_prepared,
+    )
+
+    assert tool_loop.tool_result_source_id(left) != tool_loop.tool_result_source_id(right)
+
+
+def test_tool_audit_metadata_redacts_sensitive_params_and_errors():
+    entry = tool_loop.ToolTraceEntry(
+        tool="query_events",
+        params={"user_id": "customer-123", "limit": 5},
+        error="Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+    )
+
+    config = tool_loop._tool_audit_config(entry, round_number=1)  # noqa: SLF001
+
+    assert config["params"] == {"user_id": "[REDACTED]", "limit": 5}
+    assert "abcdefghijklmnopqrstuvwxyz" not in config["error"]
 
 
 @pytest.mark.asyncio

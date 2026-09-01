@@ -16,6 +16,7 @@ remains queryable but cannot extend or shorten retention.
 | Config experiment change snapshots | PostgreSQL `experiment_audit_log` | No automatic expiry; project/cutoff purge is available only through the audited migration-044 operator function |
 | Delivery recovery evidence | PostgreSQL `config_outbox_operator_log` | No automatic expiry; immutable and payload-free |
 | Experiment snapshot purge evidence | PostgreSQL `experiment_audit_purge_log` | No automatic expiry; immutable and payload-free |
+| Agent tool-result previews | PostgreSQL `agent_tool_result_artifacts` | At most 7 days; 4 KiB secret/PII-redacted confidential preview, physically purged every 5 minutes |
 
 All retained ClickHouse tables partition by project rather than client event
 time. ClickHouse applies TTL removal asynchronously. The deletion workflow
@@ -72,13 +73,18 @@ A user request also resolves the user's retained anonymous aliases and removes
 rows bearing either the user ID or those anonymous IDs. Derived tables are
 deleted first, base events next, and alias assertions last. Keeping assertions
 until last makes an interrupted request able to rediscover its aliases.
+Both scopes also purge every live agent tool-result preview for the project.
+Those previews are aggregate observations that cannot be attributed safely to
+one user, so user erasure removes the complete project preview window.
 
 The tool has a fixed table allowlist; callers cannot provide table names or SQL.
 Its ClickHouse principal needs `SELECT` and `ALTER DELETE` on those six tables,
 schema-ledger read access, and the existing maintenance-gate permissions. Its
 PostgreSQL principal needs advisory-lock authority plus `SELECT` and `INSERT`
 on `analytics_data_deletion_audit`. The default Compose owner has these
-permissions; deployments should use a dedicated maintenance principal.
+permissions; when migration 061 is installed it also needs `SELECT` and
+`DELETE` on `agent_tool_result_artifacts`. Deployments should use a dedicated
+maintenance principal.
 
 The ledger records `requested` before any mutation and records `completed`
 only after zero-row verification. Retry an interrupted command with exactly

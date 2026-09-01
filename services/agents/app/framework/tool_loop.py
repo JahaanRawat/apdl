@@ -37,6 +37,12 @@ from typing import Any
 
 from app.framework.context import AgentContext
 from app.llm.router import chat_completion_with_tools
+from app.safety.redaction import RedactionLimitError, redact_json_value
+from app.store.tool_result_artifacts import (
+    PreparedToolResult,
+    ToolResultArtifactDraft,
+    prepare_tool_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +71,8 @@ class ToolTraceEntry:
     result: str | None = None
     error: str | None = None
     elapsed_ms: int = 0
+    prepared_result: PreparedToolResult | None = None
+    source_id: str | None = None
 
 
 @dataclass
@@ -89,18 +97,26 @@ def tool_result_source_id(entry: ToolTraceEntry) -> str:
     an insight cannot cite a different warehouse observation by reusing an
     arbitrary model-authored label.
     """
+    if entry.source_id is not None:
+        return entry.source_id
     payload = json.dumps(
         {
             "tool": entry.tool,
             "params": entry.params,
-            "result": entry.result,
+            "content_sha256": (
+                entry.prepared_result.content_sha256
+                if entry.prepared_result is not None
+                else None
+            ),
+            "result": entry.result if entry.prepared_result is None else None,
             "error": entry.error,
         },
         sort_keys=True,
         separators=(",", ":"),
         default=str,
     )
-    return f"warehouse:{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
+    entry.source_id = f"warehouse:{hashlib.sha256(payload.encode()).hexdigest()[:24]}"
+    return entry.source_id
 
 
 def warehouse_result_envelope(entry: ToolTraceEntry) -> str:
@@ -130,6 +146,55 @@ def _truncate(blob: str, cap: int = RESULT_CHAR_CAP) -> str:
     if len(blob) <= cap:
         return blob
     return blob[:cap] + f'... [truncated {len(blob) - cap} of {len(blob)} chars]'
+
+
+def _redacted_tool_audit_value(value: Any, fallback: Any) -> Any:
+    try:
+        return redact_json_value(value).value
+    except (RedactionLimitError, TypeError, ValueError):
+        return fallback
+
+
+def _tool_audit_config(
+    entry: ToolTraceEntry,
+    *,
+    round_number: int,
+    preset: bool = False,
+) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "tool": entry.tool,
+        "params": _redacted_tool_audit_value(entry.params, {}),
+        "error": _redacted_tool_audit_value(
+            entry.error,
+            "[REDACTED: error exceeded redaction limits]",
+        ),
+        "result_chars": len(entry.result or ""),
+        "elapsed_ms": entry.elapsed_ms,
+        "round": round_number,
+    }
+    if preset:
+        config["preset"] = True
+    return config
+
+
+def _tool_result_artifact_draft(
+    ctx: AgentContext,
+    entry: ToolTraceEntry,
+) -> ToolResultArtifactDraft | None:
+    if (
+        getattr(ctx, "execution_kind", "agent_run") != "agent_run"
+        or getattr(ctx, "pool", None) is None
+        or entry.error is not None
+        or entry.prepared_result is None
+    ):
+        return None
+    return ToolResultArtifactDraft(
+        project_id=ctx.project_id,
+        run_id=ctx.run_id,
+        source_id=tool_result_source_id(entry),
+        tool_name=entry.tool,
+        prepared=entry.prepared_result,
+    )
 
 
 async def _validate_or_correct_final(
@@ -271,12 +336,22 @@ async def _execute_call(
     try:
         output = await tool_catalog.run_tool(ctx, name, arguments)
         result = _truncate(json.dumps(output, default=str), RESULT_DATA_CHAR_CAP)
-        return ToolTraceEntry(
+        try:
+            prepared_result = prepare_tool_result(output)
+        except Exception:
+            # Preview observability must never turn a successful tool call into
+            # a failed agent step.
+            logger.exception("Could not prepare tool result artifact")
+            prepared_result = None
+        entry = ToolTraceEntry(
             tool=name,
             params=arguments,
             result=result,
             elapsed_ms=int((time.monotonic() - started) * 1000),
+            prepared_result=prepared_result,
         )
+        tool_result_source_id(entry)
+        return entry
     except Exception as exc:
         logger.warning("Tool %s failed in loop: %s", name, exc)
         return ToolTraceEntry(
@@ -318,15 +393,8 @@ async def run_preset_tools(
             await ctx.audit.log(
                 ctx.run_id,
                 f"{agent_name}_tool_call",
-                {
-                    "tool": executed.tool,
-                    "params": executed.params,
-                    "error": executed.error,
-                    "result_chars": len(executed.result or ""),
-                    "elapsed_ms": executed.elapsed_ms,
-                    "round": 0,
-                    "preset": True,
-                },
+                _tool_audit_config(executed, round_number=0, preset=True),
+                tool_result_artifact=_tool_result_artifact_draft(ctx, executed),
             )
     return trace
 
@@ -463,14 +531,8 @@ async def run_tool_loop(
                 await ctx.audit.log(
                     ctx.run_id,
                     f"{agent_name}_tool_call",
-                    {
-                        "tool": entry.tool,
-                        "params": entry.params,
-                        "error": entry.error,
-                        "result_chars": len(entry.result or ""),
-                        "elapsed_ms": entry.elapsed_ms,
-                        "round": round_index + 1,
-                    },
+                    _tool_audit_config(entry, round_number=round_index + 1),
+                    tool_result_artifact=_tool_result_artifact_draft(ctx, entry),
                 )
             messages.append(
                 {

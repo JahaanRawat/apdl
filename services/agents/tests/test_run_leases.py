@@ -453,6 +453,9 @@ async def test_starting_multiple_replicas_preserves_live_run_and_proposal(
     monkeypatch.setattr(
         agents_main, "reconcile_orphaned_llm_attempts_forever", idle_worker
     )
+    monkeypatch.setattr(
+        agents_main, "purge_expired_tool_result_artifacts_forever", idle_worker
+    )
 
     for _ in range(2):
         application = SimpleNamespace(state=SimpleNamespace())

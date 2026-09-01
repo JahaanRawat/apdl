@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
 from app.graphs.supervisor import RunResultPersistenceError, _persist_results
+from app.auth import Principal, authenticate_request
 from app.main import app
 from app.store.run_leases import RunLeaseLostError
 
@@ -82,6 +85,19 @@ class FakeConn:
         raise AssertionError(f"Unexpected fetchval: {query}")
 
     async def fetchrow(self, query: str, *args):
+        if "FROM agent_tool_result_artifacts AS artifact" in query:
+            now = datetime.now(timezone.utc)
+            return next(
+                (
+                    artifact
+                    for artifact in self.store.get("artifacts", [])
+                    if artifact["artifact_id"] == args[0]
+                    and artifact["run_id"] == args[1]
+                    and artifact["project_id"] == args[2]
+                    and artifact["expires_at"] > now
+                ),
+                None,
+            )
         if "SELECT status, phase" in query and "FROM agent_runs" in query:
             return next(
                 (
@@ -204,6 +220,7 @@ STORE = {
         },
     ],
     "effects": [],
+    "artifacts": [],
 }
 
 
@@ -379,9 +396,97 @@ async def test_run_audit_returns_parsed_entries():
         assert first["action_type"] == "behavior_analysis_complete"
         assert first["config"] == {"produced": "insights", "count": 2}
         assert first["created_at"].startswith("2026-06-10T12:04")
+        assert first["tool_result_artifact_id"] is None
 
         missing = await client.get("/v1/agents/nope/audit")
         assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_run_audit_links_live_tool_result_artifact_without_preview() -> None:
+    store = copy.deepcopy(STORE)
+    artifact_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    store["audit"][0]["tool_result_artifact_id"] = artifact_id
+
+    async with _client(store) as client:
+        response = await client.get("/v1/agents/run-1/audit")
+
+    entry = response.json()["audit"][0]
+    assert entry["tool_result_artifact_id"] == str(artifact_id)
+    assert "preview_text" not in entry
+
+
+@pytest.mark.asyncio
+async def test_tool_result_artifact_requires_dual_role_and_tenant_run_scope():
+    artifact_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+    created = datetime.now(timezone.utc)
+    store = copy.deepcopy(STORE)
+    store["artifacts"] = [
+        {
+            "artifact_id": artifact_id,
+            "schema_version": "tool_result_artifact@1",
+            "audit_entry_id": 2,
+            "run_id": "run-1",
+            "project_id": "demo",
+            "source_id": "warehouse:" + "a" * 24,
+            "content_sha256": "b" * 64,
+            "preview_text": '{"count":7}',
+            "source_byte_count": 11,
+            "preview_byte_count": 11,
+            "truncated": False,
+            "redacted": True,
+            "data_classification": "confidential",
+            "created_at": created,
+            "expires_at": created + timedelta(days=7),
+        }
+    ]
+
+    async with _client(store) as client:
+        denied = await client.get(
+            f"/v1/agents/run-1/tool-result-artifacts/{artifact_id}"
+        )
+    assert denied.status_code == 403
+    assert "query:read" in denied.json()["detail"]
+
+    async def dual_reader(request: Request):
+        principal = Principal(
+            credential_id="dual-reader",
+            project_id="demo",
+            roles=frozenset({"agents:read", "query:read"}),
+            self_registered_project=False,
+            execution_authorized=True,
+        )
+        request.state.principal = principal
+        return principal
+
+    app.dependency_overrides[authenticate_request] = dual_reader
+    try:
+        async with _client(store) as client:
+            response = await client.get(
+                f"/v1/agents/run-1/tool-result-artifacts/{artifact_id}"
+            )
+            wrong_run = await client.get(
+                f"/v1/agents/run-2/tool-result-artifacts/{artifact_id}"
+            )
+    finally:
+        app.dependency_overrides.pop(authenticate_request, None)
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json()["artifact_id"] == str(artifact_id)
+    assert response.json()["preview_text"] == '{"count":7}'
+    assert wrong_run.status_code == 404
+
+    store["artifacts"][0]["expires_at"] = created - timedelta(seconds=1)
+    app.dependency_overrides[authenticate_request] = dual_reader
+    try:
+        async with _client(store) as client:
+            expired = await client.get(
+                f"/v1/agents/run-1/tool-result-artifacts/{artifact_id}"
+            )
+    finally:
+        app.dependency_overrides.pop(authenticate_request, None)
+    assert expired.status_code == 404
 
 
 @pytest.mark.asyncio

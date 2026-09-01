@@ -54,8 +54,8 @@ async def test_accepts_complete_migrated_schema():
 
 
 def test_startup_requires_current_agents_contract_migration():
-    assert MIGRATION_VERSION == 58
-    assert MIGRATION_NAME == "058_agent_service_capabilities.sql"
+    assert MIGRATION_VERSION == 61
+    assert MIGRATION_NAME == "061_agent_tool_result_artifacts.sql"
     assert ("admin_projects", "created_by") in REQUIRED_COLUMNS
     assert (
         "admin_project_execution_authorizations",
@@ -69,6 +69,7 @@ def test_startup_requires_current_agents_contract_migration():
         "idempotency_key",
     ) in REQUIRED_COLUMNS
     assert ("agent_run_results", "metadata") in REQUIRED_COLUMNS
+    assert ("agent_tool_result_artifacts", "expires_at") in REQUIRED_COLUMNS
     assert ("agent_approval_effects", "lease_expires_at") in REQUIRED_COLUMNS
     assert ("llm_project_policies", "required_data_residency") in REQUIRED_COLUMNS
     assert ("llm_provider_attempts", "egress_started_at") in REQUIRED_COLUMNS

@@ -46,6 +46,9 @@ a canonical `admin_project_execution_authorizations` row.
 |--------|------|-------------|
 | `POST` | `/v1/agents/trigger` | Durably queue an agent run; returns `run_id` |
 | `GET` | `/v1/agents/{run_id}/status` | Run status, phase, insight/experiment counts |
+| `GET` | `/v1/agents/{run_id}/results` | Persisted final output from each completed agent |
+| `GET` | `/v1/agents/{run_id}/audit` | Metadata audit trail with nullable tool-result artifact references |
+| `GET` | `/v1/agents/{run_id}/tool-result-artifacts/{artifact_id}` | Live bounded tool-result preview; requires both `agents:read` and `query:read` |
 | `POST` | `/v1/agents/{run_id}/cancel` | Durably cancel an active run and fence further work |
 | `POST` | `/v1/agents/{run_id}/approve` | Validate exact per-item decisions and queue an approval command (`202`) |
 | `GET` | `/v1/agents/{run_id}/approvals/{command_id}` | Command and per-effect retry/manual-intervention status |
@@ -170,6 +173,13 @@ experiment in 0.3.0. Actions that fail static validation halt.
   mutation intents are committed with their command/outbox transaction before
   external work. Best-effort logging is reserved for non-authoritative
   workflow telemetry.
+- **Tool-result previews** (`app/store/tool_result_artifacts.py`) — normal agent
+  runs may attach a random artifact reference to a tool-call audit row. The
+  artifact contains only a secret/PII-redacted inert preview capped at 4096
+  UTF-8 bytes, full-result integrity metadata, fixed `confidential`
+  classification, and a maximum seven-day expiry. Preview writes are
+  best-effort, reads require both audit and warehouse-read roles, responses are
+  non-cacheable, and a background worker physically deletes expired rows.
 - **Rollback surface** (`app/safety/rollback.py`) — explicitly unavailable and
   fails closed. It neither decides nor executes an automatic rollback.
 
