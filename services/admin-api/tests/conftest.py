@@ -67,6 +67,7 @@ class AuditConnection:
     def __init__(self, statements: list[tuple[str, tuple[object, ...]]]) -> None:
         self.statements = statements
         self.llm_connection_authorized = True
+        self.project_execution_authorized = True
         self.repository_connection_authorized = True
 
     @asynccontextmanager
@@ -75,6 +76,14 @@ class AuditConnection:
 
     async def execute(self, query: str, *args):
         self.statements.append((query, args))
+        if (
+            "INSERT INTO auth_credentials" in query
+            and not self.project_execution_authorized
+            and "agents:approve" in args[4]
+        ):
+            raise AssertionError(
+                "unauthorized project attempted to mint agents:approve"
+            )
         return "OK"
 
     async def fetchrow(self, query: str, *args):
@@ -82,6 +91,12 @@ class AuditConnection:
         if "AS llm_connection_authorized" in query:
             return {
                 "llm_connection_authorized": self.llm_connection_authorized
+            }
+        if "AS project_execution_authorized" in query:
+            return {
+                "project_execution_authorized": (
+                    self.project_execution_authorized
+                )
             }
         if "AS repository_connection_authorized" in query:
             return {

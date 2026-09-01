@@ -93,10 +93,12 @@ stored only as hashes, and never placed in a URL.
 An authenticated user can create a canonical project from
 `/settings/workspace`. `POST /api/projects` accepts only `{project_id}`, inserts
 the `admin_projects` record and the creator's `admin_user_projects` membership
-in one transaction, and returns the refreshed identity. The creator receives
-the core ingestion, Config, and Query roles plus read-only Agents access;
-`agents:run`, `agents:manage`, and `agents:approve` are not granted. Another
-user cannot claim an existing project ID. Database triggers also register
+in one transaction, and returns the refreshed identity. The creator becomes
+the project owner and receives the complete canonical human role set. Roles do
+not replace project capability checks: governed Agents analysis still requires
+active setup, and `agents:approve` remains dormant until the project has
+operator execution authorization. Another user cannot claim an existing
+project ID. Database triggers also register
 project IDs introduced by operator membership or service-credential
 provisioning. Those operator projects have no creator, while a self-created
 project permanently retains its creator provenance; deleting the creator is
@@ -180,13 +182,15 @@ service credential to the browser or storing a recoverable key.
 Effectful Agents and Codegen execution requires a canonical
 `admin_project_execution_authorizations` row. Migration 028 backfills and
 automatically records `operator_provisioned` authority only for projects whose
-immutable `admin_projects.created_by` is null. Self-created projects retain
-`agents:read` by default. An operator may authorize one deliberately with the
+immutable `admin_projects.created_by` is null. Self-created project owners
+retain every membership role, but effect permissions alone convey no execution
+capability. An operator may authorize one deliberately with the
 `self_registered_override` source, a non-empty actor, reason, and timestamp.
 Agents and Codegen independently load that record, while PostgreSQL rejects
-`agents:approve` and inserts into registered effect-bearing tables when it is
-absent. Governed analysis uses `agents:run`/`agents:manage`, requires active
-owner-controlled Agents setup, and cannot mint downstream mutation authority.
+effect-capable service credentials and inserts into registered effect-bearing
+tables when it is absent. Governed analysis uses `agents:run`/`agents:manage`,
+requires active owner-controlled Agents setup, and cannot mint downstream
+mutation authority.
 
 Experiment analysis uses synchronous authority delegation. After Query has
 authenticated either a confidential `X-API-Key` or a Query-and-Config internal
@@ -199,8 +203,8 @@ outer response both complete.
 
 `make create-admin-user` remains the operator-only bootstrap and recovery path.
 Reprovisioning an existing email rotates its password and revokes active
-sessions. An execution role on a previously unauthorized self-created project
-requires all three explicit options:
+sessions. Authorizing effectful execution on a previously unauthorized
+self-created project requires all three explicit options:
 
 ```bash
 make create-admin-user ARGS="\
@@ -212,9 +216,10 @@ make create-admin-user ARGS="\
   --override-reason 'Approved production automation boundary'"
 ```
 
-The authorization and role grant commit together. The authorization record is
-immutable audit evidence; operational access is stopped by removing execution
-roles and revoking credentials.
+The authorization and requested membership update commit together. The
+authorization record is immutable audit evidence. Revoke service credentials
+or remove delegated members' effect roles to stop their access; the current
+owner retains the complete role set.
 
 ## Roles
 
@@ -231,10 +236,10 @@ roles and revoking credentials.
 | `agents:approve` | Approve or reject gated agent actions |
 | `credentials:manage` | Human-only creation, rotation, revocation, and audit of restricted SDK credentials |
 
-Self-created projects begin with `agents:read`. Owner activation of governed
-setup may add `agents:run` and `agents:manage` for L1/L2 analysis.
-`agents:approve`, Codegen, and external effects remain valid only for
-operator-provisioned or explicitly authorized self-created projects.
+Project owners hold every canonical human role. Active setup is still required
+for L1/L2 analysis, and `agents:approve`, Codegen, and external effects remain
+valid only for operator-provisioned or explicitly authorized self-created
+projects. Membership roles never substitute for that project authorization.
 
 ## Agents execution capabilities
 

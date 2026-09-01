@@ -1,4 +1,4 @@
-"""Operator CLI provenance checks for Agents and Codegen execution roles."""
+"""Operator CLI checks for human roles and project execution authority."""
 
 from __future__ import annotations
 
@@ -34,10 +34,12 @@ class FakeConnection:
         created_by: UUID | None,
         execution_authorized: bool,
         user_id: UUID | None = None,
+        owner_user_id: UUID | None = None,
     ) -> None:
         self.project = {
             "created_by": created_by,
             "execution_authorized": execution_authorized,
+            "owner_user_id": owner_user_id,
         }
         self.user_id = user_id
         self.calls: list[tuple[str, tuple[object, ...], bool]] = []
@@ -98,7 +100,7 @@ def _patch_runtime(monkeypatch, connection: FakeConnection) -> None:
 
 
 @pytest.mark.asyncio
-async def test_self_registered_project_rejects_execution_role_without_override(
+async def test_self_registered_project_stores_dormant_effect_role_without_override(
     monkeypatch,
 ):
     connection = FakeConnection(
@@ -107,16 +109,20 @@ async def test_self_registered_project_rejects_execution_role_without_override(
     )
     _patch_runtime(monkeypatch, connection)
 
-    with pytest.raises(SystemExit, match="Self-registered projects require"):
-        await create_admin_user.provision(_args())
+    await create_admin_user.provision(_args(roles=["agents:approve"]))
 
     sql = _sql_calls(connection)
     assert not any(
         "INSERT INTO admin_project_execution_authorizations" in query
         for query in sql
     )
-    assert not any("INSERT INTO admin_user_projects" in query for query in sql)
-    assert connection.transaction_exit_type is SystemExit
+    membership_call = next(
+        call
+        for call in connection.calls
+        if "INSERT INTO admin_user_projects" in call[0]
+    )
+    assert membership_call[1][2] == ["agents:approve"]
+    assert connection.transaction_exit_type is None
     assert connection.closed is True
 
 
@@ -132,6 +138,7 @@ async def test_explicit_override_is_audited_before_role_grant_in_one_transaction
 
     await create_admin_user.provision(
         _args(
+            roles=["agents:read"],
             allow_self_registered_execution=True,
             override_actor="operator@example.com",
             override_reason="Approved for production experiment automation",
@@ -209,15 +216,6 @@ async def test_existing_execution_authority_allows_role_grant_without_override(
                 override_reason="approved",
             ),
             "--override-actor is required",
-        ),
-        (
-            _args(
-                roles=["agents:read"],
-                allow_self_registered_execution=True,
-                override_actor="operator@example.com",
-                override_reason="approved",
-            ),
-            "requires an Agents execution role",
         ),
         (
             _args(override_actor="operator@example.com"),
@@ -300,3 +298,24 @@ async def test_cli_can_grant_human_only_credential_management_role(monkeypatch):
         "INSERT INTO admin_project_execution_authorizations" in query
         for query, _, _ in connection.calls
     )
+
+
+@pytest.mark.asyncio
+async def test_reprovisioning_owner_cannot_downscope_project_roles(monkeypatch):
+    owner_id = UUID("10000000-0000-4000-8000-000000000001")
+    connection = FakeConnection(
+        created_by=owner_id,
+        execution_authorized=False,
+        user_id=owner_id,
+        owner_user_id=owner_id,
+    )
+    _patch_runtime(monkeypatch, connection)
+
+    await create_admin_user.provision(_args(roles=["credentials:manage"]))
+
+    membership_call = next(
+        call
+        for call in connection.calls
+        if "INSERT INTO admin_user_projects" in call[0]
+    )
+    assert membership_call[1][2] == list(create_admin_user.ROLE_ORDER)

@@ -12,25 +12,13 @@ import uuid
 
 import asyncpg
 
+from app.models import HUMAN_ROLE_ORDER
 from app.security import hash_password
 
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 PROJECT_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
-ROLE_ORDER = (
-    "events:write",
-    "config:read",
-    "config:write",
-    "config:evaluate",
-    "query:read",
-    "agents:read",
-    "agents:run",
-    "agents:manage",
-    "agents:approve",
-    "credentials:manage",
-    "members:manage",
-)
+ROLE_ORDER = HUMAN_ROLE_ORDER
 ROLES = frozenset(ROLE_ORDER)
-EXECUTION_ROLES = frozenset({"agents:run", "agents:manage", "agents:approve"})
 MAINTENANCE_INHIBITOR_LOCK_ID = 4_158_044_083
 MAINTENANCE_GUARD_LOCK_ID = 4_158_044_084
 
@@ -86,16 +74,11 @@ async def provision(args: argparse.Namespace) -> None:
     if unknown:
         raise SystemExit(f"Unknown roles: {', '.join(unknown)}")
     roles = [role for role in ROLE_ORDER if role in requested_roles]
-    requested_execution = bool(EXECUTION_ROLES.intersection(roles))
     allow_override = bool(
         getattr(args, "allow_self_registered_execution", False)
     )
     override_actor = getattr(args, "override_actor", None)
     override_reason = getattr(args, "override_reason", None)
-    if allow_override and not requested_execution:
-        raise SystemExit(
-            "--allow-self-registered-execution requires an Agents execution role"
-        )
     if not allow_override and (override_actor is not None or override_reason is not None):
         raise SystemExit(
             "--override-actor and --override-reason require "
@@ -141,6 +124,7 @@ async def provision(args: argparse.Namespace) -> None:
             project = await conn.fetchrow(
                 """
                 SELECT project.created_by,
+                       project.owner_user_id,
                        (execution_authority.project_id IS NOT NULL)
                            AS execution_authorized
                 FROM admin_projects AS project
@@ -157,23 +141,14 @@ async def provision(args: argparse.Namespace) -> None:
 
             self_registered = project["created_by"] is not None
             execution_authorized = bool(project["execution_authorized"])
-            needs_override = (
-                requested_execution
-                and self_registered
-                and not execution_authorized
-            )
-            if needs_override and not allow_override:
-                raise SystemExit(
-                    "Self-registered projects require "
-                    "--allow-self-registered-execution with an operator actor "
-                    "and reason before execution roles can be granted"
-                )
-            if allow_override and not needs_override:
+            if allow_override and (
+                not self_registered or execution_authorized
+            ):
                 raise SystemExit(
                     "Execution override was requested, but this project is "
                     "already authorized or operator-provisioned"
                 )
-            if needs_override:
+            if allow_override:
                 await conn.execute(
                     """
                     INSERT INTO admin_project_execution_authorizations (
@@ -218,6 +193,8 @@ async def provision(args: argparse.Namespace) -> None:
                     "UPDATE admin_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
                     user_id,
                 )
+            if project["owner_user_id"] == user_id:
+                roles = list(ROLE_ORDER)
             await conn.execute(
                 """
                 INSERT INTO admin_user_projects (user_id, project_id, roles)

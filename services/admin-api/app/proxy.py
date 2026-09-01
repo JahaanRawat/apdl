@@ -90,6 +90,7 @@ _UPSTREAM_PROJECT_BODY_PATTERNS = (
 _EPHEMERAL_CREDENTIAL_TTL_SECONDS = 300
 _LLM_CONNECTION_READER = "llm-connections:read"
 _LLM_CONNECTION_MANAGER = "llm-connections:manage"
+_OPERATOR_AUTHORIZED_EFFECT_ROLE = "agents:approve"
 _SERVICE_CREDENTIAL_ROLES = frozenset(
     {
         "events:write",
@@ -522,6 +523,11 @@ def required_role(service: str, method: str, path: str) -> str | None:
             return ""
         if method == "GET" and path == "/v1/agents/capabilities/execution":
             return "agents:run"
+        if method == "GET" and re.fullmatch(
+            r"/v1/agents/[^/]+/approvals/[^/]+",
+            path,
+        ) is not None:
+            return "agents:approve"
         if method == "GET":
             return "agents:read"
         if method == "POST" and path == "/v1/agents/trigger":
@@ -592,6 +598,25 @@ async def _has_llm_connection_authority(
             uuid.UUID(user_id),
         )
     return row is not None and bool(row["llm_connection_authorized"])
+
+
+async def _has_project_execution_authority(
+    request: Request,
+    project_id: str,
+) -> bool:
+    """Recheck immutable operator effect authority before credential minting."""
+    async with request.app.state.pg_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM admin_project_execution_authorizations AS execution_authority
+                WHERE execution_authority.project_id = $1
+            ) AS project_execution_authorized
+            """,
+            project_id,
+        )
+    return row is not None and bool(row["project_execution_authorized"])
 
 
 def _assert_tenant_value(value: object, project_id: str) -> None:
@@ -924,6 +949,16 @@ async def proxy_service(
             status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient role"
         )
 
+    if role == _OPERATOR_AUTHORIZED_EFFECT_ROLE:
+        if not await _has_project_execution_authority(request, project_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Agents approval and effects require operator project "
+                    "authorization"
+                ),
+            )
+
     if "api_key" in request.query_params:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -969,7 +1004,15 @@ async def proxy_service(
             or upstream_path == "/v1/agents/setup"
         )
     ) or role == _LLM_CONNECTION_MANAGER or is_tool_result_artifact_read
-    credential_roles = roles
+    # Dynamic credentials carry only the authority required by this route. A
+    # dormant agents:approve membership must not contaminate an otherwise
+    # authorized analysis or configuration request on a project without
+    # operator effect authorization.
+    credential_roles = (
+        frozenset({role})
+        if role in _SERVICE_CREDENTIAL_ROLES
+        else roles - {_OPERATOR_AUTHORIZED_EFFECT_ROLE}
+    )
     if role == _LLM_CONNECTION_MANAGER or elevated_llm_connection_read:
         # Grant only the upstream read capability needed by this management
         # surface. The receiving service rechecks live authority inside
@@ -977,6 +1020,13 @@ async def proxy_service(
         credential_roles = frozenset({"agents:read"})
     elif is_tool_result_artifact_read:
         credential_roles = frozenset({"agents:read", "query:read"})
+    elif (
+        service == "codegen"
+        and _CODEGEN_CHANGESET_PATH.fullmatch(upstream_path) is not None
+    ):
+        # Child-route tenant verification performs one authenticated GET for
+        # the parent changeset before forwarding the requested action.
+        credential_roles = credential_roles | {"agents:read"}
     if service == "llm-vault":
         api_key = settings.llm_vault_admin_token
     else:

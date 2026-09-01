@@ -95,7 +95,7 @@ def test_zero_project_user_creates_project_and_receives_owner_roles() -> None:
     assert identity["projects"] == [
         {
             "project_id": "newproject",
-            "roles": list(projects.PROJECT_CREATOR_ROLES),
+            "roles": list(projects.PROJECT_OWNER_ROLES),
         }
     ]
     membership = next(
@@ -105,26 +105,24 @@ def test_zero_project_user_creates_project_and_receives_owner_roles() -> None:
     )
     assert membership[1][1:] == (
         "newproject",
-        list(projects.PROJECT_CREATOR_ROLES),
+        list(projects.PROJECT_OWNER_ROLES),
     )
 
 
-def test_self_registered_project_roles_are_core_only() -> None:
-    assert projects.PROJECT_CREATOR_ROLES == (
+def test_project_owner_receives_every_canonical_human_role() -> None:
+    assert projects.PROJECT_OWNER_ROLES == (
         "events:write",
         "config:read",
         "config:write",
         "config:evaluate",
         "query:read",
         "agents:read",
-        "credentials:manage",
-        "members:manage",
-    )
-    assert not {
         "agents:run",
         "agents:manage",
         "agents:approve",
-    }.intersection(projects.PROJECT_CREATOR_ROLES)
+        "credentials:manage",
+        "members:manage",
+    )
 
 
 def test_project_creation_preserves_existing_profile_projects() -> None:

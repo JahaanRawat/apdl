@@ -38,8 +38,8 @@ migrator runs:
   narrow object privileges needed by that `SECURITY DEFINER` function. It is
   never granted to runtime or operator callers.
 - `apdl_project_authority_definer` is a `NOLOGIN` owner for the exact routines
-  that lock project-management authority and add initial owner analysis roles
-  with audit evidence. Agents cannot update Admin memberships directly.
+  that lock project-management authority and validate owner analysis roles.
+  Agents cannot update Admin memberships directly.
 - `apdl_capability_consumer_definer` is a `NOLOGIN` owner for the atomic
   mutation-capability consume routine. It can update only `consumed_at` and is
   never granted to a login.

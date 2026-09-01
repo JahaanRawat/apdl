@@ -146,10 +146,10 @@ session.
 
 `make create-admin-user` remains available for bootstrap, recovery, and
 non-browser provisioning. It prompts for the password without placing it in
-shell history; `--password-stdin` supports secret-manager pipelines. Granting
-`agents:approve` or any effect authority on a self-created project requires a
-deliberate, durable override; owner-controlled setup can grant analysis-only
-`agents:run` and `agents:manage` without one:
+shell history; `--password-stdin` supports secret-manager pipelines. Project
+owners retain every canonical human role. Using `agents:approve` for an effect
+on a self-created project still requires a deliberate, durable override; the
+membership role alone is not execution authority:
 
 ```bash
 make create-admin-user ARGS="\
@@ -163,9 +163,10 @@ make create-admin-user ARGS="\
 
 The actor, reason, source, and timestamp are stored in an immutable project
 authorization row in the same transaction as the role grant. Omit the override
-flags for operator-provisioned or already-authorized projects. Remove execution
-roles and revoke credentials to stop access; the provenance record itself is
-not rewritten.
+flags for operator-provisioned or already-authorized projects. Revoke service
+credentials or remove delegated members' effect roles to stop their access;
+the provenance record itself is not rewritten, and the current owner retains
+the complete role set.
 
 ## Health and readiness
 

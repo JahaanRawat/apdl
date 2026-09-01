@@ -14,6 +14,7 @@ from app.models import (
     AuditPageQuery,
     ConsoleIdentity,
     ExecutionAuthorizationSummary,
+    HUMAN_ROLE_ORDER,
     HumanProjectOwnership,
     OperatorManagedProjectOwnership,
     OwnershipAuditEntry,
@@ -28,16 +29,7 @@ from app.models import (
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
-PROJECT_CREATOR_ROLES = (
-    "events:write",
-    "config:read",
-    "config:write",
-    "config:evaluate",
-    "query:read",
-    "agents:read",
-    "credentials:manage",
-    "members:manage",
-)
+PROJECT_OWNER_ROLES = HUMAN_ROLE_ORDER
 
 
 def _authorization_summary(row) -> ProjectAuthorizationSummary:
@@ -179,7 +171,7 @@ async def create_project(
                 """,
                 uuid.UUID(session.user_id),
                 project_id,
-                list(PROJECT_CREATOR_ROLES),
+                list(PROJECT_OWNER_ROLES),
             )
             await conn.execute(
                 """
@@ -193,7 +185,7 @@ async def create_project(
             )
 
     projects = dict(session.projects)
-    projects[str(project_id)] = frozenset(PROJECT_CREATOR_ROLES)
+    projects[str(project_id)] = frozenset(PROJECT_OWNER_ROLES)
     return ConsoleIdentity(
         user_id=session.user_id,
         email=session.email,
@@ -277,7 +269,8 @@ async def transfer_project_ownership(
 
             memberships = await conn.fetch(
                 """
-                SELECT membership.user_id, membership.roles, account.active
+                SELECT membership.user_id, membership.roles,
+                       account.email, account.active
                 FROM admin_user_projects AS membership
                 JOIN admin_users AS account
                   ON account.user_id = membership.user_id
@@ -301,6 +294,43 @@ async def transfer_project_ownership(
                     detail=(
                         "Target must be an active project member with members:manage"
                     ),
+                )
+
+            target_roles = [str(role) for role in target["roles"]]
+            owner_roles = list(PROJECT_OWNER_ROLES)
+            if target_roles != owner_roles:
+                await conn.execute(
+                    """
+                    UPDATE admin_user_projects
+                    SET roles = $3
+                    WHERE project_id = $1
+                      AND user_id = $2
+                    """,
+                    project_id,
+                    body.target_user_id,
+                    owner_roles,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO admin_project_membership_audit (
+                        audit_id,
+                        project_id,
+                        action,
+                        actor_user_id,
+                        subject_user_id,
+                        subject_email,
+                        previous_roles,
+                        new_roles
+                    )
+                    VALUES ($1, $2, 'roles_replace', $3, $4, $5, $6, $7)
+                    """,
+                    uuid.uuid4(),
+                    project_id,
+                    actor_user_id,
+                    body.target_user_id,
+                    str(target["email"]),
+                    target_roles,
+                    owner_roles,
                 )
 
             result = await conn.execute(
