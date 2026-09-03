@@ -195,7 +195,7 @@ async def test_read_is_bound_to_artifact_run_project_and_live_expiry() -> None:
 
 
 @pytest.mark.asyncio
-async def test_expiry_cleanup_is_bounded_and_skip_locked() -> None:
+async def test_expiry_cleanup_is_bounded_ordered_and_requires_no_update_lock() -> None:
     conn = _Conn()
 
     deleted = await artifacts.delete_expired_tool_result_artifacts(
@@ -204,9 +204,12 @@ async def test_expiry_cleanup_is_bounded_and_skip_locked() -> None:
 
     assert deleted == 3
     query, args = conn.fetchval_calls[0]
-    assert "FOR UPDATE SKIP LOCKED" in query
+    assert "FOR UPDATE" not in query
+    assert "SKIP LOCKED" not in query
     assert "ORDER BY expires_at, artifact_id" in query
     assert "LIMIT $1" in query
+    assert "DELETE FROM agent_tool_result_artifacts AS artifact" in query
+    assert "USING expired" in query
     assert args == (25,)
 
     with pytest.raises(ValueError, match="batch_size"):

@@ -201,10 +201,13 @@ async def delete_expired_tool_result_artifacts(
     *,
     batch_size: int = TOOL_RESULT_RETENTION_BATCH_SIZE,
 ) -> int:
-    """Delete one multi-replica-safe expiry batch."""
+    """Delete one bounded expiry batch without requiring row-lock privileges."""
     if type(batch_size) is not int or not 1 <= batch_size <= 10_000:
         raise ValueError("batch_size must be an integer between 1 and 10000")
     async with pool.acquire() as conn:
+        # Do not add a locking SELECT here: apdl_agents intentionally has no
+        # UPDATE privilege. Concurrent DELETEs may contend for the same row,
+        # but deletion remains idempotent and the bounded batch stays correct.
         deleted = await conn.fetchval(
             """
             WITH expired AS (
@@ -212,7 +215,6 @@ async def delete_expired_tool_result_artifacts(
                 FROM agent_tool_result_artifacts
                 WHERE expires_at <= statement_timestamp()
                 ORDER BY expires_at, artifact_id
-                FOR UPDATE SKIP LOCKED
                 LIMIT $1
             ), removed AS (
                 DELETE FROM agent_tool_result_artifacts AS artifact
