@@ -19,6 +19,7 @@ from dataclasses import dataclass
 MAX_CODEGEN_JOB_BUDGET_SECONDS = 3000
 CODEGEN_JOB_OVERHEAD_SECONDS = 60
 CODEGEN_REMOTE_GIT_PHASES = 2  # authenticated clone + push
+MAX_BRIEF_ATTEMPTS = 2  # initial schema response + one bounded correction
 _MIN_PROCESS_TIMEOUT_SECONDS = 1
 _MIN_LLM_TIMEOUT_SECONDS = 0.001
 
@@ -118,9 +119,10 @@ def resolve_codegen_deadline_plan(
 ) -> CodegenDeadlinePlan:
     """Resolve requested phase maxima into one internally consistent plan.
 
-    One edit-agent call is possible per round.  The brief runs at most once and
-    semantic review runs at most once per round, including every retry.  The
-    fixed overhead reserve covers deterministic inspection, serialization, and
+    One edit-agent call is possible per round. Brief compilation reserves two
+    calls so one schema-invalid response can be corrected, while semantic
+    review runs at most once per round, including every retry. The fixed
+    overhead reserve covers deterministic inspection, serialization, and
     container startup/teardown outside those explicitly timed phases.
     """
 
@@ -131,7 +133,7 @@ def resolve_codegen_deadline_plan(
     requested_git = _positive_finite("CODEGEN_GIT_TIMEOUT", git_timeout_seconds)
     requested_llm = _positive_finite("CODEGEN_LLM_TIMEOUT", llm_timeout_seconds)
     rounds = 1 + edit_retries
-    brief_calls = int(brief_enabled)
+    brief_calls = MAX_BRIEF_ATTEMPTS * int(brief_enabled)
     review_calls = rounds if review_enabled else 0
     helper_calls = brief_calls + review_calls
 

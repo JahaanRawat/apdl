@@ -10,7 +10,7 @@ pushes the returned patch. Keeping the engine behind a Protocol makes the engine
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Self
 
 from app.contracts.models import ContractBundle
 from app.inspection.models import DependencySlice, InspectionSnapshot
@@ -39,6 +39,69 @@ def _default_effective_safety_policy() -> EffectiveCodegenSafetyPolicy:
     return resolve_effective_policy(
         TenantCodegenConnectionPolicy(), PlatformCodegenSafetyPolicy()
     )
+
+
+_SAFE_EDIT_FAILURE_MESSAGES: dict[tuple[str, str], str] = {
+    (
+        "brief",
+        "invalid_model_output",
+    ): "Engineering brief model output did not match the required schema.",
+    (
+        "brief",
+        "model_unavailable",
+    ): "Engineering brief model was unavailable.",
+    (
+        "brief",
+        "structured_output_unavailable",
+    ): "Engineering brief structured-output enforcement was unavailable.",
+}
+
+
+@dataclass(frozen=True)
+class SafeEditFailure:
+    """Allowlisted failure metadata safe to cross the sandbox boundary.
+
+    The worker must never put provider output, prompts, exception text, or other
+    free-form data in this structure.  Keeping the accepted pairs closed lets
+    the controller map them to fixed messages without trusting worker text.
+    """
+
+    stage: Literal["brief"]
+    code: Literal[
+        "invalid_model_output",
+        "model_unavailable",
+        "structured_output_unavailable",
+    ]
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.stage) is not str
+            or type(self.code) is not str
+            or (self.stage, self.code) not in _SAFE_EDIT_FAILURE_MESSAGES
+        ):
+            raise ValueError("edit failure diagnostic is not allowlisted")
+
+    @classmethod
+    def from_worker_payload(cls, value: object) -> Self | None:
+        """Accept only the exact canonical worker object, without coercion."""
+        if type(value) is not dict or set(value) != {"stage", "code"}:
+            return None
+        stage = value.get("stage")
+        code = value.get("code")
+        if type(stage) is not str or type(code) is not str:
+            return None
+        if (stage, code) not in _SAFE_EDIT_FAILURE_MESSAGES:
+            return None
+        return cls(stage="brief", code=code)
+
+    def to_worker_payload(self) -> dict[str, str]:
+        """Return the only JSON shape accepted by the controller."""
+        return {"stage": self.stage, "code": self.code}
+
+    @property
+    def safe_error(self) -> str:
+        """Return fixed operator-visible text containing no worker data."""
+        return _SAFE_EDIT_FAILURE_MESSAGES[(self.stage, self.code)]
 
 
 @dataclass
@@ -115,6 +178,10 @@ class EditResult:
     changed_paths: list[str] = field(default_factory=list)
     diff_text: str = ""
     error: str | None = None
+    #: Optional closed diagnostic emitted by a failed isolated worker. The
+    #: controller persists only its fixed ``safe_error`` mapping, so adding
+    #: actionable diagnostics does not require a database schema change.
+    safe_failure: SafeEditFailure | None = None
     logs_uri: str | None = None
     #: Local candidate commit identity. This is not a remote branch identity;
     #: initial generation and repair replace it with the controller-published

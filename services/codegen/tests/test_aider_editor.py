@@ -9,6 +9,7 @@ import base64
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,9 +29,10 @@ from app.editor.aider_editor import (
 from app.editor.aider_launcher import (
     TRUSTED_AIDER_MESSAGE_PREFIX as _TRUSTED_AIDER_MESSAGE_PREFIX,
 )
-from app.editor.base import EditRequest
+from app.editor.base import EditRequest, SafeEditFailure
 from app.editor.conventions import CONVENTIONS_MD
 from app.editor.environment import MODEL_PROVIDER_ENV
+from app.llm.contracts import LlmExecutionAuthority
 from app.profiling.models import (
     CIWorkflow,
     CommandKind,
@@ -794,12 +796,24 @@ def _strict_review_response(
     )
 
 
-def _routing_complete(brief_reply=None, review_replies=None):
+def _routing_complete(
+    brief_reply=None,
+    review_replies=None,
+    *,
+    brief_prompts: list[str] | None = None,
+):
     """One completer serving both auxiliary passes, routed by system prompt."""
+    brief_replies = (
+        list(brief_reply) if isinstance(brief_reply, (list, tuple)) else None
+    )
     replies = list(review_replies or [])
 
     async def complete(system: str, user: str):
         if "engineering briefs" in system:
+            if brief_prompts is not None:
+                brief_prompts.append(user)
+            if brief_replies is not None:
+                return brief_replies.pop(0)
             return brief_reply
         reply = replies.pop(0) if replies else {"decision": "approved"}
         if isinstance(reply, str):
@@ -809,15 +823,40 @@ def _routing_complete(brief_reply=None, review_replies=None):
     return complete
 
 
-_BRIEF = (
-    "## Goal\nShip the bot filter.\n\n## Scope decisions\n- none\n\n"
-    "## Implementation plan\n- edit app/x.ts\n\n## Acceptance criteria\n1. filter works"
-) + "." * 200
+_BRIEF = json.dumps(
+    {
+        "schema_version": "engineering_brief@1",
+        "goal": "Ship the bot filter.",
+        "scope_decisions": ["All requested work is implementable in this repository."],
+        "implementation_plan": ["Edit app/x.ts to implement the bot filter."],
+        "acceptance_criteria": ["The bot filter works for repository callers."],
+    }
+)
+_RENDERED_BRIEF = (
+    "## Goal\nShip the bot filter.\n\n"
+    "## Scope decisions\n"
+    "- All requested work is implementable in this repository.\n\n"
+    "## Implementation plan\n"
+    "- Edit app/x.ts to implement the bot filter.\n\n"
+    "## Acceptance criteria\n"
+    "1. The bot filter works for repository callers."
+)
 
 
+@pytest.mark.parametrize("provider_outcome", ["none", "exception"])
 @pytest.mark.asyncio
-async def test_medium_risk_fails_closed_on_unusable_brief(monkeypatch, tmp_path):
+async def test_medium_risk_provider_unavailability_fails_closed_without_retry(
+    monkeypatch,
+    tmp_path,
+    provider_outcome,
+):
+    calls = 0
+
     async def unavailable(_system, _user):
+        nonlocal calls
+        calls += 1
+        if provider_outcome == "exception":
+            raise RuntimeError("provider response must not cross the worker boundary")
         return None
 
     editor = AiderEditor(
@@ -830,7 +869,238 @@ async def test_medium_risk_fails_closed_on_unusable_brief(monkeypatch, tmp_path)
     result = await editor.implement(request)
 
     assert result.success is False
-    assert "requires a parseable" in (result.error or "")
+    assert result.safe_failure == SafeEditFailure(
+        stage="brief", code="model_unavailable"
+    )
+    assert calls == 1
+    assert pipeline.aider_messages == []
+
+
+@pytest.mark.parametrize("risk_level", ["medium", "high"])
+@pytest.mark.asyncio
+async def test_risky_change_fails_closed_after_two_invalid_brief_responses(
+    monkeypatch,
+    tmp_path,
+    risk_level,
+):
+    brief_prompts: list[str] = []
+    editor = AiderEditor(
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
+        complete=_routing_complete(
+            brief_reply=["first invalid", "second invalid"],
+            brief_prompts=brief_prompts,
+        ),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+    request = _request()
+    request.risk_level = risk_level
+
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert result.safe_failure == SafeEditFailure(
+        stage="brief", code="invalid_model_output"
+    )
+    assert len(brief_prompts) == 2
+    assert pipeline.aider_messages == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_brief_gets_one_schema_correction_and_then_succeeds(
+    monkeypatch,
+    tmp_path,
+):
+    rejected_output = "REJECTED_BRIEF_OUTPUT_SENTINEL"
+    brief_prompts: list[str] = []
+    editor = AiderEditor(
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
+        complete=_routing_complete(
+            brief_reply=[rejected_output, _BRIEF],
+            brief_prompts=brief_prompts,
+        ),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+
+    result = await editor.implement(_request())
+
+    assert result.success is True
+    assert len(brief_prompts) == 2
+    assert "# Required format correction" in brief_prompts[1]
+    assert rejected_output not in brief_prompts[1]
+    assert _RENDERED_BRIEF in pipeline.aider_messages[0]
+
+
+@pytest.mark.asyncio
+async def test_broker_requests_strict_json_schema_for_supported_helper_model(
+    monkeypatch,
+    tmp_path,
+):
+    acquired_phases: list[str] = []
+    response_formats: list[object] = []
+    helper_binding = SimpleNamespace(
+        role="helper",
+        provider="xai",
+        model_id="grok-4.20-0309-non-reasoning",
+        litellm_model="xai/grok-4.20-0309-non-reasoning",
+        credential_environment_name="XAI_API_KEY",
+        api_key="test-xai-key",
+        endpoint_url="https://api.x.ai/v1",
+    )
+    editor_binding = SimpleNamespace(
+        role="editor",
+        provider="anthropic",
+        model_id="claude-opus-5",
+        litellm_model="anthropic/claude-opus-5",
+        credential_environment_name="ANTHROPIC_API_KEY",
+        api_key="test-anthropic-key",
+        endpoint_url="https://api.anthropic.com",
+    )
+
+    class FakeBrokerClient:
+        def __init__(self, _authority, _changeset_id):
+            pass
+
+        async def acquire(self, phase):
+            acquired_phases.append(phase)
+            binding = editor_binding if phase == "edit" else helper_binding
+            return SimpleNamespace(binding=binding), 0.0
+
+        async def finish(self, *_args, **_kwargs):
+            return None
+
+    def fake_resolve_completer(_model, **kwargs):
+        response_formats.append(kwargs.get("response_format"))
+
+        async def complete(system, user):
+            if "engineering briefs" in system:
+                return _BRIEF
+            return _strict_review_response(user)
+
+        return complete
+
+    monkeypatch.setattr(aider_editor, "LlmBrokerClient", FakeBrokerClient)
+    monkeypatch.setattr(aider_editor, "resolve_completer", fake_resolve_completer)
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    _Pipeline(editor, monkeypatch)
+    request = _request()
+    request.changeset_id = "cs_structured_brief"
+    request.llm_execution = LlmExecutionAuthority(
+        socket_path="/tmp/apdl-codegen-test-broker.sock",
+        token="x" * 43,
+        editor_model="anthropic/claude-opus-5",
+        helper_model="xai/grok-4.20-0309-non-reasoning",
+        allowed_phases=("brief", "edit", "review"),
+    )
+
+    result = await editor.implement(request)
+
+    assert result.success is True
+    assert acquired_phases == ["brief", "edit", "review"]
+    brief_format = response_formats[0]
+    assert isinstance(brief_format, dict)
+    assert brief_format["type"] == "json_schema"
+    assert brief_format["json_schema"]["strict"] is True
+    schema = brief_format["json_schema"]["schema"]
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {
+        "schema_version",
+        "goal",
+        "scope_decisions",
+        "implementation_plan",
+        "acceptance_criteria",
+    }
+
+
+@pytest.mark.asyncio
+async def test_broker_never_silently_downgrades_required_structured_output(
+    monkeypatch,
+    tmp_path,
+):
+    acquired_phases: list[str] = []
+    resolver_called = False
+    binding = SimpleNamespace(
+        role="helper",
+        provider="xai",
+        model_id="grok-4.20-0309-non-reasoning",
+        litellm_model="xai/grok-4.20-0309-non-reasoning",
+        credential_environment_name="XAI_API_KEY",
+        api_key="test-xai-key",
+        endpoint_url="https://api.x.ai/v1",
+    )
+
+    class FakeBrokerClient:
+        def __init__(self, _authority, _changeset_id):
+            pass
+
+        async def acquire(self, phase):
+            acquired_phases.append(phase)
+            return SimpleNamespace(binding=binding), 0.0
+
+        async def finish(self, *_args, **_kwargs):
+            return None
+
+    def forbidden_resolve(*_args, **_kwargs):
+        nonlocal resolver_called
+        resolver_called = True
+        raise AssertionError("schema-ineligible helper must not reach the provider")
+
+    monkeypatch.setattr(aider_editor, "LlmBrokerClient", FakeBrokerClient)
+    monkeypatch.setattr(
+        aider_editor,
+        "catalog_model",
+        lambda *_args: SimpleNamespace(supports_structured_output=False),
+    )
+    monkeypatch.setattr(aider_editor, "resolve_completer", forbidden_resolve)
+    editor = AiderEditor(model="claude-opus-4-8", workdir_base=str(tmp_path))
+    pipeline = _Pipeline(editor, monkeypatch)
+    request = _request()
+    request.risk_level = "high"
+    request.changeset_id = "cs_structured_brief_invariant"
+    request.llm_execution = LlmExecutionAuthority(
+        socket_path="/tmp/apdl-codegen-test-broker.sock",
+        token="x" * 43,
+        editor_model="anthropic/claude-opus-5",
+        helper_model="xai/grok-4.20-0309-non-reasoning",
+        allowed_phases=("brief", "edit", "review"),
+    )
+
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert result.safe_failure == SafeEditFailure(
+        stage="brief",
+        code="structured_output_unavailable",
+    )
+    assert acquired_phases == ["brief"]
+    assert resolver_called is False
+    assert pipeline.aider_messages == []
+
+
+@pytest.mark.asyncio
+async def test_internal_brief_defect_is_not_mislabeled_as_provider_unavailability(
+    monkeypatch,
+    tmp_path,
+):
+    async def broken_compiler(**_kwargs):
+        raise ValueError("internal sentinel")
+
+    monkeypatch.setattr(aider_editor, "compile_brief", broken_compiler)
+    editor = AiderEditor(
+        model="claude-opus-4-8",
+        workdir_base=str(tmp_path),
+        complete=_routing_complete(brief_reply=_BRIEF),
+    )
+    pipeline = _Pipeline(editor, monkeypatch)
+    request = _request()
+    request.risk_level = "high"
+
+    result = await editor.implement(request)
+
+    assert result.success is False
+    assert result.error == "Engineering brief compilation failed internally."
+    assert result.safe_failure is None
     assert pipeline.aider_messages == []
 
 
@@ -857,10 +1127,14 @@ async def test_high_risk_fails_closed_on_unparseable_review(monkeypatch, tmp_pat
 
 @pytest.mark.asyncio
 async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path):
+    brief_prompts: list[str] = []
     editor = AiderEditor(
         model="claude-opus-4-8",
         workdir_base=str(tmp_path),
-        complete=_routing_complete(brief_reply=_BRIEF),
+        complete=_routing_complete(
+            brief_reply=_BRIEF,
+            brief_prompts=brief_prompts,
+        ),
     )
     pipeline = _Pipeline(editor, monkeypatch)
 
@@ -893,6 +1167,8 @@ async def test_edit_loop_replaces_spec_with_compiled_brief(monkeypatch, tmp_path
         is CoverageDisposition.unverified_external_ci
     )
     assert result.runtime_acceptance_plan is not None
+    assert len(brief_prompts) == 1
+    assert _RENDERED_BRIEF in pipeline.aider_messages[0]
 
 
 @pytest.mark.parametrize("leader", ["!touch", "/run touch"])
@@ -1602,7 +1878,7 @@ async def test_prompt_transcript_records_brief_edit_and_review(monkeypatch, tmp_
 
 @pytest.mark.asyncio
 async def test_prompt_transcript_notes_brief_fallback(monkeypatch, tmp_path):
-    """An unusable brief still leaves its prompt recorded, with the fallback noted."""
+    """Two invalid responses are recorded before low-risk raw-spec fallback."""
     monkeypatch.setenv("CODEGEN_REVIEW", "false")
     events: list[str] = []
     real_append_prompt = aider_editor.append_prompt
@@ -1626,12 +1902,26 @@ async def test_prompt_transcript_notes_brief_fallback(monkeypatch, tmp_path):
     result = await editor.implement(_request())
 
     assert result.success is True
-    brief = result.prompts[0]
-    assert brief["stage"] == "brief"
-    assert "no usable brief" in brief["notes"]
-    assert events[:2] == ["append:brief", "brief-call"]
+    first_brief, correction, edit = result.prompts
+    assert [prompt["stage"] for prompt in result.prompts] == [
+        "brief",
+        "brief",
+        "edit",
+    ]
+    assert first_brief["label"] == "Brief compilation (attempt 1)"
+    assert "schema" in first_brief["notes"].lower()
+    assert "correction" in first_brief["notes"].lower()
+    assert correction["label"] == "Brief schema correction (attempt 2)"
+    assert "schema" in correction["notes"].lower()
+    assert "raw spec" in correction["notes"].lower()
+    assert events[:4] == [
+        "append:brief",
+        "brief-call",
+        "append:brief",
+        "brief-call",
+    ]
     # The edit ran on the raw spec.
-    assert "Build a bot filter." in result.prompts[1]["user"]
+    assert "Build a bot filter." in edit["user"]
 
 
 @pytest.mark.asyncio
@@ -1639,8 +1929,11 @@ async def test_prompt_transcript_survives_raised_brief_completion(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("CODEGEN_REVIEW", "false")
+    calls = 0
 
     async def broken_brief(_system, _user):
+        nonlocal calls
+        calls += 1
         raise RuntimeError("provider unavailable")
 
     editor = AiderEditor(
@@ -1654,7 +1947,9 @@ async def test_prompt_transcript_survives_raised_brief_completion(
 
     assert result.success is True
     assert [prompt["stage"] for prompt in result.prompts] == ["brief", "edit"]
-    assert "failed (RuntimeError)" in result.prompts[0]["notes"]
+    assert "provider call failed" in result.prompts[0]["notes"]
+    assert "RuntimeError" not in result.prompts[0]["notes"]
+    assert calls == 1
 
 
 @pytest.mark.asyncio

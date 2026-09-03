@@ -51,17 +51,20 @@ from app.contracts.installer import (
 from app.contracts.models import ContractBundle
 from app.contracts.render import render_contract_bundle
 from app.editor.aider_launcher import TRUSTED_AIDER_MESSAGE_PREFIX
-from app.editor.base import EditRequest, EditResult
+from app.editor.base import EditRequest, EditResult, SafeEditFailure
 from app.editor.brief import (
     BRIEF_SYSTEM,
+    EngineeringBriefCompilationStatus,
     build_brief_user,
     build_repo_digest,
     compile_brief,
+    engineering_brief_response_format,
 )
 from app.editor.conventions import CONVENTIONS_MD
 from app.editor.deadlines import (
     CodegenDeadlineExceeded,
     CodegenRunDeadline,
+    MAX_BRIEF_ATTEMPTS,
 )
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.llm import CompleteFn, resolve_completer
@@ -69,6 +72,7 @@ from app.llm.broker import (
     LlmBrokerClient,
     classify_provider_failure,
 )
+from app.llm.provider_catalog import catalog_model
 from app.editor.prompts import append_prompt, replace_latest_prompt
 from app.editor.environment import (
     PROCESS_ENV,
@@ -144,6 +148,14 @@ _VERIFY_ERR_TAIL = 6000
 _RUN_DEADLINE: ContextVar[CodegenRunDeadline | None] = ContextVar(
     "codegen_run_deadline", default=None
 )
+
+
+class _AuxiliaryCompletionUnavailable(RuntimeError):
+    """A provider call failed without exposing provider-owned diagnostics."""
+
+
+class _BriefStructuredOutputUnavailable(RuntimeError):
+    """The admitted helper cannot enforce the canonical brief schema."""
 
 
 _PROFILE_INPUT_NAMES = {
@@ -473,7 +485,7 @@ class AiderEditor:
         self._job_budget = deadline_plan.job_budget_seconds
         # Auxiliary LLM passes around the edit (brief compile + diff review).
         # ``complete`` is the injection seam for tests; production resolves a
-        # LiteLLM-backed completer per run (None → the passes are skipped).
+        # LiteLLM-backed completer per run (None is handled by risk policy).
         self._complete = complete
         self._brief_enabled = config.codegen_brief_enabled()
         self._review_enabled = config.codegen_review_enabled()
@@ -539,11 +551,16 @@ class AiderEditor:
         review_verdict: ReviewVerdict | None = None
         verified_exemptions: tuple[VerifiedProtectedPathExemption, ...] = ()
 
-        def fail(error: str) -> EditResult:
+        def fail(
+            error: str,
+            *,
+            safe_failure: SafeEditFailure | None = None,
+        ) -> EditResult:
             return EditResult(
                 success=False,
                 branch=request.branch,
                 error=error,
+                safe_failure=safe_failure,
                 prompts=prompts,
                 contract_bundle=contract_bundle,
                 requirement_ledger=requirement_ledger,
@@ -782,18 +799,22 @@ class AiderEditor:
                     policy=request.runtime_acceptance_policy,
                 )
 
-            # 3. Compile the spec into a repo-grounded engineering brief
-            #    (auxiliary LLM pass; fail-open — an unusable brief means the raw
-            #    spec runs, which is what would have happened anyway). The brief
-            #    replaces the spec in the agent's message; the ORIGINAL spec
-            #    stays the contract the post-edit review judges against. A
-            #    deterministic revert needs no brief — the change is mechanical.
+            # 3. Compile the spec into a repo-grounded engineering brief. A
+            #    schema-invalid response receives one bounded correction. Low-
+            #    risk work may fall back to the raw spec; medium/high-risk work
+            #    fails before editing. The ORIGINAL spec stays the contract the
+            #    post-edit review judges against. A deterministic revert needs
+            #    no brief — the change is mechanical.
             need_brief = self._brief_enabled and request.revert_sha is None
             need_review = self._review_enabled and request.revert_sha is None
             fail_closed_auxiliary = request.risk_level in {"medium", "high"}
             if broker_client is not None:
 
-                def broker_completer(phase: str) -> CompleteFn:
+                def broker_completer(
+                    phase: str,
+                    *,
+                    response_format: dict[str, object] | None = None,
+                ) -> CompleteFn:
                     async def complete(system: str, user: str) -> str | None:
                         lease, started_at = await broker_client.acquire(phase)
                         binding = lease.binding
@@ -806,10 +827,20 @@ class AiderEditor:
                             usage = (input_tokens, output_tokens)
 
                         try:
+                            model_metadata = catalog_model(
+                                binding.provider,
+                                binding.model_id,
+                            )
+                            if response_format is not None and (
+                                model_metadata is None
+                                or not model_metadata.supports_structured_output
+                            ):
+                                raise _BriefStructuredOutputUnavailable
                             resolved = resolve_completer(
                                 binding.litellm_model,
                                 api_key=binding.api_key,
                                 endpoint_url=binding.endpoint_url,
+                                response_format=response_format,
                                 raise_errors=True,
                                 usage_callback=record_usage,
                             )
@@ -866,25 +897,44 @@ class AiderEditor:
 
                     return complete
 
-                brief_complete = broker_completer("brief")
+                brief_complete = broker_completer(
+                    "brief",
+                    response_format=engineering_brief_response_format(),
+                )
                 review_complete = broker_completer("review")
             else:
-                complete = self._complete
-                if complete is None and (need_brief or need_review):
-                    complete = resolve_completer(
+                if self._complete is not None:
+                    brief_complete = self._complete
+                    review_complete = self._complete
+                else:
+                    brief_complete = (
+                        resolve_completer(
+                            helper_model,
+                            api_key=helper_api_key,
+                            endpoint_url=helper_endpoint,
+                            response_format=engineering_brief_response_format(),
+                        )
+                        if need_brief
+                        else None
+                    )
+                    review_complete = resolve_completer(
                         helper_model,
                         api_key=helper_api_key,
                         endpoint_url=helper_endpoint,
-                    )
-                brief_complete = complete
-                review_complete = complete
+                    ) if need_review else None
             if fail_closed_auxiliary and (
                 (need_brief and brief_complete is None)
                 or (need_review and review_complete is None)
             ):
+                safe_failure = (
+                    SafeEditFailure(stage="brief", code="model_unavailable")
+                    if need_brief and brief_complete is None
+                    else None
+                )
                 return fail(
                     f"{request.risk_level}-risk change requires available brief/review "
-                    "model gates; no completer is configured."
+                    "model gates; no completer is configured.",
+                    safe_failure=safe_failure,
                 )
             task_text = request.spec
             brief_used = False
@@ -892,63 +942,146 @@ class AiderEditor:
                 repo_digest = build_repo_digest(repo_dir, probe.profile)
                 if contract_bundle and contract_bundle.resolutions:
                     repo_digest += "\n\n" + render_contract_bundle(contract_bundle)
-                brief_prompt = {
-                    "stage": "brief",
-                    "label": "Brief compilation (spec → engineering brief)",
-                    "system": BRIEF_SYSTEM,
-                    "user": build_brief_user(
-                        title=request.title,
-                        spec=request.spec,
-                        repo_digest=repo_digest,
-                        verification_context=probe.preamble,
-                    ),
-                    "notes": None,
-                }
-                # Record the attempted call before awaiting it so timeout/error
-                # paths retain the same diagnostic ordering as edit and review.
-                append_prompt(prompts, brief_prompt)
-                brief_failure: str | None = None
-                try:
+                brief_safe_failure = SafeEditFailure(
+                    stage="brief",
+                    code="model_unavailable",
+                )
+
+                async def timed_brief_complete(
+                    system: str,
+                    user: str,
+                ) -> str | None:
                     helper_timeout = run_deadline.clamp_timeout(self._llm_timeout)
-                    brief = await asyncio.wait_for(
-                        compile_brief(
+                    try:
+                        return await asyncio.wait_for(
+                            brief_complete(system, user),
+                            timeout=helper_timeout,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except _BriefStructuredOutputUnavailable:
+                        raise
+                    except Exception as exc:
+                        raise _AuxiliaryCompletionUnavailable from exc
+
+                for attempt in range(1, MAX_BRIEF_ATTEMPTS + 1):
+                    correction = attempt > 1
+                    brief_prompt = {
+                        "stage": "brief",
+                        "label": (
+                            "Brief schema correction (attempt 2)"
+                            if correction
+                            else "Brief compilation (attempt 1)"
+                        ),
+                        "system": BRIEF_SYSTEM,
+                        "user": build_brief_user(
                             title=request.title,
                             spec=request.spec,
                             repo_digest=repo_digest,
                             verification_context=probe.preamble,
-                            complete=brief_complete,
+                            correction=correction,
                         ),
-                        timeout=helper_timeout,
-                    )
-                except Exception as exc:
-                    brief = None
-                    brief_failure = type(exc).__name__
-                    logger.warning(
-                        "Brief compilation failed for %s (%s); using the raw spec.",
-                        request.repo,
-                        brief_failure,
-                    )
-                if brief:
-                    task_text = brief
-                    brief_used = True
-                else:
-                    if brief_failure is None:
-                        brief_prompt["notes"] = (
-                            "Compilation produced no usable brief; the raw spec was "
-                            "handed to the editing agent instead."
+                        "notes": None,
+                    }
+                    # Record every provider attempt before awaiting it so
+                    # timeout/error paths preserve the same audit ordering.
+                    append_prompt(prompts, brief_prompt)
+                    try:
+                        compilation = await compile_brief(
+                            title=request.title,
+                            spec=request.spec,
+                            repo_digest=repo_digest,
+                            verification_context=probe.preamble,
+                            complete=timed_brief_complete,
+                            correction=correction,
                         )
-                    else:
-                        brief_prompt["notes"] = (
-                            f"Compilation failed ({brief_failure}) before producing "
-                            "a usable brief; the raw spec was handed to the editing "
-                            "agent instead."
+                    except _BriefStructuredOutputUnavailable:
+                        brief_safe_failure = SafeEditFailure(
+                            stage="brief",
+                            code="structured_output_unavailable",
                         )
-                    replace_latest_prompt(prompts, brief_prompt)
-                    if fail_closed_auxiliary:
+                        brief_prompt["notes"] = (
+                            "The assigned helper could not enforce the required "
+                            "structured-output contract."
+                        )
+                        replace_latest_prompt(prompts, brief_prompt)
+                        break
+                    except _AuxiliaryCompletionUnavailable as exc:
+                        logger.warning(
+                            "Brief provider call failed for %s (%s).",
+                            request.repo,
+                            type(exc.__cause__).__name__,
+                        )
+                        brief_prompt["notes"] = (
+                            "The brief provider call failed; no further schema "
+                            "correction was attempted."
+                        )
+                        replace_latest_prompt(prompts, brief_prompt)
+                        break
+                    except CodegenDeadlineExceeded:
+                        brief_prompt["notes"] = (
+                            "The shared Codegen deadline was exhausted before the "
+                            "brief call could start."
+                        )
+                        replace_latest_prompt(prompts, brief_prompt)
                         return fail(
-                            f"{request.risk_level}-risk change requires a parseable "
-                            "repository-grounded brief."
+                            "Codegen job deadline was exhausted during brief "
+                            "compilation."
                         )
+                    except Exception:
+                        logger.exception(
+                            "Engineering brief compilation failed internally for %s",
+                            request.repo,
+                        )
+                        brief_prompt["notes"] = (
+                            "Engineering brief compilation failed internally."
+                        )
+                        replace_latest_prompt(prompts, brief_prompt)
+                        return fail(
+                            "Engineering brief compilation failed internally."
+                        )
+
+                    if compilation.status is EngineeringBriefCompilationStatus.parsed:
+                        task_text = compilation.markdown or request.spec
+                        brief_used = True
+                        break
+                    if (
+                        compilation.status
+                        is EngineeringBriefCompilationStatus.unavailable
+                    ):
+                        brief_prompt["notes"] = (
+                            "Compilation returned no response; no schema correction "
+                            "was attempted."
+                        )
+                        replace_latest_prompt(prompts, brief_prompt)
+                        break
+                    if attempt < MAX_BRIEF_ATTEMPTS:
+                        brief_prompt["notes"] = (
+                            "Response violated engineering_brief@1; one schema-"
+                            "correction attempt was requested."
+                        )
+                        replace_latest_prompt(prompts, brief_prompt)
+                        continue
+                    brief_safe_failure = SafeEditFailure(
+                        stage="brief",
+                        code="invalid_model_output",
+                    )
+                    brief_prompt["notes"] = (
+                        "Schema correction still violated engineering_brief@1; "
+                        + (
+                            "no editing call was allowed."
+                            if fail_closed_auxiliary
+                            else "the raw spec was handed to the editing agent."
+                        )
+                    )
+                    replace_latest_prompt(prompts, brief_prompt)
+
+                if not brief_used and fail_closed_auxiliary:
+                    return fail(
+                        f"{request.risk_level}-risk change requires a parseable "
+                        "repository-grounded brief.",
+                        safe_failure=brief_safe_failure,
+                    )
 
             # The optional prose brief may refine implementation detail, but it
             # cannot replace or weaken the canonical requirement contract.

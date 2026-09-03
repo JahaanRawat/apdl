@@ -9,8 +9,7 @@ SDK to the service.
 
 LiteLLM ships with the optional ``agent`` extra (``aider-chat``). Where it is
 absent — unit tests, a FakeEditor deployment — :func:`resolve_completer` returns
-``None`` and the callers skip their step; the auxiliary calls are quality
-amplifiers, never a reason a changeset cannot run at all.
+``None`` and the caller applies the request's explicit risk policy.
 """
 
 from __future__ import annotations
@@ -33,6 +32,7 @@ def resolve_completer(
     *,
     api_key: str | None = None,
     endpoint_url: str | None = None,
+    response_format: Mapping[str, object] | None = None,
     raise_errors: bool = False,
     usage_callback: Callable[[int, int], None] | None = None,
 ) -> CompleteFn | None:
@@ -40,7 +40,9 @@ def resolve_completer(
 
     Returns ``None`` when the call path cannot work — LiteLLM not installed, or
     no provider key for the model in the environment — so callers can skip their
-    step instead of failing the changeset on a doomed request.
+    step instead of failing the changeset on a doomed request. A supplied
+    ``response_format`` is fixed for every invocation of the returned completer;
+    LiteLLM parameter dropping is disabled so an unsupported contract fails.
     """
     model = model or config.codegen_helper_model()
     timeout = timeout if timeout is not None else config.codegen_llm_timeout()
@@ -76,8 +78,13 @@ def resolve_completer(
                     {"role": "user", "content": user},
                 ],
                 "timeout": timeout,
-                "drop_params": True,
+                # Structured output is a correctness boundary for callers that
+                # request it. Never let LiteLLM silently discard that contract
+                # while adapting arguments for a provider.
+                "drop_params": response_format is None,
             }
+            if response_format is not None:
+                call_options["response_format"] = dict(response_format)
             if api_key is not None:
                 call_options["api_key"] = api_key
             if endpoint_url is not None:

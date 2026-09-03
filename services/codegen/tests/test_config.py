@@ -312,10 +312,10 @@ def test_job_budget_counts_brief_and_every_possible_review(monkeypatch):
     plan = config.codegen_deadline_plan()
 
     assert plan.edit_rounds == 3
-    assert plan.brief_calls == 1
+    assert plan.brief_calls == 2
     assert plan.review_calls == 3
-    assert plan.requested_phase_seconds == 400
-    assert plan.job_budget_seconds == CODEGEN_JOB_OVERHEAD_SECONDS + 400
+    assert plan.requested_phase_seconds == 420
+    assert plan.job_budget_seconds == CODEGEN_JOB_OVERHEAD_SECONDS + 420
     assert plan.reconciled is False
 
 
