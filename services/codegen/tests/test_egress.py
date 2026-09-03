@@ -88,7 +88,7 @@ def _proxy_container(
                 "CapAdd": None,
                 "CapDrop": ["ALL"],
                 "SecurityOpt": ["no-new-privileges:true"],
-                "Binds": None,
+                "Binds": [f"{SOCKET_VOLUME}:{EGRESS_SOCKET_DIR}:rw"],
                 "PortBindings": {},
                 "PublishAllPorts": False,
                 "Tmpfs": EGRESS_PROXY_TMPFS,

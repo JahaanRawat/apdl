@@ -417,8 +417,9 @@ def validate_proxy_container_inspect(
     if host_config.get("CapDrop") != ["ALL"]:
         raise ValueError("egress proxy must drop every Linux capability")
     _validate_no_new_privileges(host_config.get("SecurityOpt"))
-    if not _empty(host_config.get("Binds")):
-        raise ValueError("egress proxy must not have bind mounts")
+    # Docker records both bind mounts and named-volume specifications in
+    # HostConfig.Binds.  Attest the canonical effective mount list below,
+    # where Type must be "volume" and the exact socket volume is required.
     if not _empty(host_config.get("PortBindings")):
         raise ValueError("egress proxy must not publish host ports")
     if host_config.get("PublishAllPorts") is not False:
