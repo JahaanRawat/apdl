@@ -65,7 +65,7 @@ from app.egress import (
     relay_command,
     worker_socket_mount,
 )
-from app.editor.base import EditRequest, EditResult
+from app.editor.base import EditRequest, EditResult, SafeEditFailure
 from app.editor.environment import CODEGEN_BEHAVIOR_ENV
 from app.editor.excerpts import DEFAULT_ERROR_TAIL_CHARS, tail_excerpt
 from app.editor.worker_contract import (
@@ -91,6 +91,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_IMAGE = "apdl-codegen-worker:latest"
 _ERR_TAIL = DEFAULT_ERROR_TAIL_CHARS
+_TENANT_WORKER_FAILURE = "Sandboxed editor did not complete successfully"
 
 # Provider credentials are never forwarded through Docker environment or argv.
 # The bounded worker stdin envelope carries only this job's ephemeral authority;
@@ -314,7 +315,11 @@ class ContainerAiderEditor:
             return EditResult(
                 success=False,
                 branch=request.branch,
-                error=f"Sandboxed editor failed with {type(exc).__name__}",
+                error=(
+                    _TENANT_WORKER_FAILURE
+                    if request.llm_execution is not None
+                    else f"Sandboxed editor failed with {type(exc).__name__}"
+                ),
             )
 
     def _docker_argv(
@@ -471,19 +476,39 @@ class ContainerAiderEditor:
     ) -> EditResult:
         data = _last_json(stdout)
         if data is not None:
-            success = bool(data.get("success"))
+            # The worker payload is untrusted. In particular, ``bool("false")``
+            # must not turn a malformed failure into a success and bypass the
+            # tenant redaction path.
+            success = data.get("success") is True
             tenant_execution = request.llm_execution is not None
+            safe_failure = (
+                SafeEditFailure.from_worker_payload(data.get("safe_failure"))
+                if not success
+                else None
+            )
+            if tenant_execution and not success:
+                # A failed worker is untrusted and may try to smuggle provider
+                # or repository text through any ordinary result field. Ignore
+                # the entire payload except the exact allowlisted diagnostic.
+                return EditResult(
+                    success=False,
+                    branch=request.branch,
+                    error=(
+                        safe_failure.safe_error
+                        if safe_failure is not None
+                        else _TENANT_WORKER_FAILURE
+                    ),
+                    safe_failure=safe_failure,
+                )
+            error = data.get("error")
             return EditResult(
                 success=success,
                 branch=data.get("branch") or request.branch,
                 diff_stat=data.get("diff_stat") or {},
                 changed_paths=data.get("changed_paths") or [],
                 diff_text=data.get("diff_text") or "",
-                error=(
-                    "Sandboxed editor did not complete successfully"
-                    if tenant_execution and not success
-                    else data.get("error")
-                ),
+                error=error,
+                safe_failure=safe_failure,
                 logs_uri=data.get("logs_uri"),
                 head_sha=data.get("head_sha"),
                 base_sha=data.get("base_sha"),
@@ -556,7 +581,7 @@ class ContainerAiderEditor:
             return EditResult(
                 success=False,
                 branch=request.branch,
-                error=f"sandbox produced no valid result (exit {rc})",
+                error=_TENANT_WORKER_FAILURE,
             )
         tail = tail_excerpt(stderr or stdout or "", limit=_ERR_TAIL)
         return EditResult(

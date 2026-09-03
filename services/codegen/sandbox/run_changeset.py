@@ -37,19 +37,24 @@ from app.editor.worker_contract import (
 )
 
 
-def main() -> int:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stderr)
-    try:
-        request = read_codegen_worker_request(sys.stdin.buffer).to_edit_request()
-    except CodegenWorkerRequestError as exc:
-        print(
-            json.dumps({"success": False, "error": f"invalid sandbox input: {exc}"})
-        )
-        return 1
-
-    result: EditResult = asyncio.run(AiderEditor().implement(request))
-    # The result is data, not a status — a clean "tests failed" is still exit 0.
+def _result_payload(result: EditResult) -> dict[str, object]:
+    """Serialize the worker result with one closed safe-failure shape."""
+    safe_failure = (
+        result.safe_failure.to_worker_payload()
+        if result.safe_failure is not None
+        else None
+    )
+    if result.success is not True:
+        # A failed worker may hold provider output, repository text, diffs, or
+        # model-authored review evidence. None of that crosses the sandbox
+        # boundary. The controller accepts only this closed diagnostic and
+        # supplies fixed public wording.
+        return {
+            "success": False,
+            "safe_failure": safe_failure,
+        }
     payload = dataclasses.asdict(result)
+    payload["safe_failure"] = safe_failure
     if result.contract_bundle is not None:
         payload["contract_bundle"] = result.contract_bundle.model_dump(mode="json")
     if result.requirement_ledger is not None:
@@ -78,7 +83,22 @@ def main() -> int:
         )
     if result.review_verdict is not None:
         payload["review_verdict"] = result.review_verdict.model_dump(mode="json")
-    print(json.dumps(payload))
+    return payload
+
+
+def main() -> int:
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), stream=sys.stderr)
+    try:
+        request = read_codegen_worker_request(sys.stdin.buffer).to_edit_request()
+    except CodegenWorkerRequestError as exc:
+        print(
+            json.dumps({"success": False, "error": f"invalid sandbox input: {exc}"})
+        )
+        return 1
+
+    result: EditResult = asyncio.run(AiderEditor().implement(request))
+    # The result is data, not a status — a clean "tests failed" is still exit 0.
+    print(json.dumps(_result_payload(result)))
     return 0
 
 

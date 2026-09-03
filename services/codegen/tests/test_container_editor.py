@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.contracts.models import ContractBundle
-from app.editor.base import EditRequest
+from app.editor.base import EditRequest, EditResult, SafeEditFailure
 from app.editor.container_editor import ContainerAiderEditor, _last_json
 from app.editor.environment import MODEL_PROVIDER_ENV
 from app.editor.worker_contract import (
@@ -40,6 +40,7 @@ from app.safety.policy import (
 )
 from app.semantic_review import assemble_review_verdict
 from app.verification import build_verification_plan, evaluate_verification_coverage
+from sandbox.run_changeset import _result_payload
 from tests.preparation_fakes import repository_preparation
 
 
@@ -649,6 +650,216 @@ def test_parse_result_maps_success_json():
     assert res.runtime_acceptance_plan == runtime_plan
     assert res.generated_runtime_workflow == workflow
     assert res.review_verdict == review
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "invalid_model_output",
+        "model_unavailable",
+        "structured_output_unavailable",
+    ],
+)
+def test_worker_result_serializes_minimal_allowlisted_failure(code):
+    secret = "raw-provider-output-that-must-not-cross-the-worker-boundary"
+    payload = _result_payload(
+        EditResult(
+            success=False,
+            branch=secret,
+            diff_stat={secret: 1},
+            changed_paths=[secret],
+            diff_text=secret,
+            error=secret,
+            safe_failure=SafeEditFailure(
+                stage="brief",
+                code=code,
+            ),
+            logs_uri=secret,
+            head_sha=secret,
+            base_sha=secret,
+            candidate_tree_sha=secret,
+            patch_base64=secret,
+            prompts=[{"stage": "brief", "user": secret}],
+        )
+    )
+
+    assert payload == {
+        "success": False,
+        "safe_failure": {
+            "stage": "brief",
+            "code": code,
+        },
+    }
+    assert secret not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        (
+            "invalid_model_output",
+            "Engineering brief model output did not match the required schema.",
+        ),
+        ("model_unavailable", "Engineering brief model was unavailable."),
+        (
+            "structured_output_unavailable",
+            "Engineering brief structured-output enforcement was unavailable.",
+        ),
+    ],
+)
+def test_parse_result_surfaces_fixed_allowlisted_tenant_failure(
+    llm_execution,
+    code,
+    message,
+):
+    secret = "raw-provider-output-that-must-not-reach-the-controller"
+    out = json.dumps(
+        {
+            "success": False,
+            "error": secret,
+            "safe_failure": {
+                "stage": "brief",
+                "code": code,
+            },
+            "prompts": [{"stage": "brief", "user": secret}],
+        }
+    )
+
+    result = ContainerAiderEditor()._parse_result(
+        0,
+        out,
+        secret,
+        _req(llm_execution=llm_execution),
+    )
+
+    assert result.success is False
+    assert result.error == message
+    assert result.safe_failure == SafeEditFailure(
+        stage="brief",
+        code=code,
+    )
+    assert result.prompts == []
+    assert secret not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "safe_failure",
+    [
+        {"stage": "brief", "code": "provider-secret"},
+        {"stage": "provider-secret", "code": "invalid_model_output"},
+        {
+            "stage": "brief",
+            "code": "invalid_model_output",
+            "detail": "provider-secret",
+        },
+        {"stage": "brief"},
+        ["brief", "invalid_model_output"],
+        None,
+    ],
+    ids=[
+        "unknown-code",
+        "unknown-stage",
+        "extra-field",
+        "missing-field",
+        "wrong-shape",
+        "absent",
+    ],
+)
+def test_parse_result_keeps_unknown_tenant_failures_generic(
+    llm_execution,
+    safe_failure,
+):
+    out = json.dumps(
+        {
+            "success": False,
+            "error": "provider-secret",
+            "safe_failure": safe_failure,
+            "prompts": [{"user": "provider-secret"}],
+        }
+    )
+
+    result = ContainerAiderEditor()._parse_result(
+        1,
+        out,
+        "provider-secret",
+        _req(llm_execution=llm_execution),
+    )
+
+    assert result.error == "Sandboxed editor did not complete successfully"
+    assert result.safe_failure is None
+    assert result.prompts == []
+    assert "provider-secret" not in repr(result)
+
+
+def test_malformed_success_cannot_bypass_tenant_failure_redaction(llm_execution):
+    result = ContainerAiderEditor()._parse_result(
+        0,
+        json.dumps(
+            {
+                "success": "false",
+                "error": "provider-secret",
+                "prompts": [{"user": "provider-secret"}],
+            }
+        ),
+        "",
+        _req(llm_execution=llm_execution),
+    )
+
+    assert result.success is False
+    assert result.error == "Sandboxed editor did not complete successfully"
+    assert result.prompts == []
+    assert "provider-secret" not in repr(result)
+
+
+def test_tenant_failure_ignores_every_content_bearing_worker_field(llm_execution):
+    secret = "failed-worker-content-sentinel"
+    result = ContainerAiderEditor()._parse_result(
+        0,
+        json.dumps(
+            {
+                "success": False,
+                "branch": secret,
+                "diff_stat": {secret: 1},
+                "changed_paths": [secret],
+                "diff_text": secret,
+                "error": secret,
+                "logs_uri": secret,
+                "head_sha": secret,
+                "base_sha": secret,
+                "candidate_tree_sha": secret,
+                "patch_base64": secret,
+                "prompts": [{"user": secret}],
+                "contract_bundle": {"sentinel": secret},
+                "requirement_ledger": {"sentinel": secret},
+                "inspection_snapshot": {"sentinel": secret},
+                "dependency_slice": {"sentinel": secret},
+                "verification_plan": {"sentinel": secret},
+                "verification_coverage": {"sentinel": secret},
+                "runtime_acceptance_plan": {"sentinel": secret},
+                "generated_runtime_workflow": {"sentinel": secret},
+                "review_verdict": {
+                    "actionable_instructions": [secret],
+                },
+                "safe_failure": {
+                    "stage": "brief",
+                    "code": "invalid_model_output",
+                },
+            }
+        ),
+        secret,
+        _req(llm_execution=llm_execution),
+    )
+
+    assert result == EditResult(
+        success=False,
+        branch="apdl/x",
+        error="Engineering brief model output did not match the required schema.",
+        safe_failure=SafeEditFailure(
+            stage="brief",
+            code="invalid_model_output",
+        ),
+    )
+    assert secret not in repr(result)
 
 
 def test_parse_result_no_json_is_failure_with_stderr_tail():
