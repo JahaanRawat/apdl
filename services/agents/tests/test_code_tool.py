@@ -11,6 +11,23 @@ from tests.capability_helpers import (
 )
 
 
+def _valid_llm_assignments() -> list[dict[str, str]]:
+    return [
+        {
+            "role": "editor",
+            "provider": "xai",
+            "model_id": "grok-4.5",
+            "connection_state": "active",
+        },
+        {
+            "role": "helper",
+            "provider": "xai",
+            "model_id": "grok-4.20-0309-non-reasoning",
+            "connection_state": "active",
+        },
+    ]
+
+
 @pytest.mark.asyncio
 async def test_open_changeset_posts_task(monkeypatch):
     captured: dict[str, Any] = {}
@@ -68,6 +85,7 @@ async def test_changeset_capability_is_project_scoped_and_strict(monkeypatch):
                 "changeset_creation": "available",
                 "reasons": [],
                 "checks": dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
+                "llm_assignments": _valid_llm_assignments(),
             }
 
     class _Client:
@@ -155,12 +173,146 @@ async def test_changeset_capability_rejects_ambiguous_responses(
             **dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
             "runtime": "blocked",
         },
+        "llm_assignments": _valid_llm_assignments(),
     }
     payload.update(mutation)
 
     _patch_capability_response(monkeypatch, payload)
 
     with pytest.raises(ValueError, match="capability response"):
+        await code.get_changeset_creation_capability(
+            "demo",
+            {"X-API-Key": "proj_demo_0123456789abcdef"},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "assignments",
+    [
+        pytest.param("not-a-list", id="not-a-list"),
+        pytest.param(["not-an-object"], id="entry-not-an-object"),
+        pytest.param(
+            [
+                {
+                    "role": "editor",
+                    "provider": "xai",
+                    "model_id": "grok-4.5",
+                }
+            ],
+            id="missing-nested-key",
+        ),
+        pytest.param(
+            [
+                {
+                    **_valid_llm_assignments()[0],
+                    "credential_id": "secret-reference",
+                }
+            ],
+            id="unknown-nested-key",
+        ),
+        pytest.param(
+            [
+                {**_valid_llm_assignments()[0], "role": "reviewer"},
+                _valid_llm_assignments()[1],
+            ],
+            id="unknown-role",
+        ),
+        pytest.param(
+            list(reversed(_valid_llm_assignments())),
+            id="roles-out-of-order",
+        ),
+        pytest.param(
+            [_valid_llm_assignments()[0], _valid_llm_assignments()[0]],
+            id="duplicate-role",
+        ),
+        pytest.param(
+            [
+                {**_valid_llm_assignments()[0], "provider": "ollama"},
+                _valid_llm_assignments()[1],
+            ],
+            id="unsupported-provider",
+        ),
+        pytest.param(
+            [
+                {**_valid_llm_assignments()[0], "model_id": " bad-model"},
+                _valid_llm_assignments()[1],
+            ],
+            id="noncanonical-model-id",
+        ),
+        pytest.param(
+            [
+                {**_valid_llm_assignments()[0], "model_id": "m" * 129},
+                _valid_llm_assignments()[1],
+            ],
+            id="model-id-too-long",
+        ),
+        pytest.param(
+            [
+                {
+                    **_valid_llm_assignments()[0],
+                    "connection_state": "revoked",
+                },
+                _valid_llm_assignments()[1],
+            ],
+            id="inactive-connection",
+        ),
+    ],
+)
+async def test_changeset_capability_rejects_invalid_llm_assignments(
+    assignments,
+    monkeypatch,
+):
+    payload = {
+        "project_id": "demo",
+        "changeset_creation": "available",
+        "reasons": [],
+        "checks": dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
+        "llm_assignments": assignments,
+    }
+    _patch_capability_response(monkeypatch, payload)
+
+    with pytest.raises(ValueError, match="capability response"):
+        await code.get_changeset_creation_capability(
+            "demo",
+            {"X-API-Key": "proj_demo_0123456789abcdef"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_changeset_capability_requires_assignments_when_provider_is_ready(
+    monkeypatch,
+):
+    payload = {
+        "project_id": "demo",
+        "changeset_creation": "available",
+        "reasons": [],
+        "checks": dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
+        "llm_assignments": [],
+    }
+    _patch_capability_response(monkeypatch, payload)
+
+    with pytest.raises(ValueError, match="internally inconsistent"):
+        await code.get_changeset_creation_capability(
+            "demo",
+            {"X-API-Key": "proj_demo_0123456789abcdef"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_changeset_capability_requires_llm_assignments_field(monkeypatch):
+    payload = {
+        "project_id": "demo",
+        "changeset_creation": "disabled",
+        "reasons": ["provider_unconfigured"],
+        "checks": {
+            **dict.fromkeys(code._CAPABILITY_CHECKS, "ready"),
+            "provider": "blocked",
+        },
+    }
+    _patch_capability_response(monkeypatch, payload)
+
+    with pytest.raises(ValueError, match="invalid schema"):
         await code.get_changeset_creation_capability(
             "demo",
             {"X-API-Key": "proj_demo_0123456789abcdef"},

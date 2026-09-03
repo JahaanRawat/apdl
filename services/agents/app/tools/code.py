@@ -23,6 +23,7 @@ CODEGEN_SERVICE_URL = os.getenv("CODEGEN_SERVICE_URL", "http://localhost:8084")
 _TIMEOUT = 30.0
 _IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$")
 _IDEMPOTENCY_SCOPE_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _CAPABILITY_REASONS = frozenset(
     {
         "rollout_stage_blocked",
@@ -45,6 +46,9 @@ _CAPABILITY_CHECKS = frozenset(
         "runtime",
     }
 )
+_LLM_ASSIGNMENT_KEYS = frozenset({"role", "provider", "model_id", "connection_state"})
+_LLM_ASSIGNMENT_ROLES = ("editor", "helper")
+_LLM_ASSIGNMENT_PROVIDERS = frozenset({"anthropic", "openai", "google", "xai"})
 
 
 def _seg(value: str) -> str:
@@ -171,6 +175,7 @@ async def get_changeset_creation_capability(
         "changeset_creation",
         "reasons",
         "checks",
+        "llm_assignments",
     }:
         raise ValueError("Codegen capability response has an invalid schema")
     if payload["project_id"] != project_id:
@@ -192,7 +197,36 @@ async def get_changeset_creation_capability(
         or any(value not in {"ready", "blocked"} for value in checks.values())
     ):
         raise ValueError("Codegen capability response has invalid checks")
-    if (state == "available") != (not reasons and all(v == "ready" for v in checks.values())):
+    assignments = payload["llm_assignments"]
+    if not isinstance(assignments, list):
+        raise ValueError("Codegen capability response has invalid LLM assignments")
+    roles: list[str] = []
+    for assignment in assignments:
+        if not isinstance(assignment, dict) or set(assignment) != _LLM_ASSIGNMENT_KEYS:
+            raise ValueError("Codegen capability response has invalid LLM assignments")
+        role = assignment["role"]
+        provider = assignment["provider"]
+        model_id = assignment["model_id"]
+        connection_state = assignment["connection_state"]
+        if (
+            not isinstance(role, str)
+            or role not in _LLM_ASSIGNMENT_ROLES
+            or not isinstance(provider, str)
+            or provider not in _LLM_ASSIGNMENT_PROVIDERS
+            or not isinstance(model_id, str)
+            or _MODEL_ID_RE.fullmatch(model_id) is None
+            or connection_state != "active"
+        ):
+            raise ValueError("Codegen capability response has invalid LLM assignments")
+        roles.append(role)
+    canonical_roles = tuple(role for role in _LLM_ASSIGNMENT_ROLES if role in roles)
+    if tuple(roles) != canonical_roles:
+        raise ValueError("Codegen capability response has invalid LLM assignments")
+    if checks["provider"] == "ready" and tuple(roles) != _LLM_ASSIGNMENT_ROLES:
+        raise ValueError("Codegen capability response is internally inconsistent")
+    if (state == "available") != (
+        not reasons and all(v == "ready" for v in checks.values())
+    ):
         raise ValueError("Codegen capability response is internally inconsistent")
     return state
 
