@@ -194,13 +194,41 @@ async def test_project_codegen_capability_fails_closed(
     failure: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(readiness, "_PROBE_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(readiness, "_PROJECT_CAPABILITY_TIMEOUT_SECONDS", 0.001)
 
-    async def probe(_project_id: str) -> str:
+    async def probe(_project_id: str, _headers: dict[str, str]) -> str:
         if failure == "timeout":
             await asyncio.sleep(1)
         return "tenant_scoped"
 
     monkeypatch.setattr(readiness, "get_changeset_creation_capability", probe)
 
-    assert await readiness.codegen_changeset_capability("demo") == "unavailable"
+    assert (
+        await readiness.codegen_changeset_capability(
+            "demo",
+            {"X-API-Key": "proj_demo_0123456789abcdef"},
+        )
+        == "unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_codegen_capability_uses_runtime_probe_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(readiness, "_PROBE_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(readiness, "_PROJECT_CAPABILITY_TIMEOUT_SECONDS", 0.1)
+
+    async def probe(_project_id: str, _headers: dict[str, str]) -> str:
+        await asyncio.sleep(0.01)
+        return "available"
+
+    monkeypatch.setattr(readiness, "get_changeset_creation_capability", probe)
+
+    assert (
+        await readiness.codegen_changeset_capability(
+            "demo",
+            {"X-API-Key": "proj_demo_0123456789abcdef"},
+        )
+        == "available"
+    )

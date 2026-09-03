@@ -17,6 +17,7 @@ import httpx
 from app.tools.code import get_changeset_creation_capability
 
 _PROBE_TIMEOUT_SECONDS = 2.0
+_PROJECT_CAPABILITY_TIMEOUT_SECONDS = 30.0
 
 CodegenChangesetCapability = Literal["available", "disabled", "unavailable"]
 
@@ -213,7 +214,10 @@ async def codegen_changeset_capability(
     try:
         capability = await asyncio.wait_for(
             get_changeset_creation_capability(project_id, delegated_headers),
-            timeout=_PROBE_TIMEOUT_SECONDS,
+            # The authenticated project probe attests the Docker worker and
+            # egress runtime on a cold cache. It is intentionally heavier than
+            # the lightweight service readiness probes above.
+            timeout=_PROJECT_CAPABILITY_TIMEOUT_SECONDS,
         )
     except (TimeoutError, httpx.HTTPError, RuntimeError, TypeError, ValueError):
         return "unavailable"
